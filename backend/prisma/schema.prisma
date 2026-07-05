@@ -1,0 +1,11 @@
+// Prisma 数据库结构文件，后端的数据模型会集中定义在这里。
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  // 当前先使用 SQLite，适合本地开发和快速验证。
+  provider = "sqlite"
+}

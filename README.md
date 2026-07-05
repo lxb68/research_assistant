@@ -1,36 +1,51 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Research Assistant
+
+这是一个前后端分离项目：
+
+- `frontend/`：Next.js 前端应用
+- `backend/`：独立 Node.js 后端服务
 
 ## Getting Started
 
-First, run the development server:
+启动前端：
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```powershell
+npm.cmd run frontend:dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+启动后端：
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```powershell
+npm.cmd run backend:dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+访问地址：
 
-## Learn More
+```text
+前端：http://localhost:3000
+后端：http://localhost:4000
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Project Structure
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```text
+research_agent/
+├─ frontend/       # 前端代码
+├─ backend/        # 后端代码
+├─ package.json    # 根目录调度脚本
+└─ README.md
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Scripts
 
-## Deploy on Vercel
+```powershell
+npm.cmd run frontend:dev
+npm.cmd run frontend:build
+npm.cmd run frontend:lint
+npm.cmd run backend:dev
+npm.cmd run backend:start
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Notes
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+当前后端先使用 Node.js 内置 `http` 模块提供基础接口，方便先完成前后端分离。后续可以继续升级为 Express、Fastify 或 NestJS。

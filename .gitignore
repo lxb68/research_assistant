@@ -2,6 +2,9 @@
 
 # dependencies
 /node_modules
+**/node_modules
+/.npm-cache
+**/.venv
 /.pnp
 .pnp.*
 .yarn/*
@@ -12,10 +15,14 @@
 
 # testing
 /coverage
+**/__pycache__/
+*.py[cod]
 
 # next.js
 /.next/
+/frontend/.next/
 /out/
+/frontend/out/
 
 # production
 /build
@@ -41,3 +48,9 @@ yarn-error.log*
 next-env.d.ts
 
 /app/generated/prisma
+/frontend/app/generated/prisma
+/backend/src/generated/prisma
+/backend/app/generated/prisma
+/backend/prisma/dev.db
+/backend/prisma/dev.db-journal
+/backend/storage/

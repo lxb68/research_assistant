@@ -1,30 +1,14 @@
 {
-  "name": "research_assistant",
+  "name": "research-assistant-workspace",
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "backend:dev": "npm --prefix backend run dev",
-    "backend:start": "npm --prefix backend run start",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
-  },
-  "dependencies": {
-    "@prisma/client": "^7.8.0",
-    "next": "16.2.10",
-    "prisma": "^7.8.0",
-    "react": "19.2.4",
-    "react-dom": "19.2.4"
-  },
-  "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.2.10",
-    "tailwindcss": "^4",
-    "typescript": "^5"
+    "dev": "npm run frontend:dev",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build",
+    "frontend:start": "npm --prefix frontend run start",
+    "frontend:lint": "npm --prefix frontend run lint",
+    "backend:dev": "python -m uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 4000",
+    "backend:start": "python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 4000"
   }
 }

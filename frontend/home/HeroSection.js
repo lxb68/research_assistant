@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 export default function HeroSection({ onCreateProject }) {
   return (
     <section className="hero-section">
@@ -19,15 +21,14 @@ export default function HeroSection({ onCreateProject }) {
           <button type="button" className="hero-button hero-button-primary" onClick={onCreateProject}>
             创建项目
           </button>
-          <button
-            type="button"
-            className="hero-button hero-button-secondary"
-            onClick={() => {
-              window.location.href = "/dataset-square";
-            }}
-          >
+
+          <Link className="hero-button hero-button-secondary" href="/dataset-download">
+            下载数据集
+          </Link>
+
+          <Link className="hero-button hero-button-secondary" href="/dataset-square">
             浏览数据集
-          </button>
+          </Link>
         </div>
       </div>
     </section>
