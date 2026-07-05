@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import DatasetDownloadPage from "./dataset-download/page";
-import DatasetBrowser from "@/app/dataset-browser/DatasetBrowser";
+import DatasetBrowser from "@/app/dataset-brower/DatasetBrowser";
 import HeroSection from "@/home/HeroSection";
 
 type WorkspaceView = "home" | "download" | "browse";

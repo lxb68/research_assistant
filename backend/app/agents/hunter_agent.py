@@ -11,7 +11,10 @@ import hmac
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
+import tempfile
 import time
 
 from app.core.config import settings
@@ -582,12 +585,14 @@ class HunterAgent:
             return {"deletedCount": 0, "deletedIds": []}
 
         placeholders = ", ".join("?" for _ in normalized_ids)
+        deleted_pdf_paths: list[str] = []
         with sqlite3.connect(self.metadata_db_path) as connection:
             rows = connection.execute(
-                f"SELECT id FROM papers WHERE id IN ({placeholders})",
+                f"SELECT id, pdf_path FROM papers WHERE id IN ({placeholders})",
                 normalized_ids,
             ).fetchall()
             deleted_ids = [row[0] for row in rows]
+            deleted_pdf_paths = [str(row[1] or "").strip() for row in rows if str(row[1] or "").strip()]
             if deleted_ids:
                 delete_placeholders = ", ".join("?" for _ in deleted_ids)
                 connection.execute(
@@ -597,10 +602,409 @@ class HunterAgent:
                 connection.commit()
 
         self._log(f"批量删除论文元数据：请求 {len(normalized_ids)} 条，删除 {len(deleted_ids)} 条")
+        removed_pdf_count = 0
+        for pdf_path in deleted_pdf_paths:
+            if self._delete_local_pdf_if_managed(pdf_path):
+                removed_pdf_count += 1
+
         return {
             "deletedCount": len(deleted_ids),
             "deletedIds": deleted_ids,
+            "deletedPdfCount": removed_pdf_count,
         }
+
+    def get_saved_paper(self, record_id: str) -> Paper | None:
+        """按记录 ID 读取一条已保存论文。"""
+        normalized_id = record_id.strip()
+        if not normalized_id:
+            return None
+
+        return self._find_existing_paper_by_fields(record_id=normalized_id)
+
+    def find_local_pdf_for_paper(self, paper: Paper) -> Path | None:
+        """优先用记录中的 pdfPath，失效时在 storage/papers 下回查文件。"""
+        saved_path = self._resolve_managed_pdf_path(str(paper.get("pdfPath", "")))
+        if saved_path and saved_path.exists() and saved_path.is_file():
+            return saved_path
+
+        record_id = str(paper.get("id", "")).strip().lower()
+        title_token = self._normalize_title(str(paper.get("title", "")))
+        external_id = str(paper.get("externalId") or paper.get("external_id") or "").strip().lower()
+        doi = self._normalize_identifier(str(paper.get("doi", "")))
+
+        best_match: Path | None = None
+        best_score = -1
+        for candidate in self.download_dir.rglob("*.pdf"):
+            stem = candidate.stem.lower()
+            score = 0
+            if record_id and record_id in stem:
+                score += 4
+            if external_id and external_id in stem:
+                score += 3
+            if doi and doi.replace("/", "_") in stem:
+                score += 3
+            normalized_stem = self._normalize_title(stem)
+            if title_token and normalized_stem and (title_token in normalized_stem or normalized_stem in title_token):
+                score += 2
+            if score > best_score:
+                best_score = score
+                best_match = candidate
+
+        if best_match and best_score > 0:
+            return best_match.resolve()
+        return None
+
+    def import_paper(
+        self,
+        *,
+        raw_text: str = "",
+        title: str = "",
+        authors: list[str] | None = None,
+        abstract: str = "",
+        year: str = "",
+        doi: str = "",
+        url: str = "",
+        pdf_url: str = "",
+        custom_tags: list[str] | None = None,
+    ) -> Paper:
+        """导入一条用户提供的文献记录，并尽量从原始题录文本自动解析字段。"""
+        parsed = self._parse_imported_reference(raw_text)
+        clean_tags = [tag.strip() for tag in (custom_tags or []) if tag.strip()]
+        clean_authors = [author.strip() for author in (authors or []) if author.strip()]
+
+        imported_paper: Paper = {
+            "source": "manual",
+            "title": title.strip() or str(parsed.get("title", "")),
+            "authors": clean_authors or parsed.get("authors", []),
+            "abstract": abstract.strip() or str(parsed.get("abstract", "")),
+            "year": year.strip() or str(parsed.get("year", "")),
+            "doi": doi.strip() or str(parsed.get("doi", "")),
+            "url": url.strip() or str(parsed.get("url", "")),
+            "pdfUrl": pdf_url.strip(),
+            "keyword": clean_tags[0] if clean_tags else "手动导入",
+            "customTags": clean_tags,
+            "rawImportText": raw_text.strip(),
+            "importedManually": True,
+            "relevanceScore": 0,
+            "savedAt": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if not str(imported_paper.get("title", "")).strip():
+            raise ValueError("导入文献需要标题，或提供可解析出标题的题录文本")
+
+        enriched_paper = enrich_paper_metrics(
+            imported_paper,
+            ccf_catalog=self.ccf_catalog,
+            sjr_metrics=self.sjr_metrics,
+        )
+        saved_paper = self._save_paper_to_db(enriched_paper)
+        self._log(f"手动导入论文元数据: {saved_paper.get('id')}")
+        return saved_paper
+
+    def import_pdf_paper(
+        self,
+        *,
+        pdf_bytes: bytes,
+        filename: str,
+        title: str = "",
+        authors: list[str] | None = None,
+        abstract: str = "",
+        year: str = "",
+        doi: str = "",
+        url: str = "",
+        custom_tags: list[str] | None = None,
+    ) -> Paper:
+        """导入 PDF 文件，优先用 PyMuPDF 解析，必要时尝试 MinerU 精细解析。"""
+        if not pdf_bytes:
+            raise ValueError("PDF 文件内容为空")
+        if not filename.lower().endswith(".pdf"):
+            raise ValueError("只能导入 PDF 文件")
+
+        import_dir = self.download_dir / "imports"
+        import_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(filename).name).strip("._") or "paper.pdf"
+        pdf_path = import_dir / f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{safe_name}"
+        pdf_path.write_bytes(pdf_bytes)
+
+        extracted = self._extract_pdf_text(pdf_path)
+        parsed = self._parse_pdf_metadata(extracted["text"], extracted["metadata"])
+        if extracted["parser"] == "pymupdf" and self._parsed_pdf_metadata_is_sparse(parsed):
+            self._log("PyMuPDF 瑙ｆ瀽鍑虹殑鍏冩暟鎹緝灏戯紝缁х画灏濊瘯 MinerU 瑙ｆ瀽")
+            mineru_text = self._extract_pdf_text_with_mineru(pdf_path)
+            if mineru_text:
+                parsed = self._parse_pdf_metadata(mineru_text, extracted["metadata"])
+                extracted = {
+                    **extracted,
+                    "text": mineru_text,
+                    "parser": "mineru",
+                    "warning": "PyMuPDF 鍏冩暟鎹В鏋愯緝灏戯紝宸叉敼鐢?MinerU 琛ュ厖瑙ｆ瀽",
+                }
+        clean_tags = [tag.strip() for tag in (custom_tags or []) if tag.strip()]
+        clean_authors = [author.strip() for author in (authors or []) if author.strip()]
+
+        imported_paper: Paper = {
+            "source": "manual_pdf",
+            "title": title.strip() or str(parsed.get("title", "")),
+            "authors": clean_authors or parsed.get("authors", []),
+            "abstract": abstract.strip() or str(parsed.get("abstract", "")),
+            "year": year.strip() or str(parsed.get("year", "")),
+            "doi": doi.strip() or str(parsed.get("doi", "")),
+            "venue": str(parsed.get("venue", "")),
+            "journal": str(parsed.get("journal", "")),
+            "containerTitle": str(parsed.get("containerTitle", "")),
+            "url": url.strip(),
+            "pdfPath": str(pdf_path),
+            "keyword": clean_tags[0] if clean_tags else "PDF导入",
+            "customTags": clean_tags,
+            "importedManually": True,
+            "pdfParsedBy": extracted["parser"],
+            "pdfParseWarning": extracted["warning"],
+            "pdfTextPreview": extracted["text"][:3000],
+            "relevanceScore": 0,
+            "savedAt": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if not str(imported_paper.get("title", "")).strip():
+            imported_paper["title"] = Path(filename).stem
+
+        enriched_paper = enrich_paper_metrics(
+            imported_paper,
+            ccf_catalog=self.ccf_catalog,
+            sjr_metrics=self.sjr_metrics,
+        )
+        saved_paper = self._save_paper_to_db(enriched_paper)
+        self._log(f"PDF 导入论文元数据: {saved_paper.get('id')} parser={extracted['parser']}")
+        return saved_paper
+
+    def _extract_pdf_text(self, pdf_path: Path) -> dict[str, object]:
+        """用 PyMuPDF 快速提取 PDF 文本；文本不足时尝试 MinerU。"""
+        metadata: dict[str, object] = {}
+        text = ""
+        warning = ""
+
+        try:
+            import fitz  # type: ignore[import-not-found]
+
+            with fitz.open(pdf_path) as document:
+                metadata = dict(document.metadata or {})
+                pages_text = [page.get_text("text") for page in document]
+                text = "\n".join(part.strip() for part in pages_text if part.strip())
+        except ImportError as error:
+            warning = "PyMuPDF 未安装，无法快速解析 PDF"
+            self._log(warning)
+        except Exception as error:
+            warning = f"PyMuPDF 解析失败: {error}"
+            self._log(warning)
+
+        if self._pdf_text_looks_usable(text):
+            self._log(f"metadata={metadata}, text length={len(text)}")
+            return {"text": text, "metadata": metadata, "parser": "pymupdf", "warning": warning}
+
+        mineru_text = self._extract_pdf_text_with_mineru(pdf_path)
+        if mineru_text:
+            combined_warning = warning or "PyMuPDF 提取文本较少，已使用 MinerU 精细解析"
+            self._log(f"metadata={metadata}, mineru text length={len(mineru_text)}")
+            return {"text": mineru_text, "metadata": metadata, "parser": "mineru", "warning": combined_warning}
+
+        fallback_warning = warning or "PyMuPDF 提取文本较少，且 MinerU 不可用"
+        return {"text": text, "metadata": metadata, "parser": "pymupdf", "warning": fallback_warning}
+
+    def _pdf_text_looks_usable(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text)
+        return len(compact) >= 800
+
+    def _parsed_pdf_metadata_is_sparse(self, parsed: Paper) -> bool:
+        filled_count = 0
+        for value in (
+            str(parsed.get("title", "")).strip(),
+            str(parsed.get("abstract", "")).strip(),
+            str(parsed.get("year", "")).strip(),
+            str(parsed.get("venue", "")).strip(),
+            str(parsed.get("journal", "")).strip(),
+        ):
+            if value:
+                self._log(f"PDF 元数据字段已填充: {value[:80]}")
+                filled_count += 1
+
+        authors = parsed.get("authors", [])
+        if isinstance(authors, list) and any(str(author).strip() for author in authors):
+            self._log(f"PDF 元数据字段已填充: authors={authors}")
+            filled_count += 1
+        self._log(f"PDF 元数据解析字段填充数: {filled_count}/6")
+        return filled_count < 3
+
+    def _extract_pdf_text_with_mineru(self, pdf_path: Path) -> str:
+        """如果本机安装了 MinerU/magic-pdf CLI，则调用它生成 markdown/text 后读取。"""
+        command = shutil.which("mineru") or shutil.which("magic-pdf")
+        if not command:
+            self._log("MinerU 未安装，跳过精细 PDF 解析")
+            return ""
+
+        with tempfile.TemporaryDirectory(prefix="mineru_") as output_dir:
+            candidates = [
+                [command, "-p", str(pdf_path), "-o", output_dir],
+                [command, "-i", str(pdf_path), "-o", output_dir],
+                [command, str(pdf_path), "-o", output_dir],
+            ]
+            for args in candidates:
+                try:
+                    subprocess.run(args, check=True, capture_output=True, text=True, timeout=120)
+                    output_path = Path(output_dir)
+                    text_parts = [
+                        path.read_text(encoding="utf-8", errors="ignore")
+                        for path in output_path.rglob("*")
+                        if path.suffix.lower() in {".md", ".txt"} and path.is_file()
+                    ]
+                    extracted = "\n".join(part.strip() for part in text_parts if part.strip())
+                    if extracted:
+                        return extracted
+                except Exception as error:
+                    self._log(f"MinerU 命令尝试失败 ({' '.join(args)}): {error}")
+
+        return ""
+
+    def _parse_pdf_metadata(self, text: str, metadata: dict[str, object]) -> Paper:
+        """从 PDF 文本和元数据中提取论文常见字段。"""
+        parsed = self._parse_imported_reference(text)
+        meta_title = str(metadata.get("title") or "").strip()
+        meta_author = str(metadata.get("author") or "").strip()
+        meta_subject = str(metadata.get("subject") or "").strip()
+        creation_date = str(metadata.get("creationDate") or "")
+
+        if meta_title and not self._metadata_value_is_noise(meta_title):
+            parsed["title"] = meta_title
+        if meta_author:
+            parsed["authors"] = [
+                author.strip()
+                for author in re.split(r"\s*(?:,|;|\band\b|，|、)\s*", meta_author)
+                if author.strip()
+            ]
+        if meta_subject and not parsed.get("abstract"):
+            parsed["abstract"] = meta_subject
+
+        date_year = re.search(r"(19|20)\d{2}", creation_date)
+        if date_year and not parsed.get("year"):
+            parsed["year"] = date_year.group(0)
+
+        abstract_match = re.search(
+            r"\babstract\b\s*[:.\-]?\s*(.+?)(?:\n\s*(?:keywords|introduction|1\s+introduction)\b|$)",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if abstract_match:
+            parsed["abstract"] = re.sub(r"\s+", " ", abstract_match.group(1)).strip()[:4000]
+
+        if not parsed.get("title"):
+            for line in text.splitlines()[:30]:
+                candidate = line.strip()
+                if 12 <= len(candidate) <= 220 and not re.match(r"^(abstract|keywords|doi)\b", candidate, re.I):
+                    parsed["title"] = candidate
+                    break
+
+        venue = self._extract_venue_candidate(text)
+        if venue:
+            parsed["venue"] = venue
+            parsed["containerTitle"] = venue
+            if re.search(r"\bjournal\b|transactions|letters|review\b", venue, re.IGNORECASE):
+                parsed["journal"] = venue
+
+        return parsed
+
+    def _metadata_value_is_noise(self, value: str) -> bool:
+        """判断 PDF 元数据中的标题或作者是否是无意义的占位符。"""
+        lowered = value.strip().lower()
+        return lowered in {"untitled", "unknown", "microsoft word", "pdf", "document"} or len(lowered) < 6
+
+    def _extract_venue_candidate(self, text: str) -> str:
+        """从 PDF 前部文本中粗提取会议或期刊名，用于 CCF/SJR 指标匹配。"""
+        head_text = "\n".join(text.splitlines()[:120])
+        venue_patterns = [
+            r"(?:proceedings of|in proceedings of)\s+(.{8,160})",
+            r"((?:ACM|IEEE|USENIX|AAAI|ACL|EMNLP|NeurIPS|ICML|ICLR|CVPR|ICCV|ECCV|SIGIR|KDD|WWW|CHI|SIGMOD|VLDB|ICSE|FSE|ASE|PLDI|POPL|SOSP|OSDI|NDSS|CCS|S\&P)[^\n]{0,140})",
+            r"((?:Journal|Transactions|Letters|Review) of [^\n]{6,140})",
+            r"((?:IEEE|ACM) Transactions on [^\n]{6,140})",
+        ]
+
+        for pattern in venue_patterns:
+            match = re.search(pattern, head_text, re.IGNORECASE)
+            if match:
+                candidate = re.sub(r"\s+", " ", match.group(1)).strip(" .,:;")
+                if 6 <= len(candidate) <= 180:
+                    return candidate
+        return ""
+
+    def _delete_local_pdf_if_managed(self, pdf_path: str) -> bool:
+        resolved_path = self._resolve_managed_pdf_path(pdf_path)
+        if not resolved_path or not resolved_path.exists() or not resolved_path.is_file():
+            return False
+
+        resolved_path.unlink()
+        parent = resolved_path.parent
+        if parent != self.download_dir and parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+        return True
+
+    def _resolve_managed_pdf_path(self, pdf_path: str | Path) -> Path | None:
+        """ 如果 pdf_path 在 download_dir 下，则返回绝对路径，否则返回 None。"""
+        if not pdf_path:
+            return None
+
+        try:
+            candidate = Path(pdf_path).expanduser().resolve()
+            download_root = self.download_dir.resolve()
+            candidate.relative_to(download_root)
+            self._log(f"解析本地 PDF 路径: {pdf_path} -> {candidate}")
+            return candidate
+        except Exception:
+            self._log(f"无法解析本地 PDF 路径: {pdf_path}")
+            return None
+
+    def _parse_imported_reference(self, raw_text: str) -> Paper:
+        """从粘贴的题录文本中用轻量规则提取常见字段。"""
+        text = raw_text.strip()
+        if not text:
+            return {}
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        joined = " ".join(lines)
+        parsed: Paper = {}
+
+        doi_match = re.search(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", joined, re.IGNORECASE)
+        if doi_match:
+            parsed["doi"] = doi_match.group(0).rstrip(".,;")
+
+        url_match = re.search(r"https?://\S+", joined)
+        if url_match:
+            parsed["url"] = url_match.group(0).rstrip(".,;)")
+
+        abstract_match = re.search(r"\babstract\s*[:.-]\s*(.+)$", joined, re.IGNORECASE)
+        if abstract_match:
+            parsed["abstract"] = abstract_match.group(1).strip()
+
+        year_match = re.search(r"\b(19|20)\d{2}\b", joined)
+        if year_match:
+            parsed["year"] = year_match.group(0)
+
+        title_line = ""
+        for line in lines:
+            lowered = line.lower()
+            if lowered.startswith(("doi", "http", "abstract", "keywords")):
+                continue
+            title_line = line
+            break
+        if title_line:
+            parsed["title"] = title_line.strip(" .")
+
+        if len(lines) > 1:
+            author_line = lines[1]
+            if not re.search(r"\babstract\b|\bdoi\b|https?://", author_line, re.IGNORECASE):
+                parsed["authors"] = [
+                    author.strip(" .")
+                    for author in re.split(r"\s*(?:,|;|\band\b|，|、)\s*", author_line)
+                    if author.strip(" .")
+                ]
+
+        return parsed
 
     def _find_existing_paper(self, paper: Paper) -> Paper | None:
         """根据候选论文的稳定 ID 查询数据库中是否已有记录。"""
@@ -641,6 +1045,7 @@ class HunterAgent:
         with sqlite3.connect(self.metadata_db_path) as connection:
             connection.row_factory = sqlite3.Row
             row = connection.execute(query, params).fetchone()
+            self._log(f"row={row} params={params}")
 
         if not row:
             return None

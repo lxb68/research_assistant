@@ -1,0 +1,444 @@
+"use client";
+
+import Link from "next/link";
+import { ChangeEvent, FormEvent, useEffect, useState } from "react";
+
+type SavedPaper = {
+  id?: string;
+  source?: string;
+  title?: string;
+  authors?: string[];
+  abstract?: string;
+  year?: string;
+  keyword?: string;
+  url?: string;
+  pdfUrl?: string;
+  pdfPath?: string;
+  savedAt?: string;
+  ccfLevel?: string;
+  impactFactor?: number | null;
+  metricFiltersIgnored?: boolean;
+  customTags?: string[];
+  pdfParseWarning?: string;
+};
+
+type PdfImportForm = {
+  title: string;
+  authors: string;
+  year: string;
+  abstract: string;
+  doi: string;
+  url: string;
+  tags: string;
+};
+
+type ImportStreamEvent = {
+  type: "log" | "error" | "result" | "done";
+  message?: string;
+  paper?: SavedPaper;
+};
+
+const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4000";
+
+const emptyPdfImportForm: PdfImportForm = {
+  title: "",
+  authors: "",
+  year: "",
+  abstract: "",
+  doi: "",
+  url: "",
+  tags: "",
+};
+
+function splitValues(value: string) {
+  return value
+    .split(/\s*(?:,|;|，|、)\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function uniqueValues(values: Array<string | undefined>) {
+  return Array.from(new Set(values.map((value) => value?.trim()).filter(Boolean))) as string[];
+}
+
+export default function DatasetBrowser() {
+  const [papers, setPapers] = useState<SavedPaper[]>([]);
+  const [query, setQuery] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [importOpen, setImportOpen] = useState(false);
+  const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [pdfImportForm, setPdfImportForm] = useState<PdfImportForm>(emptyPdfImportForm);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [importLogs, setImportLogs] = useState<string[]>([]);
+  const [error, setError] = useState("");
+
+  async function loadPapers(keyword = "", options: { initial?: boolean } = {}) {
+    if (!options.initial) {
+      setIsLoading(true);
+      setError("");
+    }
+
+    try {
+      const url = new URL("/api/papers", apiBaseUrl);
+      url.searchParams.set("limit", "120");
+      if (keyword.trim()) {
+        url.searchParams.set("keyword", keyword.trim());
+      }
+
+      const response = await fetch(url);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.detail || "加载本地数据集失败");
+      }
+
+      const nextPapers: SavedPaper[] = payload.papers ?? [];
+      setPapers(nextPapers);
+      setSelectedIds((currentIds) => {
+        const availableIds = new Set(nextPapers.map((paper) => paper.id).filter(Boolean));
+        return new Set(Array.from(currentIds).filter((id) => availableIds.has(id)));
+      });
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "加载本地数据集失败");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    const url = new URL("/api/papers", apiBaseUrl);
+    url.searchParams.set("limit", "120");
+
+    fetch(url)
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.detail || "加载本地数据集失败");
+        }
+        setPapers(payload.papers ?? []);
+      })
+      .catch((loadError) => {
+        setError(loadError instanceof Error ? loadError.message : "加载本地数据集失败");
+      })
+      .finally(() => {
+        setIsLoading(false);
+      });
+  }, []);
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    loadPapers(query);
+  }
+
+  function handlePdfFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    setPdfFile(file);
+  }
+
+  function togglePaperSelection(paperId: string) {
+    setSelectedIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      if (nextIds.has(paperId)) {
+        nextIds.delete(paperId);
+      } else {
+        nextIds.add(paperId);
+      }
+      return nextIds;
+    });
+  }
+
+  async function importPdfPaper(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!pdfFile || isImporting) {
+      return;
+    }
+
+    setIsImporting(true);
+    setError("");
+    setImportLogs([]);
+
+    try {
+      const formData = new FormData();
+      formData.set("file", pdfFile);
+      formData.set("title", pdfImportForm.title);
+      formData.set("authors", splitValues(pdfImportForm.authors).join(", "));
+      formData.set("abstract", pdfImportForm.abstract);
+      formData.set("year", pdfImportForm.year);
+      formData.set("doi", pdfImportForm.doi);
+      formData.set("url", pdfImportForm.url);
+      formData.set("custom_tags", splitValues(pdfImportForm.tags).join(", "));
+
+      const response = await fetch(new URL("/api/papers/import-pdf/stream", apiBaseUrl), {
+        method: "POST",
+        body: formData,
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || "导入 PDF 文献失败");
+      }
+      if (!response.body) {
+        throw new Error("后端没有返回流式进度");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let importedPaper: SavedPaper | null = null;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const text = line.trim();
+          if (!text) {
+            continue;
+          }
+
+          const eventPayload = JSON.parse(text) as ImportStreamEvent;
+          if (eventPayload.type === "log" && eventPayload.message) {
+            setImportLogs((currentLogs) => [...currentLogs, eventPayload.message!]);
+          }
+          if (eventPayload.type === "error" && eventPayload.message) {
+            throw new Error(eventPayload.message);
+          }
+          if (eventPayload.type === "result" && eventPayload.paper) {
+            importedPaper = eventPayload.paper;
+            setPapers((currentPapers) => [
+              eventPayload.paper!,
+              ...currentPapers.filter((paper) => paper.id !== eventPayload.paper!.id),
+            ]);
+          }
+        }
+      }
+
+      if (!importedPaper) {
+        throw new Error("导入结束，但没有收到论文结果");
+      }
+
+      setPdfFile(null);
+      setPdfImportForm(emptyPdfImportForm);
+      setImportOpen(false);
+    } catch (importError) {
+      setError(importError instanceof Error ? importError.message : "导入 PDF 文献失败");
+    } finally {
+      setIsImporting(false);
+    }
+  }
+
+  async function deleteSelectedPapers() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0 || isDeleting) {
+      return;
+    }
+
+    if (!window.confirm(`确定删除选中的 ${ids.length} 条记录吗？`)) {
+      return;
+    }
+
+    setIsDeleting(true);
+    setError("");
+
+    try {
+      const response = await fetch(new URL("/api/papers/delete", apiBaseUrl), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ ids }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.detail || "删除所选记录失败");
+      }
+
+      const deletedIds = new Set<string>(payload.deletedIds ?? ids);
+      setPapers((currentPapers) => currentPapers.filter((paper) => !paper.id || !deletedIds.has(paper.id)));
+      setSelectedIds(new Set());
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "删除所选记录失败");
+    } finally {
+      setIsDeleting(false);
+    }
+  }
+
+  return (
+    <main className="dataset-browser-page">
+      <section className="dataset-browser-panel">
+        <form className="dataset-browser-toolbar" onSubmit={handleSubmit}>
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="按关键词或标题筛选" />
+          <button type="submit" disabled={isLoading}>
+            {isLoading ? "加载中" : "筛选"}
+          </button>
+          <button type="button" onClick={() => setImportOpen((open) => !open)}>
+            {importOpen ? "收起导入" : "导入 PDF"}
+          </button>
+          <button
+            type="button"
+            className="dataset-browser-delete-button"
+            disabled={selectedIds.size === 0 || isDeleting}
+            onClick={deleteSelectedPapers}
+          >
+            {isDeleting ? "删除中" : selectedIds.size > 0 ? `删除 (${selectedIds.size})` : "删除"}
+          </button>
+        </form>
+
+        {importOpen && (
+          <form className="dataset-import-panel" onSubmit={importPdfPaper}>
+            <label className="dataset-import-wide">
+              <span>PDF 文件</span>
+              <input type="file" accept="application/pdf,.pdf" onChange={handlePdfFileChange} />
+            </label>
+            <label>
+              <span>标题</span>
+              <input
+                value={pdfImportForm.title}
+                onChange={(event) => setPdfImportForm((form) => ({ ...form, title: event.target.value }))}
+                placeholder="留空则自动解析"
+              />
+            </label>
+            <label>
+              <span>作者</span>
+              <input
+                value={pdfImportForm.authors}
+                onChange={(event) => setPdfImportForm((form) => ({ ...form, authors: event.target.value }))}
+                placeholder="多个作者用逗号分隔，留空则自动解析"
+              />
+            </label>
+            <label>
+              <span>年份</span>
+              <input
+                value={pdfImportForm.year}
+                onChange={(event) => setPdfImportForm((form) => ({ ...form, year: event.target.value }))}
+                placeholder="留空则自动解析"
+              />
+            </label>
+            <label>
+              <span>自定义标签</span>
+              <input
+                value={pdfImportForm.tags}
+                onChange={(event) => setPdfImportForm((form) => ({ ...form, tags: event.target.value }))}
+                placeholder="例如 大模型, 医疗, CCF B"
+              />
+            </label>
+            <label>
+              <span>DOI</span>
+              <input
+                value={pdfImportForm.doi}
+                onChange={(event) => setPdfImportForm((form) => ({ ...form, doi: event.target.value }))}
+                placeholder="留空则自动解析"
+              />
+            </label>
+            <label>
+              <span>原文链接</span>
+              <input
+                value={pdfImportForm.url}
+                onChange={(event) => setPdfImportForm((form) => ({ ...form, url: event.target.value }))}
+              />
+            </label>
+            <label className="dataset-import-wide">
+              <span>摘要</span>
+              <textarea
+                value={pdfImportForm.abstract}
+                onChange={(event) => setPdfImportForm((form) => ({ ...form, abstract: event.target.value }))}
+                placeholder="留空则尝试从 PDF 的 Abstract 段落自动解析"
+              />
+            </label>
+            <div className="dataset-import-actions">
+              <span>{pdfFile ? pdfFile.name : "后端会流式返回解析进度，优先使用 PyMuPDF，复杂 PDF 再尝试 MinerU。"}</span>
+              <button type="submit" disabled={!pdfFile || isImporting}>
+                {isImporting ? "解析导入中" : "保存导入"}
+              </button>
+            </div>
+            {importLogs.length > 0 && (
+              <div className="dataset-import-log">
+                {importLogs.map((log, index) => (
+                  <p key={`import-log-${index}`}>{log}</p>
+                ))}
+              </div>
+            )}
+          </form>
+        )}
+
+        {error && <div className="dataset-browser-error">{error}</div>}
+
+        {!error && isLoading ? (
+          <div className="dataset-browser-empty">
+            <strong>正在加载数据集</strong>
+            <span>正在读取本地论文元数据。</span>
+          </div>
+        ) : !error && papers.length === 0 ? (
+          <div className="dataset-browser-empty">
+            <strong>暂无已保存论文</strong>
+            <span>可以先下载数据集，或在这里导入 PDF 文献。</span>
+          </div>
+        ) : (
+          <div className="dataset-card-grid">
+            {papers.map((paper, index) => {
+              const paperId = paper.id || "";
+              const isSelected = paperId ? selectedIds.has(paperId) : false;
+              const labels = uniqueValues([paper.source, paper.year, paper.keyword, ...(paper.customTags ?? [])]);
+              const sourceHref = paperId
+                ? `/dataset-brower/view/${encodeURIComponent(paperId)}`
+                : paper.url || "";
+
+              return (
+                <article
+                  className={`dataset-card${isSelected ? " dataset-card-selected" : ""}`}
+                  key={paper.id || `${paper.title}-${index}`}
+                >
+                  <div className="dataset-card-meta">
+                    {paperId && (
+                      <label className="dataset-card-select">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          disabled={isDeleting}
+                          onChange={() => togglePaperSelection(paperId)}
+                        />
+                        <span>选择</span>
+                      </label>
+                    )}
+                    {labels.map((label) => (
+                      <span key={`${paperId}-${label}`}>{label}</span>
+                    ))}
+                    {!paper.metricFiltersIgnored && paper.ccfLevel && <span>CCF {paper.ccfLevel}</span>}
+                    {!paper.metricFiltersIgnored &&
+                      paper.impactFactor !== undefined &&
+                      paper.impactFactor !== null && <span>IF {paper.impactFactor}</span>}
+                    <span className={paper.pdfPath ? "dataset-pdf-ready" : "dataset-pdf-missing"}>
+                      {paper.pdfPath ? "PDF 已导入" : "缺少 PDF"}
+                    </span>
+                  </div>
+                  <h2>{paper.title || "未命名论文"}</h2>
+                  {paper.authors && paper.authors.length > 0 && (
+                    <p className="dataset-card-authors">{paper.authors.slice(0, 4).join(", ")}</p>
+                  )}
+                  {paper.abstract && <p className="dataset-card-abstract">{paper.abstract}</p>}
+                  {paper.pdfParseWarning && <p className="dataset-card-warning">{paper.pdfParseWarning}</p>}
+                  <div className="dataset-card-actions">
+                    {sourceHref &&
+                      (paperId ? (
+                        <Link href={sourceHref}>查看原文</Link>
+                      ) : (
+                        <a href={sourceHref} target="_blank" rel="noreferrer">
+                          查看原文
+                        </a>
+                      ))}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}

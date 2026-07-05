@@ -3,9 +3,9 @@ import queue
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.agents import HunterAgent
@@ -39,6 +39,20 @@ class DeletePapersRequest(BaseModel):
     """批量删除已保存论文元数据记录。"""
 
     ids: list[str] = Field(..., min_length=1, max_length=500, description="论文记录 ID 列表")
+
+
+class ImportPaperRequest(BaseModel):
+    """手动导入论文元数据。"""
+
+    raw_text: str = Field("", description="粘贴的题录、DOI 或摘要文本")
+    title: str = Field("", description="论文标题")
+    authors: list[str] = Field(default_factory=list, description="作者列表")
+    abstract: str = Field("", description="论文摘要")
+    year: str = Field("", description="年份")
+    doi: str = Field("", description="DOI")
+    url: str = Field("", description="原文链接")
+    pdf_url: str = Field("", description="PDF 链接")
+    custom_tags: list[str] = Field(default_factory=list, description="用户自定义标签")
 
 
 app = FastAPI(
@@ -257,6 +271,23 @@ def list_papers(
         raise HTTPException(status_code=502, detail=str(error)) from error
 
 
+@app.get("/api/papers/{record_id}")
+def get_paper(record_id: str) -> dict:
+    """返回单篇已保存论文元数据。"""
+    try:
+        agent = HunterAgent()
+        paper = agent.get_saved_paper(record_id)
+        if not paper:
+            raise HTTPException(status_code=404, detail="论文记录不存在")
+        return {
+            "paper": paper,
+        }
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
 @app.post("/api/papers/delete")
 def delete_papers(payload: DeletePapersRequest) -> dict:
     """批量删除已保存论文元数据记录，不删除本地 PDF 文件。"""
@@ -268,3 +299,195 @@ def delete_papers(payload: DeletePapersRequest) -> dict:
         }
     except Exception as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.get("/api/papers/{record_id}/pdf")
+def get_paper_pdf(record_id: str) -> FileResponse:
+    """读取已保存论文绑定的本地 PDF 文件。"""
+    try:
+        agent = HunterAgent()
+        paper = agent.get_saved_paper(record_id)
+        if not paper:
+            raise HTTPException(status_code=404, detail="论文记录不存在")
+
+        pdf_path = agent.find_local_pdf_for_paper(paper)
+        if not pdf_path or not pdf_path.exists() or not pdf_path.is_file() or pdf_path.suffix.lower() != ".pdf":
+            raise HTTPException(status_code=404, detail="本地 PDF 文件不存在")
+
+        return FileResponse(
+            pdf_path,
+            media_type="application/pdf",
+            filename=pdf_path.name,
+            content_disposition_type="inline",
+        )
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.get("/api/papers/{record_id}/open", response_model=None)
+def open_paper_source(record_id: str):
+    """优先打开本地 PDF；没有本地 PDF 时打开外部原文 URL。"""
+    try:
+        agent = HunterAgent()
+        paper = agent.get_saved_paper(record_id)
+        if not paper:
+            raise HTTPException(status_code=404, detail="论文记录不存在")
+
+        pdf_path = agent.find_local_pdf_for_paper(paper)
+        if pdf_path and pdf_path.exists() and pdf_path.is_file() and pdf_path.suffix.lower() == ".pdf":
+            return FileResponse(
+                pdf_path,
+                media_type="application/pdf",
+                filename=pdf_path.name,
+                content_disposition_type="inline",
+            )
+
+        external_url = str(paper.get("url", "")).strip()
+        if external_url:
+            return RedirectResponse(external_url, status_code=307)
+
+        raise HTTPException(status_code=404, detail="没有可打开的本地 PDF 或外部原文链接")
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.post("/api/papers/import")
+def import_paper(payload: ImportPaperRequest) -> dict:
+    """手动导入一条论文元数据记录，支持从题录文本自动解析常见字段。"""
+    try:
+        agent = HunterAgent()
+        paper = agent.import_paper(
+            raw_text=payload.raw_text,
+            title=payload.title,
+            authors=payload.authors,
+            abstract=payload.abstract,
+            year=payload.year,
+            doi=payload.doi,
+            url=payload.url,
+            pdf_url=payload.pdf_url,
+            custom_tags=payload.custom_tags,
+        )
+        return {
+            "status": "ok",
+            "paper": paper,
+        }
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.post("/api/papers/import-pdf")
+async def import_pdf_paper(
+    file: UploadFile = File(..., description="文献 PDF 文件"),
+    title: str = Form("", description="手动覆盖标题"),
+    authors: str = Form("", description="作者，多个作者用逗号分隔"),
+    abstract: str = Form("", description="手动覆盖摘要"),
+    year: str = Form("", description="手动覆盖年份"),
+    doi: str = Form("", description="手动覆盖 DOI"),
+    url: str = Form("", description="原文链接"),
+    custom_tags: str = Form("", description="自定义标签，多个标签用逗号分隔"),
+) -> dict:
+    """导入 PDF 文献，优先 PyMuPDF 自动解析，复杂 PDF 尝试 MinerU。"""
+    try:
+        content = await file.read()
+        agent = HunterAgent()
+        paper = agent.import_pdf_paper(
+            pdf_bytes=content,
+            filename=file.filename or "paper.pdf",
+            title=title,
+            authors=[author.strip() for author in re_split_values(authors)],
+            abstract=abstract,
+            year=year,
+            doi=doi,
+            url=url,
+            custom_tags=[tag.strip() for tag in re_split_values(custom_tags)],
+        )
+        return {
+            "status": "ok",
+            "paper": paper,
+        }
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.post("/api/papers/import-pdf/stream")
+async def import_pdf_paper_stream(
+    file: UploadFile = File(..., description="文献 PDF 文件"),
+    title: str = Form("", description="手动覆盖标题"),
+    authors: str = Form("", description="作者，多个作者用逗号分隔"),
+    abstract: str = Form("", description="手动覆盖摘要"),
+    year: str = Form("", description="手动覆盖年份"),
+    doi: str = Form("", description="手动覆盖 DOI"),
+    url: str = Form("", description="原文链接"),
+    custom_tags: str = Form("", description="自定义标签，多个标签用逗号分隔"),
+) -> StreamingResponse:
+    """流式导入 PDF 文献，逐条返回后端解析进展。"""
+    content = await file.read()
+    filename = file.filename or "paper.pdf"
+
+    def encode_event(event: dict) -> str:
+        return json.dumps(event, ensure_ascii=False) + "\n"
+
+    def event_stream():
+        events: queue.Queue[dict] = queue.Queue()
+
+        def push_log(message: str) -> None:
+            events.put({"type": "log", "message": message})
+
+        def run_import() -> None:
+            try:
+                push_log(f"已接收 PDF 文件：{filename}，大小 {len(content)} bytes")
+                push_log("开始解析 PDF：优先使用 PyMuPDF，必要时尝试 MinerU")
+                agent = HunterAgent(log_callback=push_log)
+                paper = agent.import_pdf_paper(
+                    pdf_bytes=content,
+                    filename=filename,
+                    title=title,
+                    authors=[author.strip() for author in re_split_values(authors)],
+                    abstract=abstract,
+                    year=year,
+                    doi=doi,
+                    url=url,
+                    custom_tags=[tag.strip() for tag in re_split_values(custom_tags)],
+                )
+                events.put({"type": "result", "paper": paper})
+                push_log("PDF 导入完成，已保存到本地数据集")
+            except ValueError as error:
+                events.put({"type": "error", "message": str(error)})
+            except Exception as error:
+                events.put({"type": "error", "message": str(error)})
+            finally:
+                events.put({"type": "done"})
+
+        worker = threading.Thread(target=run_import, daemon=True)
+        worker.start()
+
+        while True:
+            event = events.get()
+            yield encode_event(event)
+            if event.get("type") == "done":
+                break
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def re_split_values(value: str) -> list[str]:
+    separators = [",", ";", "，", "、"]
+    values = [value]
+    for separator in separators:
+        values = [part for item in values for part in item.split(separator)]
+    return [part.strip() for part in values if part.strip()]
