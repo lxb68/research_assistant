@@ -1,2 +1,5 @@
 fastapi>=0.116,<1.0
+googletrans==4.0.0rc1
+requests>=2.34,<3.0
+translators>=6.0,<7.0
 uvicorn[standard]>=0.35,<1.0

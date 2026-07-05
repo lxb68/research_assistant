@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import ThemeRegistry from "../components/ThemeRegistry";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -16,7 +17,9 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       {/* 所有页面都会渲染到 body 中，这里保留最轻量的全局布局。 */}
-      <body>{children}</body>
+      <body>
+        <ThemeRegistry>{children}</ThemeRegistry>
+      </body>
     </html>
   );
 }

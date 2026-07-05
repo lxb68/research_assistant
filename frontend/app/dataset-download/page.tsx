@@ -165,7 +165,15 @@ function getProgressVisual(state: SourceState) {
   }
 }
 
-export default function DatasetDownloadPage() {
+type DatasetDownloadPageProps = {
+  embedded?: boolean;
+  onBackHome?: () => void;
+};
+
+export default function DatasetDownloadPage({
+  embedded = false,
+  onBackHome,
+}: DatasetDownloadPageProps = {}) {
   const [query, setQuery] = useState("");
   const [selectedSources, setSelectedSources] = useState<PaperSource[]>(defaultSelectedSources);
   const [limitPerSource, setLimitPerSource] = useState(10);
@@ -613,7 +621,7 @@ export default function DatasetDownloadPage() {
     <Box
       component="main"
       sx={{
-        minHeight: "100vh",
+        minHeight: embedded ? "calc(100vh - 64px)" : "100vh",
         position: "relative",
         overflow: "hidden",
         background: `
@@ -655,24 +663,50 @@ export default function DatasetDownloadPage() {
 
       <Container maxWidth="lg" sx={{ position: "relative", zIndex: 1, py: { xs: 4, md: 7 } }}>
         <Stack spacing={4}>
-          <Box>
-            <Box
-              component={Link}
-              href="/"
-              sx={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 1,
-                color: "#60a5fa",
-                fontWeight: 700,
-                textDecoration: "none",
-                mb: 5,
-              }}
-            >
-              <ArrowBackIcon fontSize="small" />
-              返回主页
+          {!embedded && (
+            <Box>
+              <Box
+                component={Link}
+                href="/"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 1,
+                  color: "#60a5fa",
+                  fontWeight: 700,
+                  textDecoration: "none",
+                  mb: 5,
+                }}
+              >
+                <ArrowBackIcon fontSize="small" />
+                返回主页
+              </Box>
             </Box>
-          </Box>
+          )}
+          {embedded && onBackHome && (
+            <Box>
+              <Box
+                component="button"
+                type="button"
+                onClick={onBackHome}
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 1,
+                  border: 0,
+                  background: "transparent",
+                  color: "#60a5fa",
+                  cursor: "pointer",
+                  font: "inherit",
+                  fontWeight: 700,
+                  mb: 1,
+                }}
+              >
+                <ArrowBackIcon fontSize="small" />
+                返回主页
+              </Box>
+            </Box>
+          )}
 
           <Paper
             component="form"
@@ -692,7 +726,7 @@ export default function DatasetDownloadPage() {
               label="搜索关键词"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="例如 large language model"
+              placeholder="large language model"
               fullWidth
               sx={darkTextFieldSx}
               slotProps={{
@@ -921,7 +955,7 @@ export default function DatasetDownloadPage() {
             <Typography sx={{ mt: 1.5, color: "rgba(203, 213, 225, 0.84)", lineHeight: 1.7 }}>
               当前数据源：{selectedSourceText || "未选择"}。点击搜索后，HunterAgent 会优先检索已出版来源
               {selectedPublishedSources.length > 0 ? `（${selectedPublishedSources.map(getSourceLabel).join(" / ")}）` : ""}
-              并应用 CCF/影响因子条件；arXiv 是预印本来源，CCF 与影响因子条件不用于 arXiv 结果，仅在已出版来源不足时作为补充。
+              并应用 CCF/影响因子条件。
             </Typography>
             {selectedArxiv && (
               <Alert
@@ -1194,7 +1228,9 @@ export default function DatasetDownloadPage() {
                             sx={{ borderColor: "rgba(148, 163, 184, 0.28)", color: "#cbd5e1" }}
                           />
                         )}
-                        {paper.impactFactor !== undefined && paper.impactFactor !== null && (
+                        {!paper.metricFiltersIgnored &&
+                          paper.impactFactor !== undefined &&
+                          paper.impactFactor !== null && (
                           <Chip
                             size="small"
                             label={`IF ${paper.impactFactor}`}
@@ -1202,7 +1238,7 @@ export default function DatasetDownloadPage() {
                             sx={{ borderColor: "rgba(52, 211, 153, 0.38)", color: "#a7f3d0" }}
                           />
                         )}
-                        {paper.ccfLevel && (
+                        {!paper.metricFiltersIgnored && paper.ccfLevel && (
                           <Chip
                             size="small"
                             label={`CCF ${paper.ccfLevel}`}

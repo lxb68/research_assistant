@@ -1,8 +1,6 @@
 "use client";
 
-import Link from "next/link";
-
-export default function HeroSection({ onCreateProject }) {
+export default function HeroSection({ onCreateProject, onOpenDownload, onOpenBrowse }) {
   return (
     <section className="hero-section">
       {/* 背景装饰层：只负责视觉氛围，不承载交互内容。 */}
@@ -22,13 +20,13 @@ export default function HeroSection({ onCreateProject }) {
             创建项目
           </button>
 
-          <Link className="hero-button hero-button-secondary" href="/dataset-download">
+          <button type="button" className="hero-button hero-button-secondary" onClick={onOpenDownload}>
             下载数据集
-          </Link>
+          </button>
 
-          <Link className="hero-button hero-button-secondary" href="/dataset-square">
+          <button type="button" className="hero-button hero-button-secondary" onClick={onOpenBrowse}>
             浏览数据集
-          </Link>
+          </button>
         </div>
       </div>
     </section>

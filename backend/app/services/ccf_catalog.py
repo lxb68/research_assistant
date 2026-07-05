@@ -55,7 +55,10 @@ class CcfCatalog:
                 normalized_candidate = self._normalize(candidate)
                 if not normalized_candidate:
                     continue
-                if normalized_candidate in normalized_text and len(normalized_candidate) > best_length:
+                if self._contains_normalized_phrase(
+                    normalized_text,
+                    normalized_candidate,
+                ) and len(normalized_candidate) > best_length:
                     best_match = {
                         "ccfLevel": level,
                         "ccfSource": item_type,
@@ -217,3 +220,6 @@ class CcfCatalog:
 
     def _normalize(self, value: str) -> str:
         return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+    def _contains_normalized_phrase(self, text: str, phrase: str) -> bool:
+        return f" {phrase} " in f" {text} "

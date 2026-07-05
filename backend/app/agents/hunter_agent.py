@@ -7,9 +7,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import hashlib
+import hmac
 import json
+import os
 import re
 import sqlite3
+import time
 
 from app.core.config import settings
 from app.services.ccf_catalog import CcfCatalog
@@ -18,6 +21,7 @@ from app.services.providers.arxiv import ARXIV_API_URL
 from app.services.providers.ieee import IEEE_API_URL
 from app.services.sjr_metrics import SjrMetrics
 from app.services.venue_metrics import enrich_paper_metrics
+import requests
 
 
 Paper = dict[str, object]
@@ -27,15 +31,6 @@ MAX_SEARCH_ROUNDS = 5
 
 class HunterAgent:
     """论文搜索采集 Agent：搜索、去重、排序、下载 PDF，并保存元数据。"""
-
-    keyword_aliases = {
-        "大模型": "large language model",
-        "大型语言模型": "large language model",
-        "语言模型": "language model",
-        "生成式人工智能": "generative artificial intelligence",
-        "生成式ai": "generative ai",
-    }
-
     def __init__(
         self,
         *,
@@ -56,6 +51,8 @@ class HunterAgent:
         self.log_callback = log_callback
         self.ccf_catalog = CcfCatalog()
         self.sjr_metrics = SjrMetrics()
+        self.translator = None
+        self.translation_cache: dict[str, str] = {}
 
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -193,7 +190,10 @@ class HunterAgent:
                         f"[{source}] 已存在且本地 PDF 可用，复用论文 "
                         f"{source_target_index}/{target_per_source}: {title}"
                     )
-                    saved_papers.append({**existing_paper, "reusedFromDatabase": True})
+                    reused_paper = {**existing_paper, "reusedFromDatabase": True}
+                    if source == "arxiv":
+                        reused_paper = self._clear_preprint_metrics(reused_paper)
+                    saved_papers.append(reused_paper)
                     saved_keys.add(paper_key)
                     saved_counts_by_source[source] = saved_counts_by_source.get(source, 0) + 1
                     continue
@@ -359,6 +359,12 @@ class HunterAgent:
             filtered.append(
                 {
                     **paper,
+                    "impactFactor": None if is_preprint_source else paper.get("impactFactor"),
+                    "sjr": None if is_preprint_source else paper.get("sjr"),
+                    "metricSource": "" if is_preprint_source else paper.get("metricSource", ""),
+                    "ccfLevel": "" if is_preprint_source else paper.get("ccfLevel", ""),
+                    "ccfSource": "" if is_preprint_source else paper.get("ccfSource", ""),
+                    "ccfMatchedName": "" if is_preprint_source else paper.get("ccfMatchedName", ""),
                     "relevanceScore": round(relevance_score, 3),
                     "preprintSource": is_preprint_source,
                     "metricFiltersIgnored": is_preprint_source,
@@ -544,6 +550,58 @@ class HunterAgent:
             "removedRecords": removed_records,
         }
 
+    def list_saved_papers(self, *, limit: int = 100, keyword: str | None = None) -> list[Paper]:
+        """读取已保存的论文元数据，用于前端浏览本地数据集。"""
+        clauses: list[str] = []
+        params: list[object] = []
+
+        if keyword:
+            clauses.append("(keyword LIKE ? OR title LIKE ?)")
+            keyword_pattern = f"%{keyword}%"
+            params.extend([keyword_pattern, keyword_pattern])
+
+        query = (
+            "SELECT id, source, title, doi, external_id, url, pdf_url, pdf_path, keyword, "
+            "relevance_score, metadata_json, saved_at FROM papers"
+        )
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY saved_at DESC LIMIT ?"
+        params.append(max(1, min(limit, 500)))
+
+        with sqlite3.connect(self.metadata_db_path) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(query, params).fetchall()
+
+        return [self._row_to_paper(row) for row in rows]
+
+    def delete_saved_papers(self, ids: list[str]) -> dict:
+        """按论文记录 ID 批量删除已保存的元数据记录，不删除本地 PDF 文件。"""
+        normalized_ids = sorted({str(record_id).strip() for record_id in ids if str(record_id).strip()})
+        if not normalized_ids:
+            return {"deletedCount": 0, "deletedIds": []}
+
+        placeholders = ", ".join("?" for _ in normalized_ids)
+        with sqlite3.connect(self.metadata_db_path) as connection:
+            rows = connection.execute(
+                f"SELECT id FROM papers WHERE id IN ({placeholders})",
+                normalized_ids,
+            ).fetchall()
+            deleted_ids = [row[0] for row in rows]
+            if deleted_ids:
+                delete_placeholders = ", ".join("?" for _ in deleted_ids)
+                connection.execute(
+                    f"DELETE FROM papers WHERE id IN ({delete_placeholders})",
+                    deleted_ids,
+                )
+                connection.commit()
+
+        self._log(f"批量删除论文元数据：请求 {len(normalized_ids)} 条，删除 {len(deleted_ids)} 条")
+        return {
+            "deletedCount": len(deleted_ids),
+            "deletedIds": deleted_ids,
+        }
+
     def _find_existing_paper(self, paper: Paper) -> Paper | None:
         """根据候选论文的稳定 ID 查询数据库中是否已有记录。"""
         record_id = self._build_record_id(paper)
@@ -719,6 +777,19 @@ class HunterAgent:
 
         return safe_paper
 
+    def _clear_preprint_metrics(self, paper: Paper) -> Paper:
+        return {
+            **paper,
+            "impactFactor": None,
+            "sjr": None,
+            "metricSource": "",
+            "ccfLevel": "",
+            "ccfSource": "",
+            "ccfMatchedName": "",
+            "preprintSource": True,
+            "metricFiltersIgnored": True,
+        }
+
     def _extract_arxiv_id(self, value: str) -> str:
         """从 arXiv URL 或 ID 中提取稳定编号。"""
         match = re.search(r"(\d{4}\.\d{4,5})(v\d+)?", value)
@@ -744,10 +815,213 @@ class HunterAgent:
             if len(token) >= 2
         ]
 
+
+    def _translate_tencent_cloud(self, text: str, timeout: int = 10) -> str | None:
+        secret_id = settings.tencent_translation_secret_id
+        secret_key = settings.tencent_translation_secret_key
+        if not secret_id or not secret_key:
+            self._log("腾讯云翻译跳过：未配置 TENCENTCLOUD_SECRET_ID/TENCENTCLOUD_SECRET_KEY")
+            return None
+
+        host = "tmt.tencentcloudapi.com"
+        action = "TextTranslate"
+        version = "2018-03-21"
+        service = "tmt"
+        timestamp = int(time.time())
+        date = datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d")
+        payload = json.dumps(
+            {
+                "SourceText": text,
+                "Source": "zh",
+                "Target": "en",
+                "ProjectId": 0,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        canonical_headers = (
+            "content-type:application/json; charset=utf-8\n"
+            f"host:{host}\n"
+            f"x-tc-action:{action.lower()}\n"
+        )
+        signed_headers = "content-type;host;x-tc-action"
+        canonical_request = "\n".join(
+            [
+                "POST",
+                "/",
+                "",
+                canonical_headers,
+                signed_headers,
+                hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            ],
+        )
+        credential_scope = f"{date}/{service}/tc3_request"
+        string_to_sign = "\n".join(
+            [
+                "TC3-HMAC-SHA256",
+                str(timestamp),
+                credential_scope,
+                hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
+            ],
+        )
+        secret_date = hmac.new(
+            f"TC3{secret_key}".encode("utf-8"),
+            date.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        secret_service = hmac.new(secret_date, service.encode("utf-8"), hashlib.sha256).digest()
+        secret_signing = hmac.new(secret_service, b"tc3_request", hashlib.sha256).digest()
+        signature = hmac.new(
+            secret_signing,
+            string_to_sign.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        authorization = (
+            "TC3-HMAC-SHA256 "
+            f"Credential={secret_id}/{credential_scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}"
+        )
+        request = Request(
+            f"https://{host}",
+            data=payload.encode("utf-8"),
+            headers={
+                "Authorization": authorization,
+                "Content-Type": "application/json; charset=utf-8",
+                "Host": host,
+                "X-TC-Action": action,
+                "X-TC-Version": version,
+                "X-TC-Timestamp": str(timestamp),
+                "X-TC-Region": settings.tencent_translation_region,
+            },
+        )
+
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except Exception as error:
+            self._log(f"腾讯云翻译失败: {error}")
+            return None
+
+        response_data = data.get("Response", {})
+        error_data = response_data.get("Error")
+        if error_data:
+            self._log(f"腾讯云翻译失败: {error_data.get('Code', '')} {error_data.get('Message', '')}")
+            return None
+
+        translated = str(response_data.get("TargetText", "")).strip()
+        if not translated:
+            self._log(f"腾讯云翻译失败：响应格式异常 {data}")
+            return None
+
+        self._log(f"腾讯云翻译结果: {text} -> {translated}")
+        return translated
+
+    # 在线翻译方案
+    def _translate_online(self, text: str,timeout: int = 10) -> str | None:
+        try:
+            if self.translator is None:
+                os.environ.setdefault("translators_default_region", "CN")
+                import translators as ts
+
+                self.translator = ts
+            result = self.translator.translate_text(text, from_language='zh', to_language='en',timeout=timeout)
+        
+            self._log(f"在线翻译结果: {text} -> {result}")
+            return result
+        except Exception as e:
+            # 记录日志，返回 None
+            self._log(f"在线翻译失败: {e}")
+            return None
+    
+    def _translate_with_llm(self, text: str) -> str | None:
+        if not settings.llm_translation_api_key:
+            self._log("大模型翻译跳过：未配置 LLM_TRANSLATION_API_KEY 或 OPENAI_API_KEY")
+            return None
+
+        payload = {
+            "model": settings.llm_translation_model,
+            "temperature": 0,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Translate Chinese academic search keywords into concise English. "
+                        "Return only the translated query, with no explanation."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+        }
+        request = Request(
+            f"{settings.llm_translation_base_url}/chat/completions",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {settings.llm_translation_api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+
+        try:
+            with urlopen(request, timeout=settings.request_timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except Exception as error:
+            self._log(f"大模型翻译失败: {error}")
+            return None
+
+        try:
+            translated = str(data["choices"][0]["message"]["content"]).strip()
+        except (KeyError, IndexError, TypeError):
+            self._log(f"大模型翻译失败：响应格式异常 {data}")
+            return None
+
+        translated = translated.strip("\"'` \n\r\t")
+        if not translated:
+            self._log("大模型翻译失败：返回内容为空")
+            return None
+
+        self._log(f"大模型翻译结果: {text} -> {translated}")
+        return translated
+
+    def _is_chinese(self, text: str) -> bool:
+        return any('\u4e00' <= ch <= '\u9fff' for ch in text)
+
     def _expand_keyword(self, keyword: str) -> str:
-        """把常见中文关键词扩展为英文检索词，提高英文论文源命中率。"""
         normalized = keyword.strip().lower()
-        return self.keyword_aliases.get(normalized, keyword)
+
+        # 1. 若不包含中文，直接返回原词
+        if not self._is_chinese(normalized):
+            return keyword
+
+        # 2. 查询缓存
+        if normalized in self.translation_cache:
+            self._log(f"使用缓存翻译: {normalized} -> {self.translation_cache[normalized]}")
+            return self.translation_cache[normalized]
+
+        # 3. 尝试在线翻译
+        translated = self._translate_tencent_cloud(normalized, timeout=settings.request_timeout)
+        if translated:
+            self.translation_cache[normalized] = translated
+            self._log(f"腾讯云翻译成功: {normalized} -> {translated}")
+            return translated
+
+        # 4. 尝试大模型翻译
+        translated = self._translate_with_llm(normalized)
+        if translated:
+            self.translation_cache[normalized] = translated
+            self._log(f"大模型翻译成功: {normalized} -> {translated}")
+            return translated
+        
+        # 5.使用在线翻译托底
+        translated = self._translate_online(normalized, timeout=settings.request_timeout)
+        if translated:
+            self.translation_cache[normalized] = translated
+            self._log(f"在线翻译成功: {normalized} -> {translated}")
+            return translated
+
+        # 5. 全部失败，返回原词
+        self._log(f"翻译失败，使用原词: {normalized}")
+        return keyword
 
     def _log(self, message: str) -> None:
         """输出 HunterAgent 状态到后端终端，同时返回给前端。"""

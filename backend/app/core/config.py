@@ -46,6 +46,32 @@ class Settings:
     ncbi_email = os.getenv("NCBI_EMAIL", "")
     ieee_api_key = os.getenv("IEEE_API_KEY", "")
     semantic_scholar_api_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
+    tencent_translation_secret_id = (
+        os.getenv("TENCENT_TRANSLATION_SECRET_ID")
+        or os.getenv("TENCENTCLOUD_SECRET_ID")
+        or ""
+    )
+    tencent_translation_secret_key = (
+        os.getenv("TENCENT_TRANSLATION_SECRET_KEY")
+        or os.getenv("TENCENTCLOUD_SECRET_KEY")
+        or ""
+    )
+    tencent_translation_region = (
+        os.getenv("TENCENT_TRANSLATION_REGION")
+        or os.getenv("TENCENTCLOUD_REGION")
+        or "ap-guangzhou"
+    )
+    llm_translation_api_key = os.getenv("LLM_TRANSLATION_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+    llm_translation_base_url = (
+        os.getenv("LLM_TRANSLATION_BASE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+        or "https://api.openai.com/v1"
+    ).rstrip("/")
+    llm_translation_model = (
+        os.getenv("LLM_TRANSLATION_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    )
     request_timeout = int(os.getenv("REQUEST_TIMEOUT", "15"))
     hunter_download_dir = os.getenv("HUNTER_DOWNLOAD_DIR") or str(
         BACKEND_DIR / "storage" / "papers",

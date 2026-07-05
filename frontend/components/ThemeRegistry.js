@@ -1,9 +1,52 @@
-/**
- * 预留的主题注册组件。
- *
- * 当前项目尚未安装 MUI、next-themes 等主题依赖，所以先保持为轻量包裹组件。
- * 后续如果接入完整主题系统，可以在这里统一放置 ThemeProvider。
- */
+"use client";
+
+import createCache from "@emotion/cache";
+import { CacheProvider } from "@emotion/react";
+import { useServerInsertedHTML } from "next/navigation";
+import { useState } from "react";
+
 export default function ThemeRegistry({ children }) {
-  return children;
+  const [{ cache, flush }] = useState(() => {
+    const cache = createCache({ key: "css" });
+    cache.compat = true;
+    const previousInsert = cache.insert;
+    let inserted = [];
+
+    cache.insert = (...args) => {
+      const serialized = args[1];
+      if (cache.inserted[serialized.name] === undefined) {
+        inserted.push(serialized.name);
+      }
+      return previousInsert(...args);
+    };
+
+    const flush = () => {
+      const previous = inserted;
+      inserted = [];
+      return previous;
+    };
+
+    return { cache, flush };
+  });
+
+  useServerInsertedHTML(() => {
+    const names = flush();
+    if (names.length === 0) {
+      return null;
+    }
+
+    let styles = "";
+    for (const name of names) {
+      styles += cache.inserted[name];
+    }
+
+    return (
+      <style
+        data-emotion={`${cache.key} ${names.join(" ")}`}
+        dangerouslySetInnerHTML={{ __html: styles }}
+      />
+    );
+  });
+
+  return <CacheProvider value={cache}>{children}</CacheProvider>;
 }

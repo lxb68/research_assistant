@@ -35,6 +35,12 @@ class ManualPdfLinkRequest(BaseModel):
     title: str | None = Field(None, description="论文标题")
 
 
+class DeletePapersRequest(BaseModel):
+    """批量删除已保存论文元数据记录。"""
+
+    ids: list[str] = Field(..., min_length=1, max_length=500, description="论文记录 ID 列表")
+
+
 app = FastAPI(
     title="Research Assistant API",
     description="Python FastAPI backend for literature search.",
@@ -229,6 +235,36 @@ def cleanup_missing_pdfs() -> dict:
         return {
             "status": "ok",
             **agent.cleanup_records_without_local_pdf(),
+        }
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.get("/api/papers")
+def list_papers(
+    limit: int = Query(100, ge=1, le=500, description="返回论文数量"),
+    keyword: str | None = Query(None, description="按关键词或标题过滤"),
+) -> dict:
+    """返回已保存论文元数据，用于前端浏览本地数据集。"""
+    try:
+        agent = HunterAgent()
+        papers = agent.list_saved_papers(limit=limit, keyword=keyword)
+        return {
+            "count": len(papers),
+            "papers": papers,
+        }
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.post("/api/papers/delete")
+def delete_papers(payload: DeletePapersRequest) -> dict:
+    """批量删除已保存论文元数据记录，不删除本地 PDF 文件。"""
+    try:
+        agent = HunterAgent()
+        return {
+            "status": "ok",
+            **agent.delete_saved_papers(payload.ids),
         }
     except Exception as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
