@@ -3,9 +3,10 @@
 import { useMemo, useState } from "react";
 import DatasetDownloadPage from "./dataset-download/page";
 import DatasetBrowser from "@/app/dataset-brower/DatasetBrowser";
+import SettingsWorkspace from "@/app/setting/SettingsWorkspace";
 import HeroSection from "@/home/HeroSection";
 
-type WorkspaceView = "home" | "download" | "browse";
+type WorkspaceView = "home" | "download" | "browse" | "settings";
 
 export default function Home() {
   const [activeView, setActiveView] = useState<WorkspaceView>("home");
@@ -16,6 +17,7 @@ export default function Home() {
       { id: "home" as const, label: "主页" },
       { id: "download" as const, label: "下载数据集" },
       { id: "browse" as const, label: "浏览数据集" },
+      { id: "settings" as const, label: "设置" },
     ],
     [],
   );
@@ -48,12 +50,15 @@ export default function Home() {
         <DatasetDownloadPage embedded onBackHome={() => setActiveView("home")} />
       ) : activeView === "browse" ? (
         <DatasetBrowser />
+      ) : activeView === "settings" ? (
+        <SettingsWorkspace />
       ) : (
         <main className="home-page">
           <HeroSection
             onCreateProject={() => setCreateDialogOpen(true)}
             onOpenDownload={() => setActiveView("download")}
             onOpenBrowse={() => setActiveView("browse")}
+            onOpenSettings={() => setActiveView("settings")}
           />
 
           {createDialogOpen && (

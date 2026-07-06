@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
+import PdfViewer from "@/components/PdfViewer";
 
 type SavedPaper = {
   id?: string;
@@ -55,7 +56,7 @@ export default function PaperViewerPage() {
         </div>
         <div className="paper-viewer-actions">
           <Link href="/" className="paper-viewer-button">
-            返回主页
+            返回首页
           </Link>
           {externalUrl && (
             <a href={externalUrl} target="_blank" rel="noreferrer" className="paper-viewer-button">
@@ -79,7 +80,7 @@ export default function PaperViewerPage() {
         </section>
       ) : paper?.pdfPath ? (
         <section className="paper-viewer-frame-wrap">
-          <iframe title={paper.title || "论文 PDF"} src={pdfViewerUrl} className="paper-viewer-frame" />
+          <PdfViewer title={paper.title || "论文 PDF"} url={pdfViewerUrl} />
         </section>
       ) : externalUrl ? (
         <section className="paper-viewer-panel">

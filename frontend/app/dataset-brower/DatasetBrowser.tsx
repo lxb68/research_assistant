@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 
 type SavedPaper = {
@@ -384,9 +385,8 @@ export default function DatasetBrowser() {
               const paperId = paper.id || "";
               const isSelected = paperId ? selectedIds.has(paperId) : false;
               const labels = uniqueValues([paper.source, paper.year, paper.keyword, ...(paper.customTags ?? [])]);
-              const sourceHref = paperId
-                ? new URL(`/api/papers/${encodeURIComponent(paperId)}/open`, apiBaseUrl).toString()
-                : paper.url || "";
+              const viewUrl = paperId ? `/dataset-brower/view/${encodeURIComponent(paperId)}` : null;
+              const externalUrl = paper.url?.trim() || "";
 
               return (
                 <article
@@ -423,8 +423,13 @@ export default function DatasetBrowser() {
                   {paper.abstract && <p className="dataset-card-abstract">{paper.abstract}</p>}
                   {paper.pdfParseWarning && <p className="dataset-card-warning">{paper.pdfParseWarning}</p>}
                   <div className="dataset-card-actions">
-                    {sourceHref && (
-                      <a href={sourceHref} target="_blank" rel="noreferrer">
+                    {viewUrl && (
+                      <Link href={viewUrl}>
+                        查看原文
+                      </Link>
+                    )}
+                    {!viewUrl && externalUrl && (
+                      <a href={externalUrl} target="_blank" rel="noreferrer">
                         查看原文
                       </a>
                     )}

@@ -3,7 +3,7 @@ import queue
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from app.agents import HunterAgent
 from app.core.config import settings
 from app.services.paper_search import SUPPORTED_SOURCES, search_papers
+from app.services.mineru import mineru_processing, MinerURequest
 
 
 class DatasetDownloadRequest(BaseModel):
@@ -302,41 +303,81 @@ def delete_papers(payload: DeletePapersRequest) -> dict:
 
 
 @app.get("/api/papers/{record_id}/pdf")
-def get_paper_pdf(record_id: str) -> FileResponse:
+def get_paper_pdf(record_id: str, request: Request) -> FileResponse:
     """读取已保存论文绑定的本地 PDF 文件。"""
     try:
         agent = HunterAgent()
-        print(f"[查看本地PDF] 收到请求: record_id={record_id!r}", flush=True)
+        # ===== 步骤1：记录请求信息 =====
+        print("=" * 60, flush=True)
+        print(f"[查看PDF] >>> 收到请求: record_id={record_id!r}", flush=True)
+        print(f"[查看PDF] >>> 请求URL: {request.url}", flush=True)
+        print(f"[查看PDF] >>> 请求方法: {request.method}", flush=True)
+        client_host = request.client.host if request.client else 'unknown'
+        print(f"[查看PDF] >>> 客户端Host: {client_host}", flush=True)
+        print(f"[查看PDF] >>> Accept请求头: {request.headers.get('accept', '(未设置)')}", flush=True)
+        ua = request.headers.get('user-agent', '(未设置)')
+        print(f"[查看PDF] >>> User-Agent: {ua[:120]}", flush=True)
+        print(f"[查看PDF] >>> Referer: {request.headers.get('referer', '(未设置)')}", flush=True)
+        print(f"[查看PDF] >>> Sec-Fetch-Site: {request.headers.get('sec-fetch-site', '(未设置)')}", flush=True)
+        print(f"[查看PDF] >>> Sec-Fetch-Dest: {request.headers.get('sec-fetch-dest', '(未设置)')}", flush=True)
+
+        # ===== 步骤2：查找论文记录 =====
         paper = agent.get_saved_paper(record_id)
         if not paper:
-            print(f"[查看本地PDF] 记录不存在: record_id={record_id!r}", flush=True)
+            print(f"[查看PDF] [FAIL] 记录不存在: record_id={record_id!r}", flush=True)
             raise HTTPException(status_code=404, detail="论文记录不存在")
+        title_preview = str(paper.get('title', ''))[:80]
+        print(f"[查看PDF] [OK] 找到论文记录: title={title_preview!r}", flush=True)
+        stored_pdf = paper.get('pdfPath', '')
+        print(f"[查看PDF] [OK] 数据库中pdfPath字段: {stored_pdf!r}", flush=True)
 
+        # ===== 步骤3：解析本地PDF路径 =====
         pdf_path = agent.find_local_pdf_for_paper(paper)
-        if not pdf_path or not pdf_path.exists() or not pdf_path.is_file() or pdf_path.suffix.lower() != ".pdf":
-            print(
-                "[查看本地PDF] 打开失败：未找到可用的本地 PDF "
-                f"record_id={record_id!r}, stored_pdf_path={paper.get('pdfPath', '')!r}, "
-                f"resolved_pdf_path={str(pdf_path) if pdf_path else ''!r}",
-                flush=True,
-            )
+        print(f"[查看PDF] --- find_local_pdf_for_paper 返回: {str(pdf_path)!r}", flush=True)
+        if not pdf_path:
+            print(f"[查看PDF] [FAIL] find_local_pdf_for_paper 返回 None", flush=True)
+            raise HTTPException(status_code=404, detail="本地 PDF 文件不存在")
+        print(f"[查看PDF] [OK] pdf_path.exists() = {pdf_path.exists()}", flush=True)
+        print(f"[查看PDF] [OK] pdf_path.is_file() = {pdf_path.is_file()}", flush=True)
+        print(f"[查看PDF] [OK] pdf_path.suffix = {pdf_path.suffix!r}", flush=True)
+        print(f"[查看PDF] [OK] pdf_path.absolute() = {str(pdf_path.absolute())!r}", flush=True)
+        file_size = pdf_path.stat().st_size
+        print(f"[查看PDF] [OK] 文件大小 = {file_size} bytes", flush=True)
+
+        if not pdf_path.exists() or not pdf_path.is_file() or pdf_path.suffix.lower() != ".pdf":
+            print(f"[查看PDF] [FAIL] 文件校验失败", flush=True)
             raise HTTPException(status_code=404, detail="本地 PDF 文件不存在")
 
-        print(
-            "[查看本地PDF] 准备返回本地 PDF "
-            f"record_id={record_id!r}, stored_pdf_path={paper.get('pdfPath', '')!r}, "
-            f"resolved_pdf_path={str(pdf_path)!r}",
-            flush=True,
-        )
-        return FileResponse(
+        # ===== 步骤4：构建响应 =====
+        filename = pdf_path.name
+        print(f"[查看PDF] --- 构建FileResponse ---", flush=True)
+        print(f"[查看PDF]    media_type = 'application/pdf'", flush=True)
+        print(f"[查看PDF]    filename = {filename!r}", flush=True)
+        print(f"[查看PDF]    content_disposition_type = 'inline'", flush=True)
+        print(f"[查看PDF]    预期Content-Disposition头: inline; filename=\"{filename}\"", flush=True)
+
+        response = FileResponse(
             pdf_path,
             media_type="application/pdf",
-            filename=pdf_path.name,
+            filename=filename,
             content_disposition_type="inline",
         )
+
+        # ===== 步骤5：打印响应头确认 =====
+        print(f"[查看PDF] --- 实际响应信息 ---", flush=True)
+        print(f"[查看PDF]    response.media_type = {response.media_type!r}", flush=True)
+        print(f"[查看PDF]    response.status_code = {response.status_code}", flush=True)
+        for header_name, header_value in response.headers.items():
+            print(f"[查看PDF]   响应头 [{header_name}] = {header_value}", flush=True)
+        print("=" * 60, flush=True)
+
+        return response
     except HTTPException:
         raise
     except Exception as error:
+        print(f"[查看PDF] [ERROR] 异常: {error}", flush=True)
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=502, detail=str(error)) from error
 
 
@@ -523,3 +564,26 @@ def re_split_values(value: str) -> list[str]:
     for separator in separators:
         values = [part for item in values for part in item.split(separator)]
     return [part.strip() for part in values if part.strip()]
+
+@app.post("/api/mineru/process")
+async def process_mineru(request: MinerURequest, background_tasks: BackgroundTasks):
+    """
+    接收项目 ID 和文件名，后台执行 MinerU 转换。
+    返回任务接受状态，实际进度可通过其他接口查询（或由回调更新）。
+    """
+    try:
+        # 校验文件是否存在等（此处省略）
+        # 执行转换（同步执行，若时间长可放入后台任务）
+        # 建议使用 BackgroundTasks 或 Celery 异步执行
+        background_tasks.add_task(
+            mineru_processing,
+            request.project_id,
+            request.file_name,
+            None,  # 回调
+            None   # task_info
+        )
+        return {"status": "accepted", "message": "Processing started."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 如果需要同步等待，可另设接口。

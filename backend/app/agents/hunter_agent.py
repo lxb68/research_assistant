@@ -780,7 +780,7 @@ class HunterAgent:
         extracted = self._extract_pdf_text(pdf_path)
         parsed = self._parse_pdf_metadata(extracted["text"], extracted["metadata"])
         if extracted["parser"] == "pymupdf" and self._parsed_pdf_metadata_is_sparse(parsed):
-            self._log("PyMuPDF 瑙ｆ瀽鍑虹殑鍏冩暟鎹緝灏戯紝缁х画灏濊瘯 MinerU 瑙ｆ瀽")
+            self._log("PyMuPDF 解析的元数据较少，尝试使用 MinerU 精细解析")
             mineru_text = self._extract_pdf_text_with_mineru(pdf_path)
             if mineru_text:
                 parsed = self._parse_pdf_metadata(mineru_text, extracted["metadata"])
@@ -788,7 +788,7 @@ class HunterAgent:
                     **extracted,
                     "text": mineru_text,
                     "parser": "mineru",
-                    "warning": "PyMuPDF 鍏冩暟鎹В鏋愯緝灏戯紝宸叉敼鐢?MinerU 琛ュ厖瑙ｆ瀽",
+                    "warning": "PyMuPDF 解析的元数据较少，尝试使用 MinerU 精细解析",
                 }
         clean_tags = [tag.strip() for tag in (custom_tags or []) if tag.strip()]
         clean_authors = [author.strip() for author in (authors or []) if author.strip()]
