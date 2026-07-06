@@ -306,14 +306,28 @@ def get_paper_pdf(record_id: str) -> FileResponse:
     """读取已保存论文绑定的本地 PDF 文件。"""
     try:
         agent = HunterAgent()
+        print(f"[查看本地PDF] 收到请求: record_id={record_id!r}", flush=True)
         paper = agent.get_saved_paper(record_id)
         if not paper:
+            print(f"[查看本地PDF] 记录不存在: record_id={record_id!r}", flush=True)
             raise HTTPException(status_code=404, detail="论文记录不存在")
 
         pdf_path = agent.find_local_pdf_for_paper(paper)
         if not pdf_path or not pdf_path.exists() or not pdf_path.is_file() or pdf_path.suffix.lower() != ".pdf":
+            print(
+                "[查看本地PDF] 打开失败：未找到可用的本地 PDF "
+                f"record_id={record_id!r}, stored_pdf_path={paper.get('pdfPath', '')!r}, "
+                f"resolved_pdf_path={str(pdf_path) if pdf_path else ''!r}",
+                flush=True,
+            )
             raise HTTPException(status_code=404, detail="本地 PDF 文件不存在")
 
+        print(
+            "[查看本地PDF] 准备返回本地 PDF "
+            f"record_id={record_id!r}, stored_pdf_path={paper.get('pdfPath', '')!r}, "
+            f"resolved_pdf_path={str(pdf_path)!r}",
+            flush=True,
+        )
         return FileResponse(
             pdf_path,
             media_type="application/pdf",
@@ -331,12 +345,20 @@ def open_paper_source(record_id: str):
     """优先打开本地 PDF；没有本地 PDF 时打开外部原文 URL。"""
     try:
         agent = HunterAgent()
+        print(f"[打开原文] 收到请求: record_id={record_id!r}", flush=True)
         paper = agent.get_saved_paper(record_id)
         if not paper:
+            print(f"[打开原文] 记录不存在: record_id={record_id!r}", flush=True)
             raise HTTPException(status_code=404, detail="论文记录不存在")
 
         pdf_path = agent.find_local_pdf_for_paper(paper)
         if pdf_path and pdf_path.exists() and pdf_path.is_file() and pdf_path.suffix.lower() == ".pdf":
+            print(
+                "[打开原文] 优先返回本地 PDF "
+                f"record_id={record_id!r}, stored_pdf_path={paper.get('pdfPath', '')!r}, "
+                f"resolved_pdf_path={str(pdf_path)!r}",
+                flush=True,
+            )
             return FileResponse(
                 pdf_path,
                 media_type="application/pdf",
@@ -346,8 +368,18 @@ def open_paper_source(record_id: str):
 
         external_url = str(paper.get("url", "")).strip()
         if external_url:
+            print(
+                "[打开原文] 本地 PDF 不可用，回退外部原文链接 "
+                f"record_id={record_id!r}, stored_pdf_path={paper.get('pdfPath', '')!r}, external_url={external_url!r}",
+                flush=True,
+            )
             return RedirectResponse(external_url, status_code=307)
 
+        print(
+            "[打开原文] 打开失败：既没有可用的本地 PDF，也没有外部原文链接 "
+            f"record_id={record_id!r}, stored_pdf_path={paper.get('pdfPath', '')!r}",
+            flush=True,
+        )
         raise HTTPException(status_code=404, detail="没有可打开的本地 PDF 或外部原文链接")
     except HTTPException:
         raise

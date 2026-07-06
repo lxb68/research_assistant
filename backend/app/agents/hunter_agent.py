@@ -621,13 +621,55 @@ class HunterAgent:
 
         return self._find_existing_paper_by_fields(record_id=normalized_id)
 
+    def resolve_pdf_path(self, pdf_path: str | Path) -> Path | None:
+        """解析用于打开的 PDF 路径，兼容手动绑定的绝对路径。"""
+        if not pdf_path:
+            self._log("解析 PDF 路径：输入为空")
+            return None
+
+        raw_path = str(pdf_path).strip()
+        if not raw_path:
+            self._log("解析 PDF 路径：去空白后为空")
+            return None
+
+        try:
+            candidate = Path(raw_path).expanduser().resolve()
+        except Exception as error:
+            self._log(f"解析 PDF 路径失败：raw_path={raw_path!r}, error={error}")
+            return None
+
+        if not candidate.exists():
+            self._log(f"解析 PDF 路径失败：文件不存在 {candidate}")
+            return None
+        if not candidate.is_file():
+            self._log(f"解析 PDF 路径失败：不是文件 {candidate}")
+            return None
+        if candidate.suffix.lower() != ".pdf":
+            self._log(f"解析 PDF 路径失败：不是 PDF 文件 {candidate}")
+            return None
+
+        try:
+            candidate.relative_to(self.download_dir.resolve())
+            self._log(f"解析 PDF 路径成功：命中托管目录 PDF {candidate}")
+        except Exception:
+            self._log(f"解析 PDF 路径成功：命中手动绑定 PDF {candidate}")
+
+        return candidate
+
     def find_local_pdf_for_paper(self, paper: Paper) -> Path | None:
         """优先用记录中的 pdfPath，失效时在 storage/papers 下回查文件。"""
-        saved_path = self._resolve_managed_pdf_path(str(paper.get("pdfPath", "")))
-        if saved_path and saved_path.exists() and saved_path.is_file():
+        record_id = str(paper.get("id", "")).strip()
+        stored_pdf_path = str(paper.get("pdfPath", "")).strip()
+        self._log(
+            f"开始查找本地 PDF：record_id={record_id or '<missing>'}, "
+            f"stored_pdf_path={stored_pdf_path or '<empty>'}"
+        )
+
+        saved_path = self.resolve_pdf_path(stored_pdf_path)
+        if saved_path:
             return saved_path
 
-        record_id = str(paper.get("id", "")).strip().lower()
+        normalized_record_id = record_id.lower()
         title_token = self._normalize_title(str(paper.get("title", "")))
         external_id = str(paper.get("externalId") or paper.get("external_id") or "").strip().lower()
         doi = self._normalize_identifier(str(paper.get("doi", "")))
@@ -637,7 +679,7 @@ class HunterAgent:
         for candidate in self.download_dir.rglob("*.pdf"):
             stem = candidate.stem.lower()
             score = 0
-            if record_id and record_id in stem:
+            if normalized_record_id and normalized_record_id in stem:
                 score += 4
             if external_id and external_id in stem:
                 score += 3
@@ -651,7 +693,16 @@ class HunterAgent:
                 best_match = candidate
 
         if best_match and best_score > 0:
-            return best_match.resolve()
+            resolved_match = best_match.resolve()
+            self._log(
+                f"查找本地 PDF：通过托管目录回退命中 record_id={record_id or '<missing>'}, "
+                f"path={resolved_match}, score={best_score}"
+            )
+            return resolved_match
+        self._log(
+            f"查找本地 PDF：未命中任何文件 record_id={record_id or '<missing>'}, "
+            f"title_token={title_token or '<empty>'}, external_id={external_id or '<empty>'}, doi={doi or '<empty>'}"
+        )
         return None
 
     def import_paper(
