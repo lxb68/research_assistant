@@ -661,53 +661,8 @@ export default function DatasetDownloadPage({
         }}
       />
 
-      <Container maxWidth="lg" sx={{ position: "relative", zIndex: 1, py: { xs: 4, md: 7 } }}>
+      <Container maxWidth="lg" sx={{ position: "relative", zIndex: 1, pt: "52px", pb: { xs: 4, md: 7 } }}>
         <Stack spacing={4}>
-          {!embedded && (
-            <Box>
-              <Box
-                component={Link}
-                href="/"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 1,
-                  color: "#60a5fa",
-                  fontWeight: 700,
-                  textDecoration: "none",
-                  mb: 5,
-                }}
-              >
-                <ArrowBackIcon fontSize="small" />
-                返回主页
-              </Box>
-            </Box>
-          )}
-          {embedded && onBackHome && (
-            <Box>
-              <Box
-                component="button"
-                type="button"
-                onClick={onBackHome}
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 1,
-                  border: 0,
-                  background: "transparent",
-                  color: "#60a5fa",
-                  cursor: "pointer",
-                  font: "inherit",
-                  fontWeight: 700,
-                  mb: 1,
-                }}
-              >
-                <ArrowBackIcon fontSize="small" />
-                返回主页
-              </Box>
-            </Box>
-          )}
-
           <Paper
             component="form"
             onSubmit={handleSearch}

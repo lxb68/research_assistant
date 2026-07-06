@@ -170,9 +170,10 @@ main {
   position: relative;
   overflow: hidden;
   background:
-    radial-gradient(circle at 20% 24%, rgba(42, 92, 170, 0.18), transparent 32%),
-    radial-gradient(circle at 80% 16%, rgba(139, 92, 246, 0.14), transparent 30%),
-    #05070c;
+    radial-gradient(circle at 18% 24%, rgba(42, 92, 170, 0.22), transparent 34%),
+    radial-gradient(circle at 82% 12%, rgba(139, 92, 246, 0.18), transparent 30%),
+    radial-gradient(circle at 50% 90%, rgba(14, 165, 233, 0.08), transparent 34%),
+    linear-gradient(135deg, #05070c 0%, #09111d 46%, #10081c 100%);
   padding: 32px 24px 72px;
 }
 
@@ -1624,88 +1625,88 @@ main {
 }
 
 /* ================================================================
-   设置页面 (SettingsWorkspace) — 自包含样式
+   设置页面 (SettingsWorkspace) — 暗色主题，与数据集页统一
    ================================================================ */
 
-.settings-root {
-  width: 100%;
-  max-width: 820px;
-  margin: 0 auto;
-  padding: 48px 24px 64px;
-}
-
-/* ---- Tab 栏 ---- */
+/* ---- Tab 栏：紧贴面板顶部，与浏览器工具栏对齐 ---- */
 .settings-tabs {
   display: flex;
   gap: 0;
-  border-bottom: 2px solid #e5e7eb;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  margin-top: 0;
 }
 
 .settings-tab-btn {
   position: relative;
-  bottom: -2px;
-  padding: 12px 24px;
+  bottom: -1px;
+  padding: 14px 24px;
   border: 0;
   background: transparent;
-  color: #6b7280;
+  color: rgba(203, 213, 225, 0.62);
   font: inherit;
-  font-size: 0.9375rem;
-  font-weight: 700;
+  font-size: 1rem;
+  font-weight: 800;
   cursor: pointer;
   transition: color 0.15s;
 }
 
 .settings-tab-btn:hover {
-  color: #374151;
+  color: #e2e8f0;
 }
 
 .settings-tab-btn.is-active {
-  color: #2563eb;
-  border-bottom: 2px solid #2563eb;
+  color: #ffffff;
+  border-bottom: 2px solid #60a5fa;
+}
+
+/* ---- 分隔线 ---- */
+.settings-divider {
+  height: 1px;
+  background: rgba(148, 163, 184, 0.12);
+  margin: 0;
 }
 
 /* ---- 内容区 ---- */
 .settings-body {
   display: grid;
-  gap: 24px;
-  padding: 32px 0;
+  gap: 20px;
+  padding: 24px 0;
   min-height: 260px;
-  border-bottom: 1px solid #e5e7eb;
 }
 
 /* ---- 表单行 ---- */
 .settings-row {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .settings-row-label {
-  font-size: 0.875rem;
-  font-weight: 700;
-  color: #374151;
+  font-size: 0.8125rem;
+  font-weight: 800;
+  color: rgba(226, 232, 240, 0.82);
 }
 
 .settings-input {
   width: 100%;
   min-height: 44px;
   padding: 0 14px;
-  border: 1px solid #d1d5db;
+  border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 8px;
-  background: #ffffff;
-  color: #111827;
+  background: rgba(15, 23, 42, 0.58);
+  color: #f8fafc;
   font: inherit;
-  font-size: 0.9375rem;
+  font-size: 0.875rem;
   outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .settings-input:focus {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.14);
 }
 
 .settings-input::placeholder {
-  color: #9ca3af;
+  color: rgba(148, 163, 184, 0.44);
 }
 
 textarea.settings-input {
@@ -1715,21 +1716,21 @@ textarea.settings-input {
 }
 
 .settings-input-num {
-  width: 100px;
+  width: 96px;
   text-align: center;
-  font-weight: 700;
+  font-weight: 800;
 }
 
 .settings-input-mono {
   font-family: "Cascadia Code", "Fira Code", "Courier New", Consolas, monospace;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   line-height: 1.7;
   min-height: 200px;
 }
 
 select.settings-input {
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2393c5fd' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 14px center;
   padding-right: 36px;
@@ -1738,8 +1739,8 @@ select.settings-input {
 
 /* ---- 提示文字 ---- */
 .settings-hint {
-  color: #6b7280;
-  font-size: 0.8125rem;
+  color: rgba(148, 163, 184, 0.66);
+  font-size: 0.75rem;
   line-height: 1.6;
 }
 
@@ -1753,28 +1754,28 @@ select.settings-input {
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 14px 16px;
-  border: 1px solid #e5e7eb;
+  padding: 12px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
   border-radius: 8px;
-  background: #f9fafb;
+  background: rgba(15, 23, 42, 0.4);
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
 
 .settings-radio:hover {
-  border-color: #93c5fd;
+  border-color: rgba(96, 165, 250, 0.28);
 }
 
 .settings-radio.is-checked {
-  border-color: #2563eb;
-  background: #eff6ff;
+  border-color: rgba(96, 165, 250, 0.48);
+  background: rgba(37, 99, 235, 0.12);
 }
 
 .settings-radio input {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   margin-top: 2px;
-  accent-color: #2563eb;
+  accent-color: #60a5fa;
   flex-shrink: 0;
   cursor: pointer;
 }
@@ -1785,21 +1786,21 @@ select.settings-input {
 }
 
 .settings-radio strong {
-  color: #111827;
-  font-size: 0.9375rem;
+  color: #f1f5f9;
+  font-size: 0.875rem;
 }
 
 .settings-radio small {
-  color: #6b7280;
-  font-size: 0.8125rem;
-  line-height: 1.5;
+  color: rgba(148, 163, 184, 0.7);
+  font-size: 0.75rem;
+  line-height: 1.45;
 }
 
 /* ---- 行内控件 ---- */
 .settings-inline {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   flex-wrap: wrap;
 }
 
@@ -1809,13 +1810,13 @@ select.settings-input {
   align-items: center;
   justify-content: flex-end;
   gap: 12px;
-  padding-top: 24px;
+  padding-top: 20px;
 }
 
 .settings-toast {
   margin-right: auto;
-  color: #059669;
-  font-size: 0.875rem;
+  color: rgba(167, 243, 208, 0.85);
+  font-size: 0.8125rem;
   font-weight: 700;
 }
 
@@ -1824,43 +1825,40 @@ select.settings-input {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 100px;
-  min-height: 42px;
-  padding: 0 20px;
+  min-width: 96px;
+  min-height: 40px;
+  padding: 0 18px;
   border: 0;
   border-radius: 8px;
   font: inherit;
-  font-size: 0.9375rem;
+  font-size: 0.875rem;
   font-weight: 700;
   cursor: pointer;
   transition: background 0.15s, box-shadow 0.15s;
 }
 
 .settings-btn-primary {
-  background: #2563eb;
+  background: linear-gradient(90deg, #2a5caa 0%, #6d5df6 100%);
   color: #ffffff;
 }
 
 .settings-btn-primary:hover {
-  background: #1d4ed8;
+  box-shadow: 0 10px 28px rgba(37, 99, 235, 0.24);
 }
 
 .settings-btn-ghost {
   background: transparent;
-  color: #6b7280;
+  color: rgba(203, 213, 225, 0.76);
+  border: 1px solid rgba(148, 163, 184, 0.2);
 }
 
 .settings-btn-ghost:hover {
-  background: #f3f4f6;
-  color: #374151;
+  background: rgba(148, 163, 184, 0.08);
+  color: #e2e8f0;
 }
 
 /* ---- 小屏 ---- */
 @media (max-width: 600px) {
-  .settings-root {
-    padding: 32px 16px 48px;
-  }
-
   .settings-tabs {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
@@ -1868,12 +1866,12 @@ select.settings-input {
 
   .settings-tab-btn {
     padding: 12px 16px;
-    font-size: 0.8125rem;
+    font-size: 0.875rem;
     white-space: nowrap;
   }
 
   .settings-body {
-    padding: 24px 0;
+    padding: 20px 0;
   }
 
   .settings-footer {
