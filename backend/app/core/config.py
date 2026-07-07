@@ -76,6 +76,13 @@ class Settings:
     hunter_download_dir = os.getenv("HUNTER_DOWNLOAD_DIR") or str(
         BACKEND_DIR / "storage" / "papers",
     )
+    backend_storage_dir = os.getenv("BACKEND_STORAGE_DIR") or str(
+        BACKEND_DIR / "storage",
+    )
+    mineru_output_dir = os.getenv("MINERU_OUTPUT_DIR") or str(
+        BACKEND_DIR / "storage" / "markdown",
+    )
+    mineru_api_token = os.getenv("MINERU_API_TOKEN", "")
     hunter_metadata_db = os.getenv("HUNTER_METADATA_DB") or str(
         BACKEND_DIR / "storage" / "metadata" / "papers.sqlite3",
     )

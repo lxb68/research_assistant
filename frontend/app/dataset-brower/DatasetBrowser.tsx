@@ -20,6 +20,8 @@ type SavedPaper = {
   metricFiltersIgnored?: boolean;
   customTags?: string[];
   pdfParseWarning?: string;
+  markdownPath?: string;
+  markdownOutputDir?: string;
 };
 
 type PdfImportForm = {
@@ -70,8 +72,10 @@ export default function DatasetBrowser() {
   const [pdfImportForm, setPdfImportForm] = useState<PdfImportForm>(emptyPdfImportForm);
   const [isLoading, setIsLoading] = useState(true);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isSplitting, setIsSplitting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [importLogs, setImportLogs] = useState<string[]>([]);
+  const [splitLogs, setSplitLogs] = useState<string[]>([]);
   const [error, setError] = useState("");
 
   async function loadPapers(keyword = "", options: { initial?: boolean } = {}) {
@@ -107,23 +111,7 @@ export default function DatasetBrowser() {
   }
 
   useEffect(() => {
-    const url = new URL("/api/papers", apiBaseUrl);
-    url.searchParams.set("limit", "120");
-
-    fetch(url)
-      .then(async (response) => {
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(payload.detail || "加载本地数据集失败");
-        }
-        setPapers(payload.papers ?? []);
-      })
-      .catch((loadError) => {
-        setError(loadError instanceof Error ? loadError.message : "加载本地数据集失败");
-      })
-      .finally(() => {
-        setIsLoading(false);
-      });
+    loadPapers("", { initial: true });
   }, []);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -204,7 +192,8 @@ export default function DatasetBrowser() {
 
           const eventPayload = JSON.parse(text) as ImportStreamEvent;
           if (eventPayload.type === "log" && eventPayload.message) {
-            setImportLogs((currentLogs) => [...currentLogs, eventPayload.message!]);
+            const message = eventPayload.message;
+            setImportLogs((currentLogs) => [...currentLogs, message]);
           }
           if (eventPayload.type === "error" && eventPayload.message) {
             throw new Error(eventPayload.message);
@@ -269,16 +258,92 @@ export default function DatasetBrowser() {
     }
   }
 
+  async function splitSelectedPapers() {
+    const selectedPapers = papers.filter((paper) => paper.id && selectedIds.has(paper.id));
+    if (selectedPapers.length === 0 || isSplitting) {
+      return;
+    }
+
+    setIsSplitting(true);
+    setError("");
+    setSplitLogs([`准备转换 ${selectedPapers.length} 篇论文为 Markdown...`]);
+
+    let successCount = 0;
+    let failedCount = 0;
+
+    try {
+      for (const [index, paper] of selectedPapers.entries()) {
+        const paperId = paper.id;
+        if (!paperId) {
+          continue;
+        }
+
+        const title = paper.title?.trim() || paperId;
+        setSplitLogs((currentLogs) => [...currentLogs, `[${index + 1}/${selectedPapers.length}] 开始处理：${title}`]);
+
+        try {
+          const response = await fetch(new URL("/api/mineru/process", apiBaseUrl), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              record_id: paperId,
+              output_name: paperId,
+            }),
+          });
+
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw new Error(payload.detail || "转换失败");
+          }
+
+          successCount += 1;
+          if (payload.paper) {
+            setPapers((currentPapers) =>
+              currentPapers.map((currentPaper) => (currentPaper.id === paperId ? { ...currentPaper, ...payload.paper } : currentPaper)),
+            );
+          }
+          setSplitLogs((currentLogs) => [
+            ...currentLogs,
+            `[${index + 1}/${selectedPapers.length}] 转换完成：${title}`,
+          ]);
+        } catch (splitError) {
+          failedCount += 1;
+          const message = splitError instanceof Error ? splitError.message : "转换失败";
+          setSplitLogs((currentLogs) => [
+            ...currentLogs,
+            `[${index + 1}/${selectedPapers.length}] 转换失败：${title} - ${message}`,
+          ]);
+        }
+      }
+
+      await loadPapers(query);
+      setSplitLogs((currentLogs) => [...currentLogs, `本轮完成：成功 ${successCount} 篇，失败 ${failedCount} 篇。`]);
+    } catch (splitError) {
+      setError(splitError instanceof Error ? splitError.message : "批量转换 Markdown 失败");
+    } finally {
+      setIsSplitting(false);
+    }
+  }
+
   return (
     <main className="dataset-browser-page">
       <section className="dataset-browser-panel">
         <form className="dataset-browser-toolbar" onSubmit={handleSubmit}>
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="按关键词或标题筛选" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="按关键词或标题筛选"
+          />
           <button type="submit" disabled={isLoading}>
-            {isLoading ? "加载中" : "筛选"}
+            {isLoading ? "加载中..." : "筛选"}
           </button>
           <button type="button" onClick={() => setImportOpen((open) => !open)}>
             {importOpen ? "收起导入" : "导入 PDF"}
+          </button>
+          <button type="button" disabled={selectedIds.size === 0 || isSplitting} onClick={splitSelectedPapers}>
+            {isSplitting ? "转换中..." : selectedIds.size > 0 ? `文本分割 (${selectedIds.size})` : "文本分割"}
           </button>
           <button
             type="button"
@@ -286,7 +351,7 @@ export default function DatasetBrowser() {
             disabled={selectedIds.size === 0 || isDeleting}
             onClick={deleteSelectedPapers}
           >
-            {isDeleting ? "删除中" : selectedIds.size > 0 ? `删除 (${selectedIds.size})` : "删除"}
+            {isDeleting ? "删除中..." : selectedIds.size > 0 ? `删除 (${selectedIds.size})` : "删除"}
           </button>
         </form>
 
@@ -309,7 +374,7 @@ export default function DatasetBrowser() {
               <input
                 value={pdfImportForm.authors}
                 onChange={(event) => setPdfImportForm((form) => ({ ...form, authors: event.target.value }))}
-                placeholder="多个作者用逗号分隔，留空则自动解析"
+                placeholder="多个作者用逗号分隔"
               />
             </label>
             <label>
@@ -325,7 +390,7 @@ export default function DatasetBrowser() {
               <input
                 value={pdfImportForm.tags}
                 onChange={(event) => setPdfImportForm((form) => ({ ...form, tags: event.target.value }))}
-                placeholder="例如 大模型, 医疗, CCF B"
+                placeholder="例如：医学, CCF B"
               />
             </label>
             <label>
@@ -348,13 +413,13 @@ export default function DatasetBrowser() {
               <textarea
                 value={pdfImportForm.abstract}
                 onChange={(event) => setPdfImportForm((form) => ({ ...form, abstract: event.target.value }))}
-                placeholder="留空则尝试从 PDF 的 Abstract 段落自动解析"
+                placeholder="留空则尝试从 PDF 中解析"
               />
             </label>
             <div className="dataset-import-actions">
-              <span>{pdfFile ? pdfFile.name : "后端会流式返回解析进度，优先使用 PyMuPDF，复杂 PDF 再尝试 MinerU。"}</span>
+              <span>{pdfFile ? pdfFile.name : "后端会流式返回导入进度，复杂 PDF 会自动尝试 MinerU。"}</span>
               <button type="submit" disabled={!pdfFile || isImporting}>
-                {isImporting ? "解析导入中" : "保存导入"}
+                {isImporting ? "导入中..." : "保存导入"}
               </button>
             </div>
             {importLogs.length > 0 && (
@@ -369,6 +434,14 @@ export default function DatasetBrowser() {
 
         {error && <div className="dataset-browser-error">{error}</div>}
 
+        {splitLogs.length > 0 && (
+          <div className="dataset-import-log">
+            {splitLogs.map((log, index) => (
+              <p key={`split-log-${index}`}>{log}</p>
+            ))}
+          </div>
+        )}
+
         {!error && isLoading ? (
           <div className="dataset-browser-empty">
             <strong>正在加载数据集</strong>
@@ -377,7 +450,7 @@ export default function DatasetBrowser() {
         ) : !error && papers.length === 0 ? (
           <div className="dataset-browser-empty">
             <strong>暂无已保存论文</strong>
-            <span>可以先下载数据集，或在这里导入 PDF 文献。</span>
+            <span>可以先下载数据集，或者在这里导入 PDF 文献。</span>
           </div>
         ) : (
           <div className="dataset-card-grid">
@@ -399,7 +472,7 @@ export default function DatasetBrowser() {
                         <input
                           type="checkbox"
                           checked={isSelected}
-                          disabled={isDeleting}
+                          disabled={isDeleting || isSplitting}
                           onChange={() => togglePaperSelection(paperId)}
                         />
                         <span>选择</span>
@@ -413,8 +486,9 @@ export default function DatasetBrowser() {
                       paper.impactFactor !== undefined &&
                       paper.impactFactor !== null && <span>IF {paper.impactFactor}</span>}
                     <span className={paper.pdfPath ? "dataset-pdf-ready" : "dataset-pdf-missing"}>
-                      {paper.pdfPath ? "PDF 已导入" : "缺少 PDF"}
+                      {paper.pdfPath ? "PDF 可用" : "缺少 PDF"}
                     </span>
+                    {paper.markdownPath && <span className="dataset-markdown-ready">Markdown 已生成</span>}
                   </div>
                   <h2>{paper.title || "未命名论文"}</h2>
                   {paper.authors && paper.authors.length > 0 && (
@@ -423,11 +497,7 @@ export default function DatasetBrowser() {
                   {paper.abstract && <p className="dataset-card-abstract">{paper.abstract}</p>}
                   {paper.pdfParseWarning && <p className="dataset-card-warning">{paper.pdfParseWarning}</p>}
                   <div className="dataset-card-actions">
-                    {viewUrl && (
-                      <Link href={viewUrl}>
-                        查看原文
-                      </Link>
-                    )}
+                    {viewUrl && <Link href={viewUrl}>查看原文</Link>}
                     {!viewUrl && externalUrl && (
                       <a href={externalUrl} target="_blank" rel="noreferrer">
                         查看原文

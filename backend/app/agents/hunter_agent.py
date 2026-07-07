@@ -434,7 +434,8 @@ class HunterAgent:
     def _save_paper_to_db(self, paper: Paper) -> Paper:
         """封装数据库保存逻辑。"""
         record = self._json_safe_paper(paper)
-        record["id"] = self._build_record_id(record)
+        existing_id = str(record.get("id", "")).strip()
+        record["id"] = existing_id or self._build_record_id(record)
 
         with sqlite3.connect(self.metadata_db_path) as connection:
             connection.execute(
@@ -553,6 +554,58 @@ class HunterAgent:
             "removedRecords": removed_records,
         }
 
+    def deduplicate_saved_papers(self, record_id: str | None = None) -> dict:
+        papers = self.list_saved_papers(limit=500)
+        groups: dict[str, list[Paper]] = {}
+
+        for paper in papers:
+            dedupe_group_key = self._build_duplicate_group_key(paper)
+            if not dedupe_group_key:
+                continue
+            groups.setdefault(dedupe_group_key, []).append(paper)
+
+        merged_count = 0
+        removed_ids: list[str] = []
+        canonical_papers: list[Paper] = []
+        preferred_id = str(record_id or "").strip()
+
+        for group_papers in groups.values():
+            if len(group_papers) < 2:
+                continue
+            if preferred_id and not any(str(paper.get("id", "")).strip() == preferred_id for paper in group_papers):
+                continue
+
+            canonical = self._select_canonical_paper(group_papers, preferred_id=preferred_id)
+            duplicates = [
+                paper
+                for paper in group_papers
+                if str(paper.get("id", "")).strip() != str(canonical.get("id", "")).strip()
+            ]
+            if not duplicates:
+                continue
+
+            merged = self._merge_paper_group(canonical, duplicates)
+            self._save_paper_to_db(merged)
+            duplicate_ids = [
+                str(paper.get("id", "")).strip()
+                for paper in duplicates
+                if str(paper.get("id", "")).strip()
+            ]
+            self._delete_paper_rows_only(duplicate_ids)
+
+            merged_count += len(duplicates)
+            removed_ids.extend(duplicate_ids)
+            canonical_papers.append(merged)
+
+        self._log(
+            f"重复论文合并完成：合并 {merged_count} 条重复记录，保留 {len(canonical_papers)} 条主记录"
+        )
+        return {
+            "mergedCount": merged_count,
+            "removedIds": removed_ids,
+            "canonicalPapers": canonical_papers,
+        }
+
     def list_saved_papers(self, *, limit: int = 100, keyword: str | None = None) -> list[Paper]:
         """读取已保存的论文元数据，用于前端浏览本地数据集。"""
         clauses: list[str] = []
@@ -585,14 +638,19 @@ class HunterAgent:
             return {"deletedCount": 0, "deletedIds": []}
 
         placeholders = ", ".join("?" for _ in normalized_ids)
-        deleted_pdf_paths: list[str] = []
+        deleted_records: list[Paper] = []
         with sqlite3.connect(self.metadata_db_path) as connection:
+            connection.row_factory = sqlite3.Row
             rows = connection.execute(
-                f"SELECT id, pdf_path FROM papers WHERE id IN ({placeholders})",
+                (
+                    "SELECT id, source, title, doi, external_id, url, pdf_url, pdf_path, keyword, "
+                    "relevance_score, metadata_json, saved_at FROM papers "
+                    f"WHERE id IN ({placeholders})"
+                ),
                 normalized_ids,
             ).fetchall()
-            deleted_ids = [row[0] for row in rows]
-            deleted_pdf_paths = [str(row[1] or "").strip() for row in rows if str(row[1] or "").strip()]
+            deleted_records = [self._row_to_paper(row) for row in rows]
+            deleted_ids = [str(record.get("id", "")).strip() for record in deleted_records if str(record.get("id", "")).strip()]
             if deleted_ids:
                 delete_placeholders = ", ".join("?" for _ in deleted_ids)
                 connection.execute(
@@ -603,15 +661,33 @@ class HunterAgent:
 
         self._log(f"批量删除论文元数据：请求 {len(normalized_ids)} 条，删除 {len(deleted_ids)} 条")
         removed_pdf_count = 0
-        for pdf_path in deleted_pdf_paths:
+        removed_markdown_count = 0
+        for record in deleted_records:
+            pdf_path = str(record.get("pdfPath") or record.get("pdf_path") or "").strip()
             if self._delete_local_pdf_if_managed(pdf_path):
                 removed_pdf_count += 1
+            if self._delete_markdown_output_if_managed(record):
+                removed_markdown_count += 1
 
         return {
             "deletedCount": len(deleted_ids),
             "deletedIds": deleted_ids,
             "deletedPdfCount": removed_pdf_count,
+            "deletedMarkdownCount": removed_markdown_count,
         }
+
+    def _delete_paper_rows_only(self, ids: list[str]) -> None:
+        normalized_ids = [str(record_id).strip() for record_id in ids if str(record_id).strip()]
+        if not normalized_ids:
+            return
+
+        placeholders = ", ".join("?" for _ in normalized_ids)
+        with sqlite3.connect(self.metadata_db_path) as connection:
+            connection.execute(
+                f"DELETE FROM papers WHERE id IN ({placeholders})",
+                normalized_ids,
+            )
+            connection.commit()
 
     def get_saved_paper(self, record_id: str) -> Paper | None:
         """按记录 ID 读取一条已保存论文。"""
@@ -620,6 +696,50 @@ class HunterAgent:
             return None
 
         return self._find_existing_paper_by_fields(record_id=normalized_id)
+
+    def update_saved_paper(self, record_id: str, updates: dict[str, object]) -> Paper:
+        normalized_id = record_id.strip()
+        if not normalized_id:
+            raise ValueError("record_id is required")
+
+        record = self.get_saved_paper(normalized_id)
+        if not record:
+            raise ValueError(f"Paper record not found: {normalized_id}")
+
+        record.update(updates)
+        record["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        return self._save_paper_to_db(record)
+
+    def refresh_paper_metadata_from_markdown(
+        self,
+        record_id: str,
+        *,
+        markdown_path: str | Path | None = None,
+    ) -> Paper:
+        normalized_id = record_id.strip()
+        if not normalized_id:
+            raise ValueError("record_id is required")
+
+        record = self.get_saved_paper(normalized_id)
+        if not record:
+            raise ValueError(f"Paper record not found: {normalized_id}")
+
+        resolved_markdown = self._resolve_markdown_for_metadata_refresh(record, markdown_path)
+        markdown_text = resolved_markdown.read_text(encoding="utf-8", errors="ignore")
+        if not markdown_text.strip():
+            raise ValueError(f"Markdown file is empty: {resolved_markdown}")
+
+        parsed = self._parse_markdown_metadata(markdown_text, record)
+        updates = self._build_metadata_refresh_updates(record, parsed, resolved_markdown)
+        if not updates:
+            self._log(f"Markdown 元数据回写：未发现可更新字段 record_id={normalized_id}")
+            return record
+
+        self._log(
+            f"Markdown 元数据回写：record_id={normalized_id}, "
+            f"fields={sorted(updates.keys())}, markdown={resolved_markdown}"
+        )
+        return self.update_saved_paper(normalized_id, updates)
 
     def resolve_pdf_path(self, pdf_path: str | Path) -> Path | None:
         """解析用于打开的 PDF 路径，兼容手动绑定的绝对路径。"""
@@ -722,7 +842,14 @@ class HunterAgent:
         parsed = self._parse_imported_reference(raw_text)
         clean_tags = [tag.strip() for tag in (custom_tags or []) if tag.strip()]
         clean_authors = [author.strip() for author in (authors or []) if author.strip()]
-
+        manual_override_fields = self._collect_manual_override_fields(
+            title=title,
+            authors=clean_authors,
+            abstract=abstract,
+            year=year,
+            doi=doi,
+            url=url,
+        )
         imported_paper: Paper = {
             "source": "manual",
             "title": title.strip() or str(parsed.get("title", "")),
@@ -736,6 +863,7 @@ class HunterAgent:
             "customTags": clean_tags,
             "rawImportText": raw_text.strip(),
             "importedManually": True,
+            "manualOverrideFields": manual_override_fields,
             "relevanceScore": 0,
             "savedAt": datetime.now(timezone.utc).isoformat(),
         }
@@ -792,6 +920,14 @@ class HunterAgent:
                 }
         clean_tags = [tag.strip() for tag in (custom_tags or []) if tag.strip()]
         clean_authors = [author.strip() for author in (authors or []) if author.strip()]
+        manual_override_fields = self._collect_manual_override_fields(
+            title=title,
+            authors=clean_authors,
+            abstract=abstract,
+            year=year,
+            doi=doi,
+            url=url,
+        )
 
         imported_paper: Paper = {
             "source": "manual_pdf",
@@ -808,6 +944,7 @@ class HunterAgent:
             "keyword": clean_tags[0] if clean_tags else "PDF导入",
             "customTags": clean_tags,
             "importedManually": True,
+            "manualOverrideFields": manual_override_fields,
             "pdfParsedBy": extracted["parser"],
             "pdfParseWarning": extracted["warning"],
             "pdfTextPreview": extracted["text"][:3000],
@@ -961,6 +1098,176 @@ class HunterAgent:
 
         return parsed
 
+    def _resolve_markdown_for_metadata_refresh(
+        self,
+        paper: Paper,
+        markdown_path: str | Path | None,
+    ) -> Path:
+        if markdown_path:
+            resolved = self._resolve_managed_markdown_path(markdown_path)
+        else:
+            resolved = self._resolve_managed_markdown_path(
+                str(paper.get("markdownPath") or paper.get("markdown_path") or "").strip()
+            )
+
+        if not resolved or not resolved.exists() or not resolved.is_file():
+            raise ValueError("Managed markdown file not found for this paper")
+        return resolved
+
+    def _parse_markdown_metadata(self, markdown_text: str, paper: Paper) -> Paper:
+        cleaned_text = self._strip_markdown_for_metadata(markdown_text)
+        parsed = self._parse_imported_reference(cleaned_text)
+
+        abstract_match = re.search(
+            r"\babstract\b\s*[:.\-]?\s*(.+?)(?:\n\s*(?:keywords|introduction|1\s+introduction)\b|$)",
+            cleaned_text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if abstract_match:
+            parsed["abstract"] = re.sub(r"\s+", " ", abstract_match.group(1)).strip()[:4000]
+
+        if not parsed.get("title"):
+            for line in cleaned_text.splitlines()[:20]:
+                candidate = line.strip()
+                if 12 <= len(candidate) <= 220 and not re.match(r"^(abstract|keywords|doi)\b", candidate, re.I):
+                    parsed["title"] = candidate
+                    break
+
+        venue = self._extract_venue_candidate(cleaned_text)
+        if venue:
+            parsed["venue"] = venue
+            parsed["containerTitle"] = venue
+            if re.search(r"\bjournal\b|transactions|letters|review\b", venue, re.IGNORECASE):
+                parsed["journal"] = venue
+
+        doi_match = re.search(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", cleaned_text, re.IGNORECASE)
+        if doi_match:
+            parsed["doi"] = doi_match.group(0).rstrip(".,;")
+
+        year = self._infer_year_from_text(cleaned_text)
+        if year:
+            parsed["year"] = year
+
+        parsed["pdfTextPreview"] = cleaned_text[:3000]
+        parsed["metadataSource"] = "markdown"
+        parsed["metadataSourcePath"] = str(
+            paper.get("markdownPath") or paper.get("markdown_path") or ""
+        ).strip()
+        return parsed
+
+    def _build_metadata_refresh_updates(
+        self,
+        current: Paper,
+        parsed: Paper,
+        markdown_path: Path,
+    ) -> dict[str, object]:
+        updates: dict[str, object] = {}
+        manual_override_fields = {
+            str(field).strip()
+            for field in current.get("manualOverrideFields", [])
+            if str(field).strip()
+        }
+        comparable_fields = (
+            "title",
+            "abstract",
+            "year",
+            "venue",
+            "journal",
+            "containerTitle",
+            "doi",
+            "pdfTextPreview",
+        )
+
+        for field in comparable_fields:
+            new_value = str(parsed.get(field, "")).strip()
+            old_value = str(current.get(field, "")).strip()
+            if (
+                new_value
+                and new_value != old_value
+                and self._should_overwrite_from_markdown(field, old_value, manual_override_fields)
+            ):
+                updates[field] = new_value
+
+        parsed_authors = [
+            str(author).strip()
+            for author in parsed.get("authors", [])
+            if str(author).strip()
+        ]
+        current_authors = [
+            str(author).strip()
+            for author in current.get("authors", [])
+            if str(author).strip()
+        ]
+        if (
+            parsed_authors
+            and parsed_authors != current_authors
+            and self._should_overwrite_from_markdown("authors", current_authors, manual_override_fields)
+        ):
+            updates["authors"] = parsed_authors
+
+        if str(current.get("pdfParsedBy", "")).strip() != "markdown":
+            updates["pdfParsedBy"] = "markdown"
+        if str(current.get("pdfParseWarning", "")).strip():
+            updates["pdfParseWarning"] = ""
+
+        updates["markdownMetadataUpdatedAt"] = datetime.now(timezone.utc).isoformat()
+        updates["markdownMetadataSource"] = str(markdown_path)
+        return updates
+
+    def _collect_manual_override_fields(self, **field_values: object) -> list[str]:
+        manual_fields: list[str] = []
+        for field, value in field_values.items():
+            if isinstance(value, list):
+                if any(str(item).strip() for item in value):
+                    manual_fields.append(field)
+                continue
+
+            if str(value or "").strip():
+                manual_fields.append(field)
+
+        return manual_fields
+
+    def _should_overwrite_from_markdown(
+        self,
+        field: str,
+        current_value: object,
+        manual_override_fields: set[str],
+    ) -> bool:
+        if field not in manual_override_fields:
+            return True
+
+        if isinstance(current_value, list):
+            return not any(str(item).strip() for item in current_value)
+
+        return not str(current_value or "").strip()
+
+    def _strip_markdown_for_metadata(self, markdown_text: str) -> str:
+        text = markdown_text.replace("\r\n", "\n")
+        text = re.sub(r"```.*?```", "\n", text, flags=re.DOTALL)
+        text = re.sub(r"`([^`]+)`", r"\1", text)
+        text = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^\s{0,3}>\s?", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"\|", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _infer_year_from_text(self, text: str) -> str:
+        years: list[int] = []
+        max_year = datetime.now(timezone.utc).year + 1
+        for match in re.finditer(r"\b(19|20)\d{2}\b", text[:4000]):
+            year = int(match.group(0))
+            if 1900 <= year <= max_year:
+                years.append(year)
+
+        if not years:
+            return ""
+
+        return str(min(years))
+
     def _metadata_value_is_noise(self, value: str) -> bool:
         """判断 PDF 元数据中的标题或作者是否是无意义的占位符。"""
         lowered = value.strip().lower()
@@ -995,6 +1302,25 @@ class HunterAgent:
             parent.rmdir()
         return True
 
+    def _delete_markdown_output_if_managed(self, paper: Paper) -> bool:
+        output_dir = self._resolve_managed_markdown_output_dir(paper)
+        if output_dir and output_dir.exists():
+            shutil.rmtree(output_dir, ignore_errors=False)
+            parent = output_dir.parent
+            markdown_root = Path(settings.mineru_output_dir).resolve()
+            if parent != markdown_root and parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+            return True
+
+        markdown_path = self._resolve_managed_markdown_path(
+            str(paper.get("markdownPath") or paper.get("markdown_path") or "").strip()
+        )
+        if markdown_path and markdown_path.exists() and markdown_path.is_file():
+            markdown_path.unlink()
+            return True
+
+        return False
+
     def _resolve_managed_pdf_path(self, pdf_path: str | Path) -> Path | None:
         """ 如果 pdf_path 在 download_dir 下，则返回绝对路径，否则返回 None。"""
         if not pdf_path:
@@ -1008,6 +1334,41 @@ class HunterAgent:
             return candidate
         except Exception:
             self._log(f"无法解析本地 PDF 路径: {pdf_path}")
+            return None
+
+    def _resolve_managed_markdown_output_dir(self, paper: Paper) -> Path | None:
+        output_dir = str(
+            paper.get("markdownOutputDir")
+            or paper.get("outputDir")
+            or paper.get("markdown_output_dir")
+            or ""
+        ).strip()
+        if output_dir:
+            resolved_dir = self._resolve_managed_markdown_path(output_dir, expect_dir=True)
+            if resolved_dir:
+                return resolved_dir
+
+        markdown_path = str(paper.get("markdownPath") or paper.get("markdown_path") or "").strip()
+        resolved_markdown = self._resolve_managed_markdown_path(markdown_path)
+        if resolved_markdown:
+            return resolved_markdown.parent
+
+        return None
+
+    def _resolve_managed_markdown_path(self, target_path: str | Path, *, expect_dir: bool = False) -> Path | None:
+        if not target_path:
+            return None
+
+        try:
+            candidate = Path(target_path).expanduser().resolve()
+            markdown_root = Path(settings.mineru_output_dir).resolve()
+            candidate.relative_to(markdown_root)
+            if expect_dir and not candidate.is_dir():
+                return None
+            self._log(f"解析 markdown 路径: {target_path} -> {candidate}")
+            return candidate
+        except Exception:
+            self._log(f"无法解析 markdown 路径: {target_path}")
             return None
 
     def _parse_imported_reference(self, raw_text: str) -> Paper:
@@ -1124,6 +1485,141 @@ class HunterAgent:
             "relevanceScore": row["relevance_score"],
             "savedAt": row["saved_at"],
         }
+
+    def _build_duplicate_group_key(self, paper: Paper) -> str:
+        pdf_path = self._normalize_path_for_compare(str(paper.get("pdfPath") or paper.get("pdf_path") or ""))
+        if pdf_path:
+            return f"pdf:{pdf_path}"
+
+        markdown_path = self._normalize_path_for_compare(
+            str(paper.get("markdownPath") or paper.get("markdown_path") or "")
+        )
+        if markdown_path:
+            return f"markdown:{markdown_path}"
+
+        doi = self._normalize_identifier(str(paper.get("doi", "")))
+        if doi:
+            return f"doi:{doi}"
+
+        return ""
+
+    def _select_canonical_paper(self, papers: list[Paper], *, preferred_id: str = "") -> Paper:
+        preferred_id = preferred_id.strip()
+        if preferred_id:
+            for paper in papers:
+                if str(paper.get("id", "")).strip() == preferred_id:
+                    return paper
+
+        def sort_key(paper: Paper) -> tuple[int, int, str, str]:
+            return (
+                self._paper_quality_score(paper),
+                1 if str(paper.get("pdfParsedBy", "")).strip() == "markdown" else 0,
+                self._paper_recency_marker(paper),
+                str(paper.get("id", "")).strip(),
+            )
+
+        return max(papers, key=sort_key)
+
+    def _merge_paper_group(self, canonical: Paper, duplicates: list[Paper]) -> Paper:
+        merged = dict(canonical)
+        merge_fields = (
+            "title",
+            "abstract",
+            "year",
+            "doi",
+            "venue",
+            "journal",
+            "containerTitle",
+            "url",
+            "pdfUrl",
+            "pdfPath",
+            "markdownPath",
+            "markdownOutputDir",
+            "sourcePdfPath",
+            "pdfParsedBy",
+            "pdfParseWarning",
+            "pdfTextPreview",
+            "keyword",
+            "markdownMetadataUpdatedAt",
+            "markdownMetadataSource",
+            "updatedAt",
+        )
+
+        for duplicate in duplicates:
+            for field in merge_fields:
+                if not str(merged.get(field, "")).strip() and str(duplicate.get(field, "")).strip():
+                    merged[field] = duplicate.get(field)
+
+            merged["authors"] = self._merge_string_lists(merged.get("authors", []), duplicate.get("authors", []))
+            merged["customTags"] = self._merge_string_lists(
+                merged.get("customTags", []),
+                duplicate.get("customTags", []),
+            )
+            merged["manualOverrideFields"] = self._merge_string_lists(
+                merged.get("manualOverrideFields", []),
+                duplicate.get("manualOverrideFields", []),
+            )
+
+        merged["id"] = canonical.get("id", "")
+        merged["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        return merged
+
+    def _paper_quality_score(self, paper: Paper) -> int:
+        score = 0
+        for field in (
+            "title",
+            "abstract",
+            "year",
+            "doi",
+            "venue",
+            "journal",
+            "containerTitle",
+            "url",
+            "pdfUrl",
+            "pdfPath",
+            "markdownPath",
+        ):
+            if str(paper.get(field, "")).strip():
+                score += 1
+
+        for field in ("authors", "customTags", "manualOverrideFields"):
+            if any(str(item).strip() for item in paper.get(field, [])):
+                score += 1
+
+        if str(paper.get("pdfParsedBy", "")).strip() == "markdown":
+            score += 2
+        if str(paper.get("markdownMetadataUpdatedAt", "")).strip():
+            score += 2
+
+        return score
+
+    def _paper_recency_marker(self, paper: Paper) -> str:
+        return max(
+            str(paper.get("markdownMetadataUpdatedAt", "")).strip(),
+            str(paper.get("updatedAt", "")).strip(),
+            str(paper.get("savedAt", "")).strip(),
+        )
+
+    def _merge_string_lists(self, left: object, right: object) -> list[str]:
+        values: list[str] = []
+        for source in (left, right):
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                cleaned = str(item).strip()
+                if cleaned and cleaned not in values:
+                    values.append(cleaned)
+        return values
+
+    def _normalize_path_for_compare(self, raw_path: str) -> str:
+        candidate = raw_path.strip()
+        if not candidate:
+            return ""
+
+        try:
+            return str(Path(candidate).expanduser().resolve()).lower()
+        except Exception:
+            return candidate.lower()
 
     def _paper_has_local_pdf(self, paper: Paper) -> bool:
         """判断数据库记录是否已经绑定了可用的本地 PDF。"""
