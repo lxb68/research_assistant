@@ -661,7 +661,7 @@ export default function DatasetDownloadPage({
         }}
       />
 
-      <Container maxWidth="lg" sx={{ position: "relative", zIndex: 1, pt: "52px", pb: { xs: 4, md: 7 } }}>
+      <Container maxWidth="lg" sx={{ position: "relative", zIndex: 1, pt: "32px", pb: { xs: 4, md: 7 } }}>
         <Stack spacing={4}>
           <Paper
             component="form"

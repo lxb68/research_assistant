@@ -84,7 +84,7 @@ export default function SettingsWorkspace() {
 
   return (
     <main className="dataset-browser-page">
-      <section className="dataset-browser-panel">
+      <section className="dataset-browser-panel settings-panel">
 
         {/* Tab 栏 */}
         <nav className="settings-tabs">
