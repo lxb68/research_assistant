@@ -1,7 +1,6 @@
 "use client";
 
-import Link from "next/link";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -11,12 +10,12 @@ import {
   Container,
   Divider,
   Paper,
+  Snackbar,
   Slider,
   Stack,
   TextField,
   Typography,
 } from "@mui/material";
-import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorOutlinedIcon from "@mui/icons-material/ErrorOutlined";
 import RadioButtonUncheckedIcon from "@mui/icons-material/RadioButtonUnchecked";
@@ -167,12 +166,12 @@ function getProgressVisual(state: SourceState) {
 
 type DatasetDownloadPageProps = {
   embedded?: boolean;
-  onBackHome?: () => void;
+  isActiveView?: boolean;
 };
 
 export default function DatasetDownloadPage({
   embedded = false,
-  onBackHome,
+  isActiveView = true,
 }: DatasetDownloadPageProps = {}) {
   const [query, setQuery] = useState("");
   const [selectedSources, setSelectedSources] = useState<PaperSource[]>(defaultSelectedSources);
@@ -192,6 +191,9 @@ export default function DatasetDownloadPage({
   );
   const [error, setError] = useState("");
   const [summary, setSummary] = useState("");
+  const [completionNoticeOpen, setCompletionNoticeOpen] = useState(false);
+  const [completionNoticeMessage, setCompletionNoticeMessage] = useState("");
+  const activeViewRef = useRef(isActiveView);
   const glassPanel = {
     border: "1px solid rgba(148, 163, 184, 0.22)",
     background: "rgba(8, 13, 24, 0.68)",
@@ -251,6 +253,10 @@ export default function DatasetDownloadPage({
     () => results.filter((paper) => paper.requiresManualDownload || !paper.pdfPath).length,
     [results],
   );
+
+  useEffect(() => {
+    activeViewRef.current = isActiveView;
+  }, [isActiveView]);
 
   function toggleSource(source: PaperSource) {
     setSelectedSources((current) => {
@@ -593,6 +599,12 @@ export default function DatasetDownloadPage({
       setSummary(
         `后端处理完成：检索 ${payload.searchedCount} 篇，去重后 ${payload.deduplicatedCount} 篇，筛选后 ${payload.filteredCount} 篇，总保存 ${payload.savedCount} 篇；每个数据源目标 ${payload.targetPerSource ?? safeLimit} 篇。优先保存已下载 PDF 的论文；若达到最大轮次仍不足，会返回仅元数据结果并提示手动下载。`,
       );
+      setCompletionNoticeMessage(
+        activeViewRef.current
+          ? `下载任务已完成，共保存 ${payload.savedCount} 篇结果。`
+          : `下载任务已完成，共保存 ${payload.savedCount} 篇结果，可返回“下载数据集”查看详情。`,
+      );
+      setCompletionNoticeOpen(true);
       setError(
         payload.errors.length > 0
           ? payload.errors.map((item) => `${getSourceLabel(item.source)}：${item.message}`).join("；")
@@ -1342,6 +1354,30 @@ export default function DatasetDownloadPage({
           </Box>
         </Stack>
       </Container>
+      <Snackbar
+        open={completionNoticeOpen}
+        autoHideDuration={5000}
+        onClose={(_, reason) => {
+          if (reason === "clickaway") {
+            return;
+          }
+          setCompletionNoticeOpen(false);
+        }}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+      >
+        <Alert
+          onClose={() => setCompletionNoticeOpen(false)}
+          severity="success"
+          variant="filled"
+          sx={{
+            alignItems: "center",
+            minWidth: 320,
+            boxShadow: "0 18px 45px rgba(15, 23, 42, 0.35)",
+          }}
+        >
+          {completionNoticeMessage}
+        </Alert>
+      </Snackbar>
     </Box>
   );
 }

@@ -1,10 +1,10 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import DatasetDownloadPage from "./dataset-download/page";
 import DatasetBrowser from "@/app/dataset-brower/DatasetBrowser";
 import SettingsWorkspace from "@/app/setting/SettingsWorkspace";
 import HeroSection from "@/home/HeroSection";
+import DatasetDownloadPage from "./dataset-download/page";
 
 type WorkspaceView = "home" | "download" | "browse" | "settings";
 
@@ -46,31 +46,55 @@ export default function Home() {
         </header>
       )}
 
-      {activeView === "download" ? (
-        <DatasetDownloadPage embedded onBackHome={() => setActiveView("home")} />
-      ) : activeView === "browse" ? (
-        <DatasetBrowser />
-      ) : activeView === "settings" ? (
-        <SettingsWorkspace />
-      ) : (
-        <main className="home-page">
-          <HeroSection
-            onCreateProject={() => setCreateDialogOpen(true)}
-            onOpenDownload={() => setActiveView("download")}
-            onOpenBrowse={() => setActiveView("browse")}
-            onOpenSettings={() => setActiveView("settings")}
-          />
+      <div className="workspace-view-stack">
+        <div
+          className={`workspace-view-panel ${
+            activeView === "home" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
+          }`}
+        >
+          <main className="home-page">
+            <HeroSection
+              onCreateProject={() => setCreateDialogOpen(true)}
+              onOpenDownload={() => setActiveView("download")}
+              onOpenBrowse={() => setActiveView("browse")}
+              onOpenSettings={() => setActiveView("settings")}
+            />
 
-          {createDialogOpen && (
-            <section className="home-notice" role="status">
-              创建项目功能待接入。
-              <button type="button" onClick={() => setCreateDialogOpen(false)}>
-                关闭
-              </button>
-            </section>
-          )}
-        </main>
-      )}
+            {createDialogOpen && (
+              <section className="home-notice" role="status">
+                创建项目功能待接入。
+                <button type="button" onClick={() => setCreateDialogOpen(false)}>
+                  关闭
+                </button>
+              </section>
+            )}
+          </main>
+        </div>
+
+        <div
+          className={`workspace-view-panel ${
+            activeView === "download" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
+          }`}
+        >
+          <DatasetDownloadPage embedded isActiveView={activeView === "download"} />
+        </div>
+
+        <div
+          className={`workspace-view-panel ${
+            activeView === "browse" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
+          }`}
+        >
+          <DatasetBrowser />
+        </div>
+
+        <div
+          className={`workspace-view-panel ${
+            activeView === "settings" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
+          }`}
+        >
+          <SettingsWorkspace />
+        </div>
+      </div>
     </div>
   );
 }

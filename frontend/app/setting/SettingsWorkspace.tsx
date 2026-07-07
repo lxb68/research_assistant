@@ -2,10 +2,6 @@
 
 import { useState } from "react";
 
-/* ================================================================
-   类型与常量
-   ================================================================ */
-
 type SplitStrategy =
   | "document-structure"
   | "custom-delimiter"
@@ -20,7 +16,8 @@ type SettingsState = {
   taskType: string;
   promptTemplate: string;
   splitStrategy: SplitStrategy;
-  questionLength: number;
+  minimumLength: number;
+  maximumSplitLength: number;
 };
 
 const STORAGE_KEY = "research-agent.settings";
@@ -32,23 +29,44 @@ const defaultSettings: SettingsState = {
   taskType: "pdf-to-md",
   promptTemplate: "将以下 PDF 内容转换为 Markdown 格式，保留公式、表格和章节结构。",
   splitStrategy: "document-structure",
-  questionLength: 240,
+  minimumLength: 1500,
+  maximumSplitLength: 2000,
 };
 
 const strategies = [
-  { value: "document-structure" as const, label: "按文档结构切分", desc: "优先依据标题、章节、表格与段落边界切分。" },
-  { value: "custom-delimiter" as const, label: "按自定义分隔符切分", desc: "适合已经有明确分段标记的文本材料。" },
-  { value: "fixed-char" as const, label: "按固定字符数切分", desc: "实现简单，适合快速试验与基准对比。" },
-  { value: "fixed-token" as const, label: "按固定 Token 数切分", desc: "更接近模型上下文限制，适合问答与嵌入场景。" },
-  { value: "code-intelligent" as const, label: "按代码语义智能切分", desc: "适合混合代码与技术文档的处理流程。" },
+  {
+    value: "document-structure" as const,
+    label: "按文档结构切分",
+    desc: "优先按标题、章节、段落等自然边界切分文本。",
+  },
+  {
+    value: "custom-delimiter" as const,
+    label: "按自定义分隔符切分",
+    desc: "适合文本中已经存在明确分段标记的场景。",
+  },
+  {
+    value: "fixed-char" as const,
+    label: "按固定字符数切分",
+    desc: "按字符长度范围直接切分，便于快速控制分块大小。",
+  },
+  {
+    value: "fixed-token" as const,
+    label: "按固定 Token 数切分",
+    desc: "更贴近模型上下文限制，适合问答与向量化处理。",
+  },
+  {
+    value: "code-intelligent" as const,
+    label: "按代码语义智能切分",
+    desc: "适合混合代码与技术文档的处理流程。",
+  },
 ];
 
 const TABS = ["基本信息", "模型配置", "任务配置", "提示词配置"] as const;
 type TabIndex = 0 | 1 | 2 | 3;
 
-/* ================================================================
-   组件
-   ================================================================ */
+function getStrategyDescription(strategy: SplitStrategy) {
+  return strategies.find((item) => item.value === strategy)?.desc ?? "";
+}
 
 export default function SettingsWorkspace() {
   const [settings, setSettings] = useState<SettingsState>(() => {
@@ -67,7 +85,7 @@ export default function SettingsWorkspace() {
   const [saved, setSaved] = useState(false);
 
   function set<K extends keyof SettingsState>(key: K, value: SettingsState[K]) {
-    setSettings((s) => ({ ...s, [key]: value }));
+    setSettings((current) => ({ ...current, [key]: value }));
     setSaved(false);
   }
 
@@ -85,8 +103,6 @@ export default function SettingsWorkspace() {
   return (
     <main className="dataset-browser-page">
       <section className="dataset-browser-panel settings-panel">
-
-        {/* Tab 栏 */}
         <nav className="settings-tabs">
           {TABS.map((label, i) => (
             <button
@@ -100,10 +116,8 @@ export default function SettingsWorkspace() {
           ))}
         </nav>
 
-        {/* 分隔线 */}
         <div className="settings-divider" />
 
-        {/* 内容 */}
         <div className="settings-body">
           {activeTab === 0 && (
             <>
@@ -142,7 +156,7 @@ export default function SettingsWorkspace() {
                 <option value="gemini-pro">Gemini Pro Vision</option>
               </select>
               <span className="settings-hint">
-                选择用于 PDF 解析与内容生成的视觉语言模型。不同模型在公式识别、表格还原等方面表现有差异。
+                选择用于 PDF 解析与内容生成的视觉语言模型。不同模型在公式识别、表格还原等方面表现会有差异。
               </span>
             </label>
           )}
@@ -162,44 +176,68 @@ export default function SettingsWorkspace() {
                 </select>
               </label>
 
-              <div className="settings-row">
-                <span className="settings-row-label">文本切分策略</span>
-                <div className="settings-radios">
-                  {strategies.map((s) => (
-                    <label
-                      key={s.value}
-                      className={`settings-radio${settings.splitStrategy === s.value ? " is-checked" : ""}`}
-                    >
-                      <input
-                        type="radio"
-                        name="splitStrategy"
-                        value={s.value}
-                        checked={settings.splitStrategy === s.value}
-                        onChange={() => set("splitStrategy", s.value)}
-                      />
-                      <span>
-                        <strong>{s.label}</strong>
-                        <small>{s.desc}</small>
-                      </span>
-                    </label>
+              <label className="settings-row">
+                <span className="settings-row-label">分割策略（Split Strategy）</span>
+                <select
+                  className="settings-input"
+                  value={settings.splitStrategy}
+                  onChange={(e) => set("splitStrategy", e.target.value as SplitStrategy)}
+                >
+                  {strategies.map((strategy) => (
+                    <option key={strategy.value} value={strategy.value}>
+                      {strategy.label}
+                    </option>
                   ))}
+                </select>
+                <span className="settings-hint">
+                  文本分割基于设置的长度范围进行操作，将输入文本按照规则分割成合适的段落，以便后续处理。
+                </span>
+                <span className="settings-hint">{getStrategyDescription(settings.splitStrategy)}</span>
+              </label>
+
+              <div className="settings-row">
+                <span className="settings-row-label">最小长度（Minimum Length）</span>
+                <div className="settings-slider-block">
+                  <div className="settings-slider-meta">
+                    <strong>{settings.minimumLength}</strong>
+                    <span>默认值 1500</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={500}
+                    max={5000}
+                    step={100}
+                    className="settings-slider"
+                    value={settings.minimumLength}
+                    onChange={(e) => set("minimumLength", Number(e.target.value))}
+                  />
                 </div>
+                <span className="settings-hint">
+                  设定分割后每个文本片段的最小字符长度。若某段文本长度小于该值，会与相邻文本段合并，直至满足最小长度要求。
+                </span>
               </div>
 
-              <label className="settings-row">
-                <span className="settings-row-label">题目最大长度</span>
-                <span className="settings-inline">
+              <div className="settings-row">
+                <span className="settings-row-label">最大分割长度（Maximum Split Length）</span>
+                <div className="settings-slider-block">
+                  <div className="settings-slider-meta">
+                    <strong>{settings.maximumSplitLength}</strong>
+                    <span>默认值 2000</span>
+                  </div>
                   <input
-                    type="number"
-                    className="settings-input settings-input-num"
-                    value={settings.questionLength}
-                    min={1}
-                    max={1000}
-                    onChange={(e) => set("questionLength", Number(e.target.value) || 1)}
+                    type="range"
+                    min={1000}
+                    max={8000}
+                    step={100}
+                    className="settings-slider"
+                    value={settings.maximumSplitLength}
+                    onChange={(e) => set("maximumSplitLength", Number(e.target.value))}
                   />
-                  <span className="settings-hint">1–1000，控制自动生成问题的长度上限。</span>
+                </div>
+                <span className="settings-hint">
+                  限制分割后每个文本片段的最大字符长度。超过该长度的文本会被分割成多个片段。
                 </span>
-              </label>
+              </div>
             </>
           )}
 
@@ -219,12 +257,10 @@ export default function SettingsWorkspace() {
           )}
         </div>
 
-        {/* 分隔线 */}
         <div className="settings-divider" />
 
-        {/* 底部操作 */}
         <div className="settings-footer">
-          {saved && <span className="settings-toast">✓ 已保存</span>}
+          {saved && <span className="settings-toast">已保存</span>}
           <button type="button" className="settings-btn settings-btn-ghost" onClick={reset}>
             恢复默认
           </button>

@@ -63,6 +63,18 @@ body {
   background: var(--background);
 }
 
+.workspace-view-stack {
+  min-height: calc(100vh - 64px);
+}
+
+.workspace-view-panel-hidden {
+  display: none;
+}
+
+.workspace-view-panel-active {
+  display: block;
+}
+
 .workspace-topbar {
   position: sticky;
   top: 0;
@@ -1809,6 +1821,62 @@ select.settings-input {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.settings-slider-block {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.4);
+  padding: 14px 16px;
+}
+
+.settings-slider-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-slider-meta strong {
+  color: #f8fafc;
+  font-size: 1rem;
+}
+
+.settings-slider-meta span {
+  color: rgba(148, 163, 184, 0.74);
+  font-size: 0.75rem;
+}
+
+.settings-slider {
+  width: 100%;
+  height: 6px;
+  appearance: none;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(42, 92, 170, 0.9) 0%, rgba(109, 93, 246, 0.9) 100%);
+  outline: none;
+}
+
+.settings-slider::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+  appearance: none;
+  border: 2px solid #dbeafe;
+  border-radius: 50%;
+  background: #60a5fa;
+  box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.18);
+  cursor: pointer;
+}
+
+.settings-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #dbeafe;
+  border-radius: 50%;
+  background: #60a5fa;
+  box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.18);
+  cursor: pointer;
 }
 
 /* ---- 底部操作栏 ---- */
