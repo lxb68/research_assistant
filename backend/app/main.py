@@ -461,6 +461,12 @@ async def process_mineru(request: MinerURequest):
                     request.record_id,
                     markdown_path=result.get("markdownPath", ""),
                 )
+                updated_paper = agent.split_saved_paper_from_markdown(
+                    request.record_id,
+                    markdown_path=result.get("markdownPath", ""),
+                    min_split_length=request.split_min_length,
+                    max_split_length=request.split_max_length,
+                )
                 dedupe_result = agent.deduplicate_saved_papers(record_id=request.record_id)
                 if dedupe_result.get("canonicalPapers"):
                     updated_paper = dedupe_result["canonicalPapers"][0]

@@ -83,6 +83,8 @@ class Settings:
         BACKEND_DIR / "storage" / "markdown",
     )
     mineru_api_token = os.getenv("MINERU_API_TOKEN", "")
+    split_min_length = int(os.getenv("SPLIT_MIN_LENGTH", "1500"))
+    split_max_length = int(os.getenv("SPLIT_MAX_LENGTH", "2000"))
     hunter_metadata_db = os.getenv("HUNTER_METADATA_DB") or str(
         BACKEND_DIR / "storage" / "metadata" / "papers.sqlite3",
     )

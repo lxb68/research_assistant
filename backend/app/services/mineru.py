@@ -20,6 +20,8 @@ class MinerURequest(BaseModel):
     pdf_path: str | None = Field(None, description="Absolute PDF path or file name under storage/papers")
     output_name: str | None = Field(None, description="Optional MinerU output directory name")
     mineru_token: str | None = Field(None, description="Optional MinerU API token override")
+    split_min_length: int | None = Field(None, ge=100, description="Optional minimum chunk length")
+    split_max_length: int | None = Field(None, ge=200, description="Optional maximum chunk length")
 
 
 @dataclass(slots=True)

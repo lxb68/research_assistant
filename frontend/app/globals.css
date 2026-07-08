@@ -555,6 +555,125 @@ main {
   background: #0f172a;
 }
 
+.paper-viewer-split-panel {
+  margin-top: 18px;
+}
+
+.paper-viewer-split-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.paper-viewer-split-header h2 {
+  margin-top: 8px;
+  color: #f8fafc;
+  font-size: 1.2rem;
+}
+
+.paper-viewer-split-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.paper-viewer-split-stats span,
+.paper-viewer-paragraph-index {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  border-radius: 999px;
+  background: rgba(30, 41, 59, 0.62);
+  color: #bfdbfe;
+  font-size: 0.84rem;
+  font-weight: 800;
+  padding: 0 12px;
+}
+
+.paper-viewer-split-empty {
+  color: rgba(226, 232, 240, 0.72);
+}
+
+.paper-viewer-split-list {
+  display: grid;
+  gap: 14px;
+}
+
+.paper-viewer-split-card {
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.56);
+  overflow: hidden;
+}
+
+.paper-viewer-split-summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 18px 20px;
+}
+
+.paper-viewer-split-summary::-webkit-details-marker {
+  display: none;
+}
+
+.paper-viewer-split-summary strong {
+  color: #f8fafc;
+  font-size: 1rem;
+}
+
+.paper-viewer-split-summary p {
+  margin-top: 6px;
+  color: rgba(191, 219, 254, 0.78);
+  font-size: 0.88rem;
+}
+
+.paper-viewer-paragraph-list {
+  display: grid;
+  gap: 12px;
+  padding: 0 20px 18px;
+}
+
+.paper-viewer-paragraph-card {
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.42);
+  padding: 14px 16px;
+}
+
+.paper-viewer-paragraph-card p {
+  margin-top: 10px;
+  color: rgba(226, 232, 240, 0.86);
+  line-height: 1.65;
+}
+
+.paper-viewer-paragraph-card small {
+  display: inline-block;
+  margin-top: 8px;
+  color: rgba(148, 163, 184, 0.9);
+}
+
+.paper-viewer-split-content {
+  margin: 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(2, 6, 23, 0.62);
+  color: rgba(226, 232, 240, 0.88);
+  font-family: var(--font-geist-mono), Consolas, monospace;
+  font-size: 0.9rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 18px 20px 22px;
+}
+
+@media (max-width: 720px) {
+  .paper-viewer-split-header {
+    flex-direction: column;
+  }
+}
+
 /* 首页首屏：提供居中布局和轻量背景层次。 */
 .hero-section {
   position: relative;

@@ -22,6 +22,11 @@ from app.services.ccf_catalog import CcfCatalog
 from app.services.paper_search import SUPPORTED_SOURCES
 from app.services.providers.arxiv import ARXIV_API_URL
 from app.services.providers.ieee import IEEE_API_URL
+from app.services.split import (
+    DEFAULT_MAX_SPLIT_LENGTH,
+    DEFAULT_MIN_SPLIT_LENGTH,
+    split_markdown_document,
+)
 from app.services.sjr_metrics import SjrMetrics
 from app.services.venue_metrics import enrich_paper_metrics
 import requests
@@ -738,6 +743,58 @@ class HunterAgent:
         self._log(
             f"Markdown 元数据回写：record_id={normalized_id}, "
             f"fields={sorted(updates.keys())}, markdown={resolved_markdown}"
+        )
+        return self.update_saved_paper(normalized_id, updates)
+
+    def split_saved_paper_from_markdown(
+        self,
+        record_id: str,
+        *,
+        markdown_path: str | Path | None = None,
+        min_split_length: int | None = None,
+        max_split_length: int | None = None,
+    ) -> Paper:
+        normalized_id = record_id.strip()
+        if not normalized_id:
+            raise ValueError("record_id is required")
+
+        record = self.get_saved_paper(normalized_id)
+        if not record:
+            raise ValueError(f"Paper record not found: {normalized_id}")
+
+        resolved_markdown = self._resolve_markdown_for_metadata_refresh(record, markdown_path)
+        markdown_text = resolved_markdown.read_text(encoding="utf-8", errors="ignore")
+        if not markdown_text.strip():
+            raise ValueError(f"Markdown file is empty: {resolved_markdown}")
+
+        effective_min = int(min_split_length or settings.split_min_length or DEFAULT_MIN_SPLIT_LENGTH)
+        effective_max = int(max_split_length or settings.split_max_length or DEFAULT_MAX_SPLIT_LENGTH)
+        if effective_min <= 0 or effective_max <= 0:
+            raise ValueError("Split lengths must be positive")
+        if effective_min > effective_max:
+            raise ValueError("split_min_length cannot be greater than split_max_length")
+
+        split_result = split_markdown_document(
+            markdown_text,
+            min_split_length=effective_min,
+            max_split_length=effective_max,
+        )
+        updates = {
+            "splitStrategy": "document-structure",
+            "splitMinimumLength": effective_min,
+            "splitMaximumLength": effective_max,
+            "splitOutline": split_result["outline"],
+            "splitSections": split_result["sections"],
+            "splitChunks": split_result["chunks"],
+            "splitSectionCount": split_result["sectionCount"],
+            "splitChunkCount": split_result["chunkCount"],
+            "splitSourceMarkdownPath": str(resolved_markdown),
+            "splitUpdatedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        self._log(
+            f"Markdown 文本切分完成：record_id={normalized_id}, "
+            f"sections={split_result['sectionCount']}, chunks={split_result['chunkCount']}, "
+            f"min={effective_min}, max={effective_max}"
         )
         return self.update_saved_paper(normalized_id, updates)
 
@@ -1717,17 +1774,22 @@ class HunterAgent:
 
     def _json_safe_paper(self, paper: Paper) -> Paper:
         """把论文对象转换成 JSON 可写入的基础类型。"""
-        safe_paper: Paper = {}
+        return {
+            str(key): self._json_safe_value(value)
+            for key, value in paper.items()
+        }
 
-        for key, value in paper.items():
-            if isinstance(value, (str, int, float, bool)) or value is None:
-                safe_paper[key] = value
-            elif isinstance(value, list):
-                safe_paper[key] = [str(item) for item in value]
-            else:
-                safe_paper[key] = str(value)
-
-        return safe_paper
+    def _json_safe_value(self, value: object) -> object:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, list):
+            return [self._json_safe_value(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(key): self._json_safe_value(item)
+                for key, item in value.items()
+            }
+        return str(value)
 
     def _clear_preprint_metrics(self, paper: Paper) -> Paper:
         return {

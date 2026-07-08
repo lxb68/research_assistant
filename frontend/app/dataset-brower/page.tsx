@@ -41,6 +41,7 @@ type ImportStreamEvent = {
 };
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4000";
+const SETTINGS_STORAGE_KEY = "research-agent.settings";
 
 const emptyPdfImportForm: PdfImportForm = {
   title: "",
@@ -61,6 +62,30 @@ function splitValues(value: string) {
 
 function uniqueValues(values: Array<string | undefined>) {
   return Array.from(new Set(values.map((value) => value?.trim()).filter(Boolean))) as string[];
+}
+
+function getSplitLengthsFromSettings() {
+  if (typeof window === "undefined") {
+    return { minimumLength: 1500, maximumSplitLength: 2000 };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) {
+      return { minimumLength: 1500, maximumSplitLength: 2000 };
+    }
+
+    const parsed = JSON.parse(raw) as Partial<{
+      minimumLength: number;
+      maximumSplitLength: number;
+    }>;
+    return {
+      minimumLength: Number(parsed.minimumLength) || 1500,
+      maximumSplitLength: Number(parsed.maximumSplitLength) || 2000,
+    };
+  } catch {
+    return { minimumLength: 1500, maximumSplitLength: 2000 };
+  }
 }
 
 export default function DatasetBrowser() {
@@ -263,6 +288,7 @@ export default function DatasetBrowser() {
     if (selectedPapers.length === 0 || isSplitting) {
       return;
     }
+    const splitSettings = getSplitLengthsFromSettings();
 
     setIsSplitting(true);
     setError("");
@@ -290,6 +316,8 @@ export default function DatasetBrowser() {
             body: JSON.stringify({
               record_id: paperId,
               output_name: paperId,
+              split_min_length: splitSettings.minimumLength,
+              split_max_length: splitSettings.maximumSplitLength,
             }),
           });
 

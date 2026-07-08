@@ -1,20 +1,32 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import DatasetBrowser from "@/app/dataset-brower/DatasetBrowser";
-import SettingsWorkspace from "@/app/setting/SettingsWorkspace";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import DatasetBrowser from "@/app/dataset-brower/page";
+import SettingsWorkspace from "@/app/setting/page";
 import HeroSection from "@/home/HeroSection";
 import DatasetDownloadPage from "./dataset-download/page";
 
 type WorkspaceView = "home" | "download" | "browse" | "settings";
 
+function parseWorkspaceView(value: string | null): WorkspaceView {
+  if (value === "download" || value === "browse" || value === "settings") {
+    return value;
+  }
+  return "home";
+}
+
 export default function Home() {
-  const [activeView, setActiveView] = useState<WorkspaceView>("home");
+  const searchParams = useSearchParams();
+  const [activeView, setActiveView] = useState<WorkspaceView>(() => parseWorkspaceView(searchParams.get("view")));
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+
+  useEffect(() => {
+    setActiveView(parseWorkspaceView(searchParams.get("view")));
+  }, [searchParams]);
 
   const navItems = useMemo(
     () => [
-      { id: "home" as const, label: "主页" },
       { id: "download" as const, label: "下载数据集" },
       { id: "browse" as const, label: "浏览数据集" },
       { id: "settings" as const, label: "设置" },
