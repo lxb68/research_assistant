@@ -44,6 +44,39 @@ _GENERIC_SECTION_TITLES = {
     "results",
     "setup",
 }
+_NON_CORE_SECTION_PATTERNS = (
+    "keyword",
+    "keywords",
+    "notation",
+    "notations",
+    "symbol",
+    "symbols",
+    "abbreviation",
+    "abbreviations",
+    "reference",
+    "references",
+    "bibliography",
+    "acknowledgment",
+    "acknowledgments",
+    "acknowledgement",
+    "acknowledgements",
+    "funding",
+    "conflict of interest",
+    "conflicts of interest",
+    "declaration",
+    "ethical approval",
+    "author contribution",
+    "author contributions",
+    "competing interests",
+    "data availability",
+    "supplementary material",
+    "supplementary materials",
+    "appendix",
+    "journal",
+    "conference",
+    "publication info",
+    "copyright",
+)
 _STOPWORDS = {
     "a",
     "an",
@@ -534,14 +567,14 @@ class DomainTreeAgent:
             lines.append("目录:")
 
             if document.toc_entries:
-                for entry in document.toc_entries[:120]:
+                for entry in self._filter_toc_entries(document.toc_entries)[:120]:
                     level = max(1, min(int(entry.get("level", 1)), 6))
                     indent = "  " * (level - 1)
                     title = str(entry.get("title", "")).strip()
                     if title:
                         lines.append(f"{indent}- {title}")
             elif document.markdown_path and document.markdown_path.exists():
-                headings = self._extract_headings_from_markdown(document.markdown_path)
+                headings = self._filter_toc_entries(self._extract_headings_from_markdown(document.markdown_path))
                 for entry in headings[:120]:
                     level = max(1, min(int(entry.get("level", 1)), 6))
                     indent = "  " * (level - 1)
@@ -553,11 +586,11 @@ class DomainTreeAgent:
 
     def _load_toc_entries(self, markdown_dir: Path | None, markdown_path: Path | None) -> list[dict[str, Any]]:
         if markdown_dir:
-            toc_entries = self._extract_toc_from_content_list(markdown_dir)
+            toc_entries = self._filter_toc_entries(self._extract_toc_from_content_list(markdown_dir))
             if toc_entries:
                 return toc_entries
         if markdown_path and markdown_path.exists():
-            return self._extract_headings_from_markdown(markdown_path)
+            return self._filter_toc_entries(self._extract_headings_from_markdown(markdown_path))
         return []
 
     def _extract_toc_from_content_list(self, markdown_dir: Path) -> list[dict[str, Any]]:
@@ -714,7 +747,7 @@ class DomainTreeAgent:
                 if matched_domain:
                     add_edge(matched_domain, topic_id, "covers_topic")
 
-            for entry in document.toc_entries[:30]:
+            for entry in self._filter_toc_entries(document.toc_entries)[:30]:
                 title = str(entry.get("title", "")).strip()
                 if not title:
                     continue
@@ -773,39 +806,38 @@ class DomainTreeAgent:
                     topic_documents[normalized].add(document.record_id)
                     topic_scores[normalized] += 6
 
-            for keyword in document.keywords:
+            for keyword in document.keywords[:8]:
                 normalized = self._normalize_topic_phrase(keyword)
                 if normalized:
                     topic_documents[normalized].add(document.record_id)
-                    topic_scores[normalized] += 5
+                    topic_scores[normalized] += 1
 
-            for entry in document.toc_entries[:20]:
+            for entry in self._filter_toc_entries(document.toc_entries)[:20]:
                 normalized = self._normalize_topic_phrase(str(entry.get("title", "")))
                 if normalized:
                     level = int(entry.get("level", 1))
                     topic_documents[normalized].add(document.record_id)
-                    topic_scores[normalized] += 3 if level <= 2 else 1
+                    topic_scores[normalized] += 4 if level <= 2 else 1
 
-            for phrase in self._extract_candidate_phrases(document.abstract)[:8]:
+            for phrase in self._extract_candidate_phrases(document.abstract)[:12]:
                 normalized = self._normalize_topic_phrase(phrase)
                 if normalized:
                     topic_documents[normalized].add(document.record_id)
-                    topic_scores[normalized] += 2
+                    topic_scores[normalized] += 5
 
         return topic_scores, topic_documents
 
     def _extract_document_topics(self, document: SourceDocument) -> list[str]:
         phrases: list[str] = []
         title_phrases = self._extract_candidate_phrases(document.title)
-        keyword_phrases = [self._normalize_topic_phrase(keyword) for keyword in document.keywords]
         heading_phrases = [
             self._normalize_topic_phrase(str(entry.get("title", "")))
-            for entry in document.toc_entries[:20]
+            for entry in self._filter_toc_entries(document.toc_entries)[:20]
             if int(entry.get("level", 1)) <= 2
         ]
-        abstract_phrases = self._extract_candidate_phrases(document.abstract)[:8]
+        abstract_phrases = self._extract_candidate_phrases(document.abstract)[:12]
 
-        for source in (title_phrases, keyword_phrases, heading_phrases, abstract_phrases):
+        for source in (title_phrases, heading_phrases, abstract_phrases):
             for phrase in source:
                 cleaned = self._normalize_topic_phrase(phrase)
                 if cleaned and cleaned not in phrases:
@@ -847,15 +879,12 @@ class DomainTreeAgent:
         for document in documents:
             if document.record_id not in related_document_ids:
                 continue
-            for entry in document.toc_entries[:20]:
+            for entry in self._filter_toc_entries(document.toc_entries)[:20]:
                 title = self._normalize_topic_phrase(str(entry.get("title", "")))
                 if not title or title == topic or title.lower() in _GENERIC_SECTION_TITLES:
                     continue
-                counter[title] += 1
-            for keyword in document.keywords:
-                normalized = self._normalize_topic_phrase(keyword)
-                if normalized and normalized != topic:
-                    counter[normalized] += 2
+                level = int(entry.get("level", 1))
+                counter[title] += 2 if level <= 2 else 1
         return [name for name, _ in counter.most_common(6)]
 
     def _domain_keywords_from_tree(self, tags: list[dict[str, Any]]) -> dict[str, set[str]]:
@@ -982,6 +1011,8 @@ class DomainTreeAgent:
             return ""
         if lowered.startswith("appendix") or lowered.startswith("additional "):
             return ""
+        if self._is_non_core_section(cleaned):
+            return ""
         if re.fullmatch(r"[a-z]", lowered):
             return ""
         if len(cleaned.split()) == 1 and lowered in {"action", "camera", "implementation", "derivation", "study"}:
@@ -989,6 +1020,28 @@ class DomainTreeAgent:
         if len(cleaned) < 3:
             return ""
         return cleaned
+
+    def _filter_toc_entries(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        filtered: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            title = str(entry.get("title", "")).strip()
+            if not title or self._is_non_core_section(title):
+                continue
+            filtered.append(entry)
+        return filtered
+
+    def _is_non_core_section(self, title: str) -> bool:
+        normalized = re.sub(r"^\d+(?:\.\d+)*\s*", "", str(title).strip())
+        normalized = re.sub(r"\s+", " ", normalized).strip(" -_#:.").lower()
+        if not normalized:
+            return True
+        if normalized in _GENERIC_SECTION_TITLES:
+            return True
+        if normalized.startswith("appendix") or normalized.startswith("additional "):
+            return True
+        return any(pattern in normalized for pattern in _NON_CORE_SECTION_PATTERNS)
 
     def _short_label(self, phrase: str) -> str:
         cleaned = self._normalize_topic_phrase(phrase)
