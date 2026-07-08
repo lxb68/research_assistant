@@ -136,7 +136,9 @@ export default function DatasetBrowser() {
   }
 
   useEffect(() => {
-    loadPapers("", { initial: true });
+    void (async () => {
+      await loadPapers("", { initial: true });
+    })();
   }, []);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {

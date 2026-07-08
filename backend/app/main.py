@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import queue
 import threading
 from pathlib import Path
@@ -8,10 +9,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.agents import HunterAgent
+from app.agents import DomainTreeAgent, HunterAgent
 from app.core.config import settings
 from app.services.mineru import MinerURequest, mineru_processing
 from app.services.paper_search import SUPPORTED_SOURCES, search_papers
+
+
+MULTIPART_AVAILABLE = importlib.util.find_spec("multipart") is not None
+
+if not MULTIPART_AVAILABLE:
+    UploadFile = bytes  # type: ignore[assignment]
+    File = lambda *args, **kwargs: None  # type: ignore[assignment]
+    Form = lambda *args, **kwargs: None  # type: ignore[assignment]
 
 
 class DatasetDownloadRequest(BaseModel):
@@ -50,6 +59,16 @@ class ImportPaperRequest(BaseModel):
     url: str = Field("", description="原文链接")
     pdf_url: str = Field("", description="PDF 链接")
     custom_tags: list[str] = Field(default_factory=list, description="自定义标签")
+
+
+class DomainTreeGenerateRequest(BaseModel):
+    project_id: str = Field(..., min_length=1, description="领域树对应的项目ID或论文记录ID")
+    action: str = Field("rebuild", description="生成动作：rebuild / revise / keep")
+    language: str = Field("中文", description="提示词语言")
+    all_toc: str | None = Field(None, description="可选：手动传入的完整目录文本")
+    new_toc: str | None = Field(None, description="可选：增量修订时新增目录文本")
+    delete_toc: str | None = Field(None, description="可选：增量修订时删除目录文本")
+    model: str | None = Field(None, description="可选：覆盖默认模型")
 
 
 app = FastAPI(
@@ -422,6 +441,49 @@ def re_split_values(value: str) -> list[str]:
     for separator in separators:
         values = [part for item in values for part in item.split(separator)]
     return [part.strip() for part in values if part.strip()]
+
+
+@app.post("/api/domain-tree/generate")
+async def generate_domain_tree(payload: DomainTreeGenerateRequest) -> dict:
+    try:
+        agent = DomainTreeAgent()
+        tags = await agent.handle_domain_tree(
+            payload.project_id,
+            action=payload.action,
+            all_toc=payload.all_toc,
+            new_toc=payload.new_toc,
+            model=payload.model,
+            language=payload.language,
+            delete_toc=payload.delete_toc,
+        )
+        if not tags:
+            raise HTTPException(status_code=400, detail="未找到可用于生成领域树的 Markdown/目录数据")
+
+        result = agent.get_result(payload.project_id)
+        if not result:
+            raise HTTPException(status_code=500, detail="领域树已生成，但读取结果失败")
+
+        return {"status": "ok", **result}
+    except HTTPException:
+        raise
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.get("/api/domain-tree/{project_id}")
+def get_domain_tree(project_id: str) -> dict:
+    try:
+        agent = DomainTreeAgent()
+        result = agent.get_result(project_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="指定项目尚未生成领域树")
+        return {"status": "ok", **result}
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
 
 
 @app.post("/api/mineru/process")

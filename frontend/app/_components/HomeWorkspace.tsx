@@ -1,0 +1,122 @@
+"use client";
+
+import { useMemo, useState } from "react";
+import DatasetBrowser from "@/app/dataset-brower/page";
+import DomainTreePage from "@/app/domain-tree/page";
+import SettingsWorkspace from "@/app/setting/page";
+import HeroSection from "@/home/HeroSection";
+import DatasetDownloadPage from "../dataset-download/page";
+
+type WorkspaceView = "home" | "download" | "browse" | "domain-tree" | "settings";
+
+function parseWorkspaceView(value: string | null): WorkspaceView {
+  if (value === "download" || value === "browse" || value === "domain-tree" || value === "settings") {
+    return value;
+  }
+  return "home";
+}
+
+type HomeWorkspaceProps = {
+  initialView: string | null;
+};
+
+export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
+  const [manualView, setManualView] = useState<WorkspaceView | null>(null);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const activeView = manualView ?? parseWorkspaceView(initialView);
+
+  const navItems = useMemo(
+    () => [
+      { id: "download" as const, label: "下载数据集" },
+      { id: "browse" as const, label: "浏览数据集" },
+      { id: "domain-tree" as const, label: "领域树" },
+      { id: "settings" as const, label: "设置" },
+    ],
+    [],
+  );
+
+  return (
+    <div className="workspace-shell">
+      {activeView !== "home" && (
+        <header className="workspace-topbar">
+          <button type="button" className="workspace-brand" onClick={() => setManualView("home")}>
+            <span className="workspace-logo">R</span>
+            <span>Research Agent</span>
+          </button>
+
+          <nav className="workspace-tabs" aria-label="数据集工作台">
+            {navItems.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`workspace-tab ${activeView === item.id ? "workspace-tab-active" : ""}`}
+                onClick={() => setManualView(item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </nav>
+        </header>
+      )}
+
+      <div className="workspace-view-stack">
+        <div
+          className={`workspace-view-panel ${
+            activeView === "home" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
+          }`}
+        >
+          <main className="home-page">
+            <HeroSection
+              onCreateProject={() => setCreateDialogOpen(true)}
+              onOpenDownload={() => setManualView("download")}
+              onOpenBrowse={() => setManualView("browse")}
+              onOpenDomainTree={() => setManualView("domain-tree")}
+              onOpenSettings={() => setManualView("settings")}
+            />
+
+            {createDialogOpen && (
+              <section className="home-notice" role="status">
+                创建项目功能待接入。
+                <button type="button" onClick={() => setCreateDialogOpen(false)}>
+                  关闭
+                </button>
+              </section>
+            )}
+          </main>
+        </div>
+
+        <div
+          className={`workspace-view-panel ${
+            activeView === "download" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
+          }`}
+        >
+          <DatasetDownloadPage embedded isActiveView={activeView === "download"} />
+        </div>
+
+        <div
+          className={`workspace-view-panel ${
+            activeView === "browse" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
+          }`}
+        >
+          <DatasetBrowser />
+        </div>
+
+        <div
+          className={`workspace-view-panel ${
+            activeView === "domain-tree" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
+          }`}
+        >
+          <DomainTreePage embedded isActiveView={activeView === "domain-tree"} />
+        </div>
+
+        <div
+          className={`workspace-view-panel ${
+            activeView === "settings" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
+          }`}
+        >
+          <SettingsWorkspace />
+        </div>
+      </div>
+    </div>
+  );
+}

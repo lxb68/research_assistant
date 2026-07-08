@@ -6,11 +6,24 @@ import os
 import shutil
 import subprocess
 
-from mineru import MinerU
-from mineru.exceptions import MinerUError, NoAuthClientError, TimeoutError
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
+
+try:
+    from mineru import MinerU
+    from mineru.exceptions import MinerUError, NoAuthClientError, TimeoutError
+except ImportError:  # Optional dependency: only required when CLI fallback cannot be used.
+    MinerU = None
+
+    class MinerUError(Exception):
+        pass
+
+    class NoAuthClientError(Exception):
+        pass
+
+    class TimeoutError(Exception):
+        pass
 
 
 class MinerURequest(BaseModel):
@@ -162,6 +175,9 @@ def _run_local_mineru_cli(pdf_path: Path, output_dir: Path) -> None:
 
 
 def _run_mineru_sdk(pdf_path: Path, output_dir: Path, token: str) -> None:
+    if MinerU is None:
+        raise RuntimeError("MinerU Python package is not installed")
+
     try:
         with MinerU(token=token) as client:
             result = client.extract(
