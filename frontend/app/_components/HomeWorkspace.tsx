@@ -106,7 +106,11 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
             activeView === "domain-tree" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
           }`}
         >
-          <DomainTreePage embedded isActiveView={activeView === "domain-tree"} />
+          <DomainTreePage
+            embedded
+            isActiveView={activeView === "domain-tree"}
+            onOpenSettings={() => setManualView("settings")}
+          />
         </div>
 
         <div

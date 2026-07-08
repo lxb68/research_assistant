@@ -53,9 +53,17 @@ type DomainTreeResult = {
   catalogText?: string;
 };
 
+type ModelConfigStatus = {
+  configured?: boolean;
+  model?: string;
+  baseUrl?: string;
+  maskedApiKey?: string;
+};
+
 type DomainTreePageProps = {
   embedded?: boolean;
   isActiveView?: boolean;
+  onOpenSettings?: () => void;
 };
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4000";
@@ -79,6 +87,7 @@ function renderTree(nodes: DomainTreeNode[], parentKey = "root"): React.ReactNod
 export default function DomainTreePage({
   embedded = false,
   isActiveView = true,
+  onOpenSettings,
 }: DomainTreePageProps = {}) {
   const [papers, setPapers] = useState<SavedPaper[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -88,6 +97,8 @@ export default function DomainTreePage({
   const [isLoadingExisting, setIsLoadingExisting] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
+  const [modelStatus, setModelStatus] = useState<ModelConfigStatus | null>(null);
+  const [isLoadingModelStatus, setIsLoadingModelStatus] = useState(true);
 
   const markdownReadyPapers = useMemo(
     () => papers.filter((paper) => Boolean(paper.id && (paper.markdownPath || paper.markdownOutputDir))),
@@ -113,6 +124,41 @@ export default function DomainTreePage({
       sampleEdges: edges.slice(0, 12),
     };
   }, [result]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadModelStatus() {
+      setIsLoadingModelStatus(true);
+      try {
+        const response = await fetch(new URL("/api/settings/model-config", apiBaseUrl));
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.detail || "加载模型配置失败");
+        }
+        if (!cancelled) {
+          setModelStatus(payload);
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(loadError instanceof Error ? loadError.message : "加载模型配置失败");
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoadingModelStatus(false);
+        }
+      }
+    }
+
+    if (embedded && !isActiveView) {
+      return;
+    }
+
+    void loadModelStatus();
+    return () => {
+      cancelled = true;
+    };
+  }, [embedded, isActiveView]);
 
   useEffect(() => {
     let cancelled = false;
@@ -156,7 +202,7 @@ export default function DomainTreePage({
       return;
     }
 
-    loadPapers();
+    void loadPapers();
     return () => {
       cancelled = true;
     };
@@ -204,7 +250,7 @@ export default function DomainTreePage({
       return;
     }
 
-    loadExistingResult(selectedProjectId);
+    void loadExistingResult(selectedProjectId);
     return () => {
       cancelled = true;
     };
@@ -212,6 +258,12 @@ export default function DomainTreePage({
 
   async function handleGenerate() {
     if (!selectedProjectId || isGenerating) {
+      return;
+    }
+
+    if (!modelStatus?.configured) {
+      setError("请先设置模型参数");
+      setStatus("");
       return;
     }
 
@@ -249,12 +301,43 @@ export default function DomainTreePage({
     <main className="domain-tree-page">
       <section className="domain-tree-panel">
         <header className="domain-tree-header">
+          <div>
+            <p className="domain-tree-kicker">Domain Tree Workspace</p>
+            <h1>生成并查看领域树</h1>
+            <p className="domain-tree-subtitle">
+              从已完成 Markdown 解析的论文中选择一篇，联动后端 Agent 生成领域树和知识图谱，并直接在前端查看结果。
+            </p>
+          </div>
           <div className="domain-tree-stats">
             <span>{markdownReadyPapers.length} 篇可生成</span>
             <span>{graphStats.nodeCount} 个图节点</span>
             <span>{graphStats.edgeCount} 条关系</span>
           </div>
         </header>
+
+        <section className="domain-tree-selected-paper">
+          <div>
+            <strong>模型配置</strong>
+            <p>
+              {isLoadingModelStatus
+                ? "正在读取模型参数..."
+                : modelStatus?.configured
+                  ? `${modelStatus.model || "未命名模型"} · ${modelStatus.maskedApiKey || "已配置密钥"}`
+                  : "尚未设置模型参数"}
+            </p>
+          </div>
+          <span>{modelStatus?.configured ? "可直接生成" : "请先完成设置"}</span>
+        </section>
+
+        {!modelStatus?.configured && !isLoadingModelStatus ? (
+          <div className="domain-tree-empty">
+            <strong>请先设置模型参数</strong>
+            <span>在设置页面填写模型名称、Base URL 和 API Key 后，才可进行领域树构建。</span>
+            <button type="button" className="domain-tree-inline-button" onClick={onOpenSettings}>
+              前往设置页面
+            </button>
+          </div>
+        ) : null}
 
         <section className="domain-tree-controls">
           <label className="domain-tree-select-wrap">
@@ -283,14 +366,16 @@ export default function DomainTreePage({
           <button
             type="button"
             className="domain-tree-generate-button"
-            disabled={!selectedProjectId || isGenerating}
-            onClick={handleGenerate}
+            disabled={!selectedProjectId || isGenerating || !modelStatus?.configured}
+            onClick={() => {
+              void handleGenerate();
+            }}
           >
             {isGenerating ? "生成中..." : "生成领域树"}
           </button>
         </section>
 
-        {selectedPaper && (
+        {selectedPaper ? (
           <section className="domain-tree-selected-paper">
             <div>
               <strong>{selectedPaper.title || selectedPaper.id}</strong>
@@ -302,10 +387,19 @@ export default function DomainTreePage({
             </div>
             <span>{selectedPaper.markdownPath ? "Markdown 已就绪" : "目录表已就绪"}</span>
           </section>
-        )}
+        ) : null}
 
-        {status && <div className="domain-tree-status">{status}</div>}
-        {error && <div className="domain-tree-error">{error}</div>}
+        {status ? <div className="domain-tree-status">{status}</div> : null}
+        {error ? (
+          <div className="domain-tree-error">
+            <span>{error}</span>
+            {!modelStatus?.configured ? (
+              <button type="button" className="domain-tree-inline-button" onClick={onOpenSettings}>
+                去设置
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         {isLoadingPapers || isLoadingExisting ? (
           <div className="domain-tree-empty">

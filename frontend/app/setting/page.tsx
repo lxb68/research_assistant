@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 type SplitStrategy =
   | "document-structure"
@@ -20,14 +20,24 @@ type SettingsState = {
   maximumSplitLength: number;
 };
 
+type ModelConfigResponse = {
+  configured?: boolean;
+  model?: string;
+  baseUrl?: string;
+  hasApiKey?: boolean;
+  maskedApiKey?: string;
+  systemConstraint?: string;
+};
+
 const STORAGE_KEY = "research-agent.settings";
+const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4000";
 
 const defaultSettings: SettingsState = {
   projectName: "我的论文项目",
   projectDesc: "用于解析学术论文的自动化流程",
-  selectedModel: "gpt-4",
+  selectedModel: "gpt-4o-mini",
   taskType: "pdf-to-md",
-  promptTemplate: "将以下 PDF 内容转换为 Markdown 格式，保留公式、表格和章节结构。",
+  promptTemplate: "将输入内容整理为结构化 Markdown，保留标题、公式、表格和关键结论。",
   splitStrategy: "document-structure",
   minimumLength: 1500,
   maximumSplitLength: 2000,
@@ -37,17 +47,17 @@ const strategies = [
   {
     value: "document-structure" as const,
     label: "按文档结构切分",
-    desc: "优先按标题、章节、段落等自然边界切分文本。",
+    desc: "优先按标题、章节和自然段落切分文本。",
   },
   {
     value: "custom-delimiter" as const,
     label: "按自定义分隔符切分",
-    desc: "适合文本中已经存在明确分段标记的场景。",
+    desc: "适合文本中已存在明确分段标记的场景。",
   },
   {
     value: "fixed-char" as const,
     label: "按固定字符数切分",
-    desc: "按字符长度范围直接切分，便于快速控制分块大小。",
+    desc: "按字符长度直接分割，便于快速控制块大小。",
   },
   {
     value: "fixed-token" as const,
@@ -56,7 +66,7 @@ const strategies = [
   },
   {
     value: "code-intelligent" as const,
-    label: "按代码语义智能切分",
+    label: "按代码语义切分",
     desc: "适合混合代码与技术文档的处理流程。",
   },
 ];
@@ -80,24 +90,126 @@ export default function SettingsWorkspace() {
       return defaultSettings;
     }
   });
-
   const [activeTab, setActiveTab] = useState<TabIndex>(0);
   const [saved, setSaved] = useState(false);
+  const [modelName, setModelName] = useState(defaultSettings.selectedModel);
+  const [baseUrl, setBaseUrl] = useState("");
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [maskedApiKey, setMaskedApiKey] = useState("");
+  const [modelConfigured, setModelConfigured] = useState(false);
+  const [isLoadingModelConfig, setIsLoadingModelConfig] = useState(true);
+  const [isSavingModelConfig, setIsSavingModelConfig] = useState(false);
+  const [modelMessage, setModelMessage] = useState("");
+  const [modelError, setModelError] = useState("");
+  const [systemConstraint, setSystemConstraint] = useState("");
 
   function set<K extends keyof SettingsState>(key: K, value: SettingsState[K]) {
     setSettings((current) => ({ ...current, [key]: value }));
+    if (key === "selectedModel") {
+      setModelName(String(value));
+    }
     setSaved(false);
   }
 
-  function save() {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadModelConfig() {
+      setIsLoadingModelConfig(true);
+      setModelError("");
+
+      try {
+        const response = await fetch(new URL("/api/settings/model-config", apiBaseUrl));
+        const payload = (await response.json().catch(() => ({}))) as ModelConfigResponse & { detail?: string };
+        if (!response.ok) {
+          throw new Error(payload.detail || "加载模型配置失败");
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        setModelConfigured(Boolean(payload.configured));
+        setMaskedApiKey(payload.maskedApiKey || "");
+        setBaseUrl(payload.baseUrl || "");
+        setModelName(payload.model || defaultSettings.selectedModel);
+        setSystemConstraint(payload.systemConstraint || "");
+        setSettings((current) => ({
+          ...current,
+          selectedModel: payload.model || current.selectedModel || defaultSettings.selectedModel,
+        }));
+      } catch (error) {
+        if (!cancelled) {
+          setModelError(error instanceof Error ? error.message : "加载模型配置失败");
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoadingModelConfig(false);
+        }
+      }
+    }
+
+    void loadModelConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function saveLocalSettings() {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...settings, selectedModel: modelName }));
     setSaved(true);
+  }
+
+  async function saveModelConfig() {
+    setIsSavingModelConfig(true);
+    setModelError("");
+    setModelMessage("");
+
+    try {
+      const response = await fetch(new URL("/api/settings/model-config", apiBaseUrl), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: modelName,
+          base_url: baseUrl,
+          api_key: apiKeyInput,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as ModelConfigResponse & { detail?: string };
+      if (!response.ok) {
+        throw new Error(payload.detail || "保存模型配置失败");
+      }
+
+      setModelConfigured(Boolean(payload.configured));
+      setMaskedApiKey(payload.maskedApiKey || "");
+      setSystemConstraint(payload.systemConstraint || "");
+      setApiKeyInput("");
+      setSettings((current) => ({ ...current, selectedModel: modelName }));
+      saveLocalSettings();
+      setModelMessage("模型参数已保存");
+    } catch (error) {
+      setModelError(error instanceof Error ? error.message : "保存模型配置失败");
+    } finally {
+      setIsSavingModelConfig(false);
+    }
   }
 
   function reset() {
     setSettings(defaultSettings);
+    setModelName(defaultSettings.selectedModel);
+    setApiKeyInput("");
     window.localStorage.removeItem(STORAGE_KEY);
     setSaved(true);
+  }
+
+  async function handleSave() {
+    if (activeTab === 1) {
+      await saveModelConfig();
+      return;
+    }
+    saveLocalSettings();
   }
 
   return (
@@ -143,22 +255,68 @@ export default function SettingsWorkspace() {
           )}
 
           {activeTab === 1 && (
-            <label className="settings-row">
-              <span className="settings-row-label">视觉模型</span>
-              <select
-                className="settings-input"
-                value={settings.selectedModel}
-                onChange={(e) => set("selectedModel", e.target.value)}
-              >
-                <option value="gpt-4">GPT-4 Vision</option>
-                <option value="gpt-4o">GPT-4o</option>
-                <option value="claude-3">Claude 3 Opus</option>
-                <option value="gemini-pro">Gemini Pro Vision</option>
-              </select>
-              <span className="settings-hint">
-                选择用于 PDF 解析与内容生成的视觉语言模型。不同模型在公式识别、表格还原等方面表现会有差异。
-              </span>
-            </label>
+            <>
+              <div className="settings-row">
+                <span className="settings-row-label">当前状态</span>
+                <div className={`workspace-status ${modelConfigured ? "workspace-status-active" : ""}`}>
+                  {isLoadingModelConfig ? "正在读取模型配置..." : modelConfigured ? "模型参数已配置" : "尚未配置模型参数"}
+                </div>
+              </div>
+
+              <label className="settings-row">
+                <span className="settings-row-label">模型名称</span>
+                <input
+                  type="text"
+                  className="settings-input"
+                  value={modelName}
+                  onChange={(e) => setModelName(e.target.value)}
+                  placeholder="例如 gpt-4o-mini"
+                />
+              </label>
+
+              <label className="settings-row">
+                <span className="settings-row-label">Base URL</span>
+                <input
+                  type="text"
+                  className="settings-input settings-input-mono"
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                  placeholder="https://api.openai.com/v1"
+                />
+              </label>
+
+              <label className="settings-row">
+                <span className="settings-row-label">模型密钥</span>
+                <input
+                  type="password"
+                  className="settings-input settings-input-mono"
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  placeholder={maskedApiKey ? "留空则继续使用当前密钥" : "请输入新的模型密钥"}
+                  autoComplete="new-password"
+                />
+                <span className="settings-hint">
+                  已保存密钥仅做掩码显示，不会通过接口返回明文。
+                </span>
+                {maskedApiKey ? <span className="settings-secret-preview">当前密钥：{maskedApiKey}</span> : null}
+              </label>
+
+              <label className="settings-row">
+                <span className="settings-row-label">系统防泄露约束</span>
+                <textarea
+                  className="settings-input settings-input-mono"
+                  rows={4}
+                  value={systemConstraint}
+                  readOnly
+                />
+                <span className="settings-hint">
+                  该系统约束会附加到模型请求中，用于限制模型输出任何密钥、令牌或隐藏配置。
+                </span>
+              </label>
+
+              {modelMessage ? <div className="domain-tree-status">{modelMessage}</div> : null}
+              {modelError ? <div className="domain-tree-error">{modelError}</div> : null}
+            </>
           )}
 
           {activeTab === 2 && (
@@ -177,7 +335,7 @@ export default function SettingsWorkspace() {
               </label>
 
               <label className="settings-row">
-                <span className="settings-row-label">分割策略（Split Strategy）</span>
+                <span className="settings-row-label">切分策略</span>
                 <select
                   className="settings-input"
                   value={settings.splitStrategy}
@@ -189,14 +347,11 @@ export default function SettingsWorkspace() {
                     </option>
                   ))}
                 </select>
-                <span className="settings-hint">
-                  文本分割基于设置的长度范围进行操作，将输入文本按照规则分割成合适的段落，以便后续处理。
-                </span>
                 <span className="settings-hint">{getStrategyDescription(settings.splitStrategy)}</span>
               </label>
 
               <div className="settings-row">
-                <span className="settings-row-label">最小长度（Minimum Length）</span>
+                <span className="settings-row-label">最小长度</span>
                 <div className="settings-slider-block">
                   <div className="settings-slider-meta">
                     <strong>{settings.minimumLength}</strong>
@@ -212,13 +367,10 @@ export default function SettingsWorkspace() {
                     onChange={(e) => set("minimumLength", Number(e.target.value))}
                   />
                 </div>
-                <span className="settings-hint">
-                  设定分割后每个文本片段的最小字符长度。若某段文本长度小于该值，会与相邻文本段合并，直至满足最小长度要求。
-                </span>
               </div>
 
               <div className="settings-row">
-                <span className="settings-row-label">最大分割长度（Maximum Split Length）</span>
+                <span className="settings-row-label">最大切分长度</span>
                 <div className="settings-slider-block">
                   <div className="settings-slider-meta">
                     <strong>{settings.maximumSplitLength}</strong>
@@ -234,9 +386,6 @@ export default function SettingsWorkspace() {
                     onChange={(e) => set("maximumSplitLength", Number(e.target.value))}
                   />
                 </div>
-                <span className="settings-hint">
-                  限制分割后每个文本片段的最大字符长度。超过该长度的文本会被分割成多个片段。
-                </span>
               </div>
             </>
           )}
@@ -250,9 +399,7 @@ export default function SettingsWorkspace() {
                 value={settings.promptTemplate}
                 onChange={(e) => set("promptTemplate", e.target.value)}
               />
-              <span className="settings-hint">
-                定义将 PDF 内容发送给模型时的系统提示。可使用占位符引用文档变量。
-              </span>
+              <span className="settings-hint">定义内容发送给模型时的提示模板。</span>
             </label>
           )}
         </div>
@@ -260,12 +407,19 @@ export default function SettingsWorkspace() {
         <div className="settings-divider" />
 
         <div className="settings-footer">
-          {saved && <span className="settings-toast">已保存</span>}
+          {saved && activeTab !== 1 ? <span className="settings-toast">已保存</span> : null}
           <button type="button" className="settings-btn settings-btn-ghost" onClick={reset}>
             恢复默认
           </button>
-          <button type="button" className="settings-btn settings-btn-primary" onClick={save}>
-            保存
+          <button
+            type="button"
+            className="settings-btn settings-btn-primary"
+            onClick={() => {
+              void handleSave();
+            }}
+            disabled={isSavingModelConfig}
+          >
+            {activeTab === 1 && isSavingModelConfig ? "保存中..." : "保存"}
           </button>
         </div>
       </section>

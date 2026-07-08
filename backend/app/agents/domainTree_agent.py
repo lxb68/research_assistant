@@ -367,20 +367,31 @@ class DomainTreeAgent:
         return self._heuristic_domain_tree(documents, catalog_text)
 
     def _call_llm(self, prompt: str, *, language: str, model: Any | None) -> str | None:
-        api_key = (
-            os.getenv("DOMAIN_TREE_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-            or settings.llm_translation_api_key
-        ).strip()
+        api_key = ""
+        if isinstance(model, dict):
+            api_key = str(model.get("api_key") or model.get("apiKey") or "").strip()
+        if not api_key:
+            api_key = (
+                os.getenv("DOMAIN_TREE_API_KEY")
+                or os.getenv("OPENAI_API_KEY")
+                or settings.llm_translation_api_key
+            ).strip()
         if not api_key:
             return None
 
-        base_url = (
-            os.getenv("DOMAIN_TREE_BASE_URL")
-            or os.getenv("OPENAI_BASE_URL")
-            or settings.llm_translation_base_url
-        ).rstrip("/")
+        base_url = ""
+        if isinstance(model, dict):
+            base_url = str(model.get("base_url") or model.get("baseUrl") or "").strip().rstrip("/")
+        if not base_url:
+            base_url = (
+                os.getenv("DOMAIN_TREE_BASE_URL")
+                or os.getenv("OPENAI_BASE_URL")
+                or settings.llm_translation_base_url
+            ).rstrip("/")
         model_name = self._resolve_model_name(model)
+        system_constraint = ""
+        if isinstance(model, dict):
+            system_constraint = str(model.get("system_constraint") or model.get("systemConstraint") or "").strip()
         payload = {
             "model": model_name,
             "temperature": 0.2,
@@ -389,7 +400,8 @@ class DomainTreeAgent:
                     "role": "system",
                     "content": (
                         "You are a precise knowledge classification assistant. "
-                        "Return only valid JSON and do not include markdown fences."
+                        "Return only valid JSON and do not include markdown fences. "
+                        f"{system_constraint}"
                     ),
                 },
                 {"role": "user", "content": prompt},

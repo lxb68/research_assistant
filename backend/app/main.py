@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from app.agents import DomainTreeAgent, HunterAgent
 from app.core.config import settings
 from app.services.mineru import MinerURequest, mineru_processing
+from app.services.model_config import ModelConfigStore
 from app.services.paper_search import SUPPORTED_SOURCES, search_papers
 
 
@@ -71,6 +72,12 @@ class DomainTreeGenerateRequest(BaseModel):
     model: str | None = Field(None, description="可选：覆盖默认模型")
 
 
+class ModelConfigRequest(BaseModel):
+    model: str = Field(..., min_length=1, description="模型名称")
+    base_url: str = Field(..., min_length=1, description="LLM Base URL")
+    api_key: str = Field("", description="LLM API Key")
+
+
 app = FastAPI(
     title="Research Assistant API",
     description="Python FastAPI backend for literature search.",
@@ -111,6 +118,28 @@ def debug_routes() -> dict:
             },
         ),
     }
+
+
+@app.get("/api/settings/model-config")
+def get_model_config() -> dict:
+    store = ModelConfigStore()
+    return {"status": "ok", **store.get_public_config()}
+
+
+@app.post("/api/settings/model-config")
+def save_model_config(payload: ModelConfigRequest) -> dict:
+    try:
+        store = ModelConfigStore()
+        result = store.save(
+            model=payload.model,
+            base_url=payload.base_url,
+            api_key=payload.api_key,
+        )
+        return {"status": "ok", **result}
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
 
 
 @app.get("/api/papers/search")
@@ -446,13 +475,18 @@ def re_split_values(value: str) -> list[str]:
 @app.post("/api/domain-tree/generate")
 async def generate_domain_tree(payload: DomainTreeGenerateRequest) -> dict:
     try:
+        config_store = ModelConfigStore()
+        model_payload = config_store.build_model_payload()
+        if not model_payload:
+            raise HTTPException(status_code=400, detail="请先在设置页面配置模型参数")
+
         agent = DomainTreeAgent()
         tags = await agent.handle_domain_tree(
             payload.project_id,
             action=payload.action,
             all_toc=payload.all_toc,
             new_toc=payload.new_toc,
-            model=payload.model,
+            model=payload.model or model_payload,
             language=payload.language,
             delete_toc=payload.delete_toc,
         )

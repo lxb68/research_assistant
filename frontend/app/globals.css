@@ -1887,6 +1887,20 @@ select.settings-input {
   line-height: 1.6;
 }
 
+.settings-secret-preview {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  width: fit-content;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.42);
+  color: #bfdbfe;
+  font-family: "Cascadia Code", "Fira Code", "Courier New", Consolas, monospace;
+  font-size: 0.75rem;
+  padding: 0 12px;
+}
+
 /* ---- 单选列表 ---- */
 .settings-radios {
   display: grid;
@@ -2199,6 +2213,23 @@ select.settings-input {
   opacity: 0.72;
 }
 
+.domain-tree-inline-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  width: fit-content;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #1d4ed8;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 800;
+  padding: 0 16px;
+}
+
 .domain-tree-selected-paper,
 .domain-tree-status,
 .domain-tree-error,
@@ -2387,6 +2418,12 @@ select.settings-input {
     box-shadow: none;
   }
 
+  .domain-tree-inline-button {
+    border-color: rgba(96, 165, 250, 0.24);
+    background: rgba(15, 23, 42, 0.62);
+    color: #bfdbfe;
+  }
+
   .domain-tree-selected-paper {
     background: rgba(6, 78, 59, 0.18);
   }
@@ -2428,6 +2465,12 @@ select.settings-input {
   .domain-tree-catalog-preview {
     background: rgba(2, 6, 23, 0.4);
     color: rgba(226, 232, 240, 0.88);
+  }
+
+  .settings-secret-preview {
+    border-color: rgba(96, 165, 250, 0.24);
+    background: rgba(15, 23, 42, 0.62);
+    color: #bfdbfe;
   }
 }
 
