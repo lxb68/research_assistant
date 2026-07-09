@@ -1,4 +1,4 @@
-import json
+﻿import json
 import importlib.util
 import queue
 import threading
@@ -25,14 +25,14 @@ if not MULTIPART_AVAILABLE:
 
 
 class DatasetDownloadRequest(BaseModel):
-    keyword: str = Field(..., min_length=1, description="搜索关键词")
-    sources: list[str] = Field(default_factory=lambda: ["arxiv", "crossref"], description="文献来源")
-    limit_per_source: int = Field(10, ge=1, le=200, description="每个数据源的目标论文数量")
-    download_pdf: bool = Field(True, description="是否下载 PDF")
+    keyword: str = Field(..., min_length=1, description="检索关键词")
+    sources: list[str] = Field(default_factory=lambda: ["arxiv", "crossref"], description="论文来源")
+    limit_per_source: int = Field(10, ge=1, le=200, description="每个来源期望返回的论文数量")
+    download_pdf: bool = Field(True, description="是否同时下载 PDF")
     year_from: int | None = Field(None, ge=1900, le=2100, description="起始年份")
     year_to: int | None = Field(None, ge=1900, le=2100, description="结束年份")
-    min_impact_factor: float | None = Field(None, ge=0, description="最低影响因子")
-    ccf_levels: list[str] = Field(default_factory=list, description="CCF 等级过滤")
+    min_impact_factor: float | None = Field(None, ge=0, description="最小影响因子")
+    ccf_levels: list[str] = Field(default_factory=list, description="CCF 分级筛选")
 
 
 class ManualPdfLinkRequest(BaseModel):
@@ -47,11 +47,11 @@ class DeletePapersRequest(BaseModel):
 
 
 class DeduplicatePapersRequest(BaseModel):
-    record_id: str | None = Field(None, description="鍙€夌殑涓昏褰?ID锛屼紭鍏堜繚鐣欒璁板綍")
+    record_id: str | None = Field(None, description="可选：仅对指定记录 ID 执行去重")
 
 
 class ImportPaperRequest(BaseModel):
-    raw_text: str = Field("", description="粘贴的题录、DOI 或摘要文本")
+    raw_text: str = Field("", description="粘贴的标题、DOI 或摘要")
     title: str = Field("", description="论文标题")
     authors: list[str] = Field(default_factory=list, description="作者列表")
     abstract: str = Field("", description="论文摘要")
@@ -63,19 +63,19 @@ class ImportPaperRequest(BaseModel):
 
 
 class DomainTreeGenerateRequest(BaseModel):
-    project_id: str = Field(..., min_length=1, description="领域树对应的项目ID或论文记录ID")
+    project_id: str = Field(..., min_length=1, description="领域树对应的项目 ID 或论文记录 ID")
     action: str = Field("rebuild", description="生成动作：rebuild / revise / keep")
     language: str = Field("中文", description="提示词语言")
-    all_toc: str | None = Field(None, description="可选：手动传入的完整目录文本")
-    new_toc: str | None = Field(None, description="可选：增量修订时新增目录文本")
-    delete_toc: str | None = Field(None, description="可选：增量修订时删除目录文本")
-    model: str | None = Field(None, description="可选：覆盖默认模型")
+    all_toc: str | None = Field(None, description="可选：完整目录文本")
+    new_toc: str | None = Field(None, description="可选：新增目录内容")
+    delete_toc: str | None = Field(None, description="可选：待删除目录内容")
+    model: str | None = Field(None, description="可选：覆盖默认模型配置")
 
 
 class ModelConfigRequest(BaseModel):
     model: str = Field(..., min_length=1, description="模型名称")
     base_url: str = Field(..., min_length=1, description="LLM Base URL")
-    api_key: str = Field("", description="LLM API Key")
+    api_key: str = Field("", description="LLM API 密钥")
 
 
 app = FastAPI(
@@ -144,9 +144,9 @@ def save_model_config(payload: ModelConfigRequest) -> dict:
 
 @app.get("/api/papers/search")
 def paper_search(
-    q: str = Query(..., min_length=1, description="搜索关键词"),
-    source: str = Query("arxiv", description="文献来源"),
-    limit: int = Query(10, ge=1, le=50, description="返回数量，范围 1-50"),
+    q: str = Query(..., min_length=1, description="Search keyword"),
+    source: str = Query("arxiv", description="Paper source"),
+    limit: int = Query(10, ge=1, le=50, description="Result count, 1-50"),
 ) -> dict:
     try:
         return search_papers(source=source, query=q, limit=limit)
@@ -251,7 +251,7 @@ def cleanup_missing_pdfs() -> dict:
 @app.get("/api/papers")
 def list_papers(
     limit: int = Query(100, ge=1, le=500, description="返回论文数量"),
-    keyword: str | None = Query(None, description="按关键词或标题过滤"),
+    keyword: str | None = Query(None, description="按关键词或标题筛选"),
 ) -> dict:
     try:
         agent = HunterAgent()
@@ -267,7 +267,7 @@ def get_paper(record_id: str) -> dict:
         agent = HunterAgent()
         paper = agent.get_saved_paper(record_id)
         if not paper:
-            raise HTTPException(status_code=404, detail="论文记录不存在")
+            raise HTTPException(status_code=404, detail="Paper record not found")
         return {"paper": paper}
     except HTTPException:
         raise
@@ -301,11 +301,11 @@ def get_paper_pdf(record_id: str, request: Request) -> FileResponse:
         agent = HunterAgent()
         paper = agent.get_saved_paper(record_id)
         if not paper:
-            raise HTTPException(status_code=404, detail="论文记录不存在")
+            raise HTTPException(status_code=404, detail="Paper record not found")
 
         pdf_path = agent.find_local_pdf_for_paper(paper)
         if not pdf_path or not pdf_path.exists() or not pdf_path.is_file() or pdf_path.suffix.lower() != ".pdf":
-            raise HTTPException(status_code=404, detail="本地 PDF 文件不存在")
+            raise HTTPException(status_code=404, detail="Local PDF file not found")
 
         return FileResponse(
             pdf_path,
@@ -325,7 +325,7 @@ def open_paper_source(record_id: str):
         agent = HunterAgent()
         paper = agent.get_saved_paper(record_id)
         if not paper:
-            raise HTTPException(status_code=404, detail="论文记录不存在")
+            raise HTTPException(status_code=404, detail="Paper record not found")
 
         pdf_path = agent.find_local_pdf_for_paper(paper)
         if pdf_path and pdf_path.exists() and pdf_path.is_file() and pdf_path.suffix.lower() == ".pdf":
@@ -340,7 +340,7 @@ def open_paper_source(record_id: str):
         if external_url:
             return RedirectResponse(external_url, status_code=307)
 
-        raise HTTPException(status_code=404, detail="没有可打开的本地 PDF 或外部原文链接")
+        raise HTTPException(status_code=404, detail="No local PDF or external source URL available")
     except HTTPException:
         raise
     except Exception as error:
@@ -465,7 +465,7 @@ async def import_pdf_paper_stream(
 
 
 def re_split_values(value: str) -> list[str]:
-    separators = [",", ";", "，", "、"]
+    separators = [",", ";", "，", "；", "、"]
     values = [value]
     for separator in separators:
         values = [part for item in values for part in item.split(separator)]
@@ -478,7 +478,7 @@ async def generate_domain_tree(payload: DomainTreeGenerateRequest) -> dict:
         config_store = ModelConfigStore()
         model_payload = config_store.build_model_payload()
         if not model_payload:
-            raise HTTPException(status_code=400, detail="请先在设置页面配置模型参数")
+            raise HTTPException(status_code=400, detail="请先配置模型参数")
 
         agent = DomainTreeAgent()
         tags = await agent.handle_domain_tree(
@@ -491,7 +491,7 @@ async def generate_domain_tree(payload: DomainTreeGenerateRequest) -> dict:
             delete_toc=payload.delete_toc,
         )
         if not tags:
-            raise HTTPException(status_code=400, detail="未找到可用于生成领域树的 Markdown/目录数据")
+            raise HTTPException(status_code=400, detail="未找到可用于生成领域树的 Markdown 或目录数据")
 
         result = agent.get_result(payload.project_id)
         if not result:
@@ -512,7 +512,7 @@ def get_domain_tree(project_id: str) -> dict:
         agent = DomainTreeAgent()
         result = agent.get_result(project_id)
         if not result:
-            raise HTTPException(status_code=404, detail="指定项目尚未生成领域树")
+            raise HTTPException(status_code=404, detail="Domain tree has not been generated for this project")
         return {"status": "ok", **result}
     except HTTPException:
         raise
@@ -580,3 +580,4 @@ async def process_mineru(request: MinerURequest):
         raise
     except Exception as error:
         raise HTTPException(status_code=500, detail=str(error)) from error
+

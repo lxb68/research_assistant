@@ -6,7 +6,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 
 def load_env_file() -> None:
-    """读取 backend/.env，把简单的 KEY=VALUE 配置加载到环境变量。"""
+    """读取 backend/.env，并将简单的 KEY=VALUE 配置加载到环境变量。"""
     env_path = BACKEND_DIR / ".env"
 
     if not env_path.exists():

@@ -1,11 +1,11 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import DatasetBrowser from "@/app/dataset-brower/page";
-import DomainTreePage from "@/app/domain-tree/page";
-import SettingsWorkspace from "@/app/setting/page";
+import DatasetBrowser from "@/app/_views/DatasetBrowserView";
+import DatasetDownloadPage from "@/app/_views/DatasetDownloadView";
+import DomainTreePage from "@/app/_views/DomainTreeView";
+import SettingsWorkspace from "@/app/_views/SettingsView";
 import HeroSection from "@/home/HeroSection";
-import DatasetDownloadPage from "../dataset-download/page";
 
 type WorkspaceView = "home" | "download" | "browse" | "domain-tree" | "settings";
 

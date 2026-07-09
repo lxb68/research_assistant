@@ -1,0 +1,7 @@
+export const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4000";
+
+export const WORKSPACE_SETTINGS_STORAGE_KEY = "research-agent.settings";
+
+export const DEFAULT_MINIMUM_SPLIT_LENGTH = 1500;
+export const DEFAULT_MAXIMUM_SPLIT_LENGTH = 2000;

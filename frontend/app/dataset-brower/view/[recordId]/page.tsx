@@ -4,35 +4,8 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import PdfViewer from "@/components/PdfViewer";
-
-type ParagraphSummary = {
-  index?: number;
-  summary?: string;
-  charCount?: number;
-};
-
-type SplitChunk = {
-  summary?: string;
-  content?: string;
-  charCount?: number;
-  partIndex?: number;
-  totalParts?: number;
-  paragraphSummaries?: ParagraphSummary[];
-};
-
-type SavedPaper = {
-  id?: string;
-  title?: string;
-  url?: string;
-  pdfPath?: string;
-  splitChunkCount?: number;
-  splitSectionCount?: number;
-  splitMinimumLength?: number;
-  splitMaximumLength?: number;
-  splitChunks?: SplitChunk[];
-};
-
-const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4000";
+import { buildApiUrl } from "@/lib/api";
+import { SavedPaper } from "@/lib/papers";
 
 export default function PaperViewerPage() {
   const params = useParams<{ recordId: string }>();
@@ -47,7 +20,7 @@ export default function PaperViewerPage() {
       return;
     }
 
-    const url = new URL(`/api/papers/${encodeURIComponent(recordId)}`, apiBaseUrl);
+    const url = buildApiUrl(`/api/papers/${encodeURIComponent(recordId)}`);
     fetch(url)
       .then(async (response) => {
         const payload = await response.json().catch(() => ({}));
@@ -65,7 +38,7 @@ export default function PaperViewerPage() {
   }, [hasRecordId, recordId]);
 
   const pdfViewerUrl = recordId
-    ? new URL(`/api/papers/${encodeURIComponent(recordId)}/pdf`, apiBaseUrl).toString()
+    ? buildApiUrl(`/api/papers/${encodeURIComponent(recordId)}/pdf`).toString()
     : "";
   const externalUrl = paper?.url?.trim() || "";
   const splitChunks = paper?.splitChunks ?? [];
