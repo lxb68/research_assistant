@@ -91,6 +91,8 @@ type ReadableGraphDocument = {
   sections: string[];
 };
 
+const EXCLUDED_CHUNK_CATEGORIES = new Set(["references", "front_matter", "back_matter"]);
+
 const ACTION_LABELS: Record<DomainTreeAction, string> = {
   revise: "修改领域树",
   rebuild: "重建领域树",
@@ -646,6 +648,9 @@ export default function DomainTreePage({
           continue;
         }
         for (const chunk of paper.splitChunks ?? []) {
+          if (EXCLUDED_CHUNK_CATEGORIES.has((chunk.semanticCategory || "").trim().toLowerCase())) {
+            continue;
+          }
           const score = scoreChunk(label, chunk);
           if (score <= 0) {
             continue;
