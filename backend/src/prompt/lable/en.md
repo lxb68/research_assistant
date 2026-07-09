@@ -36,7 +36,7 @@
 6. The names of the labels should not exceed 6 characters.
 7. Do not output any content other than the JSON.
 8. Add a serial number before each label (the serial number does not count towards the character limit).
-9. Content filtering principle: Only extract important knowledge, algorithms, schemes and other core content from the catalog for classification; ignore references, acknowledgments, funding support, conflict of interest and other non-essential content. Primary labels should be determined mainly based on abstracts and titles.
+9. CContent selection principle: Only extract the key knowledge, algorithms, solutions, methods, etc. from the table of contents and incorporate them into the classification. Ignore the keywords, symbol explanations, journal or conference descriptions, references, acknowledgments, fund support, conflicts of interest, etc. that are not of primary importance. The primary tags should be determined mainly based on the title, abstract and keywords.
 10. Use English
 
 

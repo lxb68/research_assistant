@@ -4,6 +4,12 @@ export type ParagraphSummary = {
   charCount?: number;
 };
 
+export type SplitChunkHeading = {
+  heading?: string;
+  level?: number;
+  position?: number;
+};
+
 export type SplitChunk = {
   summary?: string;
   content?: string;
@@ -11,6 +17,8 @@ export type SplitChunk = {
   partIndex?: number;
   totalParts?: number;
   paragraphSummaries?: ParagraphSummary[];
+  headings?: SplitChunkHeading[];
+  semanticCategory?: string;
 };
 
 export type SavedPaper = {

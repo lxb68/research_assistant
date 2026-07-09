@@ -36,13 +36,75 @@ _GENERIC_SECTION_TITLES = {
     "implementation",
     "introduction",
     "limitations",
+    "methodology",
     "method",
     "methods",
+    "model",
+    "models",
+    "overview",
     "preliminaries",
     "references",
     "related work",
     "results",
     "setup",
+    "system model",
+    "technical approach",
+    "technical framework",
+}
+_GENERIC_LABEL_TOKENS = {
+    "algorithm",
+    "algorithms",
+    "analysis",
+    "approach",
+    "approaches",
+    "architecture",
+    "architectures",
+    "background",
+    "evaluation",
+    "experiment",
+    "experiments",
+    "framework",
+    "frameworks",
+    "implementation",
+    "implementations",
+    "method",
+    "methods",
+    "methodology",
+    "model",
+    "models",
+    "overview",
+    "pipeline",
+    "pipelines",
+    "scheme",
+    "schemes",
+    "setup",
+    "strategy",
+    "strategies",
+    "system",
+    "systems",
+    "workflow",
+    "workflows",
+    "方法",
+    "方法学",
+    "实验",
+    "实验设计",
+    "实验设置",
+    "实验结果",
+    "总体方案",
+    "技术路线",
+    "技术框架",
+    "系统框架",
+    "系统设计",
+    "系统模型",
+    "架构设计",
+    "模型设计",
+    "模型结构",
+    "机制设计",
+    "流程设计",
+    "评估",
+    "评价",
+    "背景",
+    "概述",
 }
 _NON_CORE_SECTION_PATTERNS = (
     "keyword",
@@ -141,6 +203,7 @@ class DomainTreeAgent:
         project: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]] | None:
         normalized_project_id = self._normalize_project_id(project_id)
+        # 直接调用 get_tags 返回当前已存储的标签，不进行任何计算或生成
         if action == "keep":
             logger.info("[%s] use existing domain tree", normalized_project_id)
             return self.get_tags(normalized_project_id)
@@ -150,12 +213,27 @@ class DomainTreeAgent:
             logger.warning("[%s] no markdown sources found in storage", normalized_project_id)
             return None
 
+        #
         catalog_text = all_toc or self._build_catalog_text(documents)
         if not catalog_text.strip():
             logger.warning("[%s] empty catalog text, skip domain tree generation", normalized_project_id)
             return None
 
         existing_tags = self.get_tags(normalized_project_id)
+        existing_manifest = self._load_manifest(normalized_project_id)
+        next_document_catalog = self._document_catalog_map(documents)
+        previous_document_catalog = self._manifest_document_catalog_map(existing_manifest)
+        if action == "revise" and existing_manifest and (not new_toc and not delete_toc):
+            new_toc = self._join_catalog_sections(
+                next_document_catalog[record_id]
+                for record_id in next_document_catalog
+                if previous_document_catalog.get(record_id) != next_document_catalog[record_id]
+            )
+            delete_toc = self._join_catalog_sections(
+                previous_document_catalog[record_id]
+                for record_id in previous_document_catalog
+                if previous_document_catalog.get(record_id) != next_document_catalog.get(record_id)
+            )
         if action == "revise" and existing_tags:
             prompt = self.get_label_revise_prompt(
                 language,
@@ -169,6 +247,7 @@ class DomainTreeAgent:
         else:
             prompt = self.get_label_prompt(language, {"text": catalog_text[:100000]})
 
+        # 生成领域树标签
         tags = self._generate_domain_tree(
             prompt=prompt,
             documents=documents,
@@ -176,10 +255,12 @@ class DomainTreeAgent:
             language=language,
             model=model,
         )
+        tags = self._refine_tree_specificity(tags, documents)
         if not tags:
             logger.error("[%s] failed to generate domain tree tags", normalized_project_id)
             return None
 
+        # 构建知识图谱
         graph = self._build_knowledge_graph(
             project_id=normalized_project_id,
             documents=documents,
@@ -253,6 +334,17 @@ class DomainTreeAgent:
             "manifest": manifest_payload if isinstance(manifest_payload, dict) else {},
             "catalogText": catalog_text,
         }
+
+    def _load_manifest(self, project_id: str) -> dict[str, Any]:
+        manifest_path = self._analysis_dir(self._normalize_project_id(project_id)) / "manifest.json"
+        if not manifest_path.exists():
+            return {}
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            logger.warning("[%s] failed to read manifest: %s", project_id, error)
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def get_project_tocs(self, project_id: str) -> str:
         documents = self._load_documents(project_id)
@@ -330,8 +422,9 @@ class DomainTreeAgent:
                     "markdownPath": str(document.markdown_path) if document.markdown_path else "",
                     "markdownDir": str(document.markdown_dir) if document.markdown_dir else "",
                     "tocEntryCount": len(document.toc_entries),
+                    "catalogText": self._build_document_catalog_text(document, index + 1),
                 }
-                for document in documents
+                for index, document in enumerate(documents)
             ],
         }
 
@@ -569,32 +662,60 @@ class DomainTreeAgent:
         )
 
     def _build_catalog_text(self, documents: list[SourceDocument]) -> str:
-        parts: list[str] = []
-        for index, document in enumerate(documents, start=1):
-            lines = [f"## 文档{index}: {document.title}"]
-            if document.abstract:
-                lines.append(f"摘要: {self._truncate(document.abstract, 1000)}")
-            if document.keywords:
-                lines.append(f"关键词: {', '.join(document.keywords[:12])}")
-            lines.append("目录:")
+        return "\n\n".join(
+            self._build_document_catalog_text(document, index)
+            for index, document in enumerate(documents, start=1)
+        )
 
-            if document.toc_entries:
-                for entry in self._filter_toc_entries(document.toc_entries)[:120]:
-                    level = max(1, min(int(entry.get("level", 1)), 6))
-                    indent = "  " * (level - 1)
-                    title = str(entry.get("title", "")).strip()
-                    if title:
-                        lines.append(f"{indent}- {title}")
-            elif document.markdown_path and document.markdown_path.exists():
-                headings = self._filter_toc_entries(self._extract_headings_from_markdown(document.markdown_path))
-                for entry in headings[:120]:
-                    level = max(1, min(int(entry.get("level", 1)), 6))
-                    indent = "  " * (level - 1)
-                    title = str(entry.get("title", "")).strip()
-                    if title:
-                        lines.append(f"{indent}- {title}")
-            parts.append("\n".join(lines))
-        return "\n\n".join(parts)
+    def _build_document_catalog_text(self, document: SourceDocument, index: int) -> str:
+        lines = [f"## 文档{index}: {document.title}", f"记录ID: {document.record_id}"]
+        if document.abstract:
+            lines.append(f"摘要: {self._truncate(document.abstract, 1000)}")
+        if document.keywords:
+            lines.append(f"关键词: {', '.join(document.keywords[:12])}")
+        lines.append("目录:")
+
+        if document.toc_entries:
+            for entry in self._filter_toc_entries(document.toc_entries)[:120]:
+                level = max(1, min(int(entry.get("level", 1)), 6))
+                indent = "  " * (level - 1)
+                title = str(entry.get("title", "")).strip()
+                if title:
+                    lines.append(f"{indent}- {title}")
+        elif document.markdown_path and document.markdown_path.exists():
+            headings = self._filter_toc_entries(self._extract_headings_from_markdown(document.markdown_path))
+            for entry in headings[:120]:
+                level = max(1, min(int(entry.get("level", 1)), 6))
+                indent = "  " * (level - 1)
+                title = str(entry.get("title", "")).strip()
+                if title:
+                    lines.append(f"{indent}- {title}")
+        return "\n".join(lines)
+
+    def _document_catalog_map(self, documents: list[SourceDocument]) -> dict[str, str]:
+        return {
+            document.record_id: self._build_document_catalog_text(document, index)
+            for index, document in enumerate(documents, start=1)
+        }
+
+    def _manifest_document_catalog_map(self, manifest: dict[str, Any]) -> dict[str, str]:
+        documents = manifest.get("documents")
+        if not isinstance(documents, list):
+            return {}
+
+        mapping: dict[str, str] = {}
+        for item in documents:
+            if not isinstance(item, dict):
+                continue
+            record_id = str(item.get("recordId") or "").strip()
+            catalog_text = str(item.get("catalogText") or "").strip()
+            if record_id and catalog_text:
+                mapping[record_id] = catalog_text
+        return mapping
+
+    def _join_catalog_sections(self, sections: Any) -> str:
+        values = [str(section).strip() for section in sections if str(section).strip()]
+        return "\n\n".join(values)
 
     def _load_toc_entries(self, markdown_dir: Path | None, markdown_path: Path | None) -> list[dict[str, Any]]:
         if markdown_dir:
@@ -691,6 +812,7 @@ class DomainTreeAgent:
             return []
         return self._split_keywords(match.group(1))
 
+    # 生成知识图谱
     def _build_knowledge_graph(
         self,
         *,
@@ -773,6 +895,7 @@ class DomainTreeAgent:
             "edges": edges,
         }
 
+    # 
     def _heuristic_domain_tree(
         self,
         documents: list[SourceDocument],
@@ -897,7 +1020,144 @@ class DomainTreeAgent:
                     continue
                 level = int(entry.get("level", 1))
                 counter[title] += 2 if level <= 2 else 1
+            for keyword in document.keywords[:12]:
+                normalized_keyword = self._normalize_topic_phrase(keyword)
+                if not normalized_keyword or normalized_keyword == topic:
+                    continue
+                counter[normalized_keyword] += 3
+            for phrase in self._extract_candidate_phrases(document.abstract)[:16]:
+                normalized_phrase = self._normalize_topic_phrase(phrase)
+                if not normalized_phrase or normalized_phrase == topic:
+                    continue
+                counter[normalized_phrase] += 1
         return [name for name, _ in counter.most_common(6)]
+
+    def _refine_tree_specificity(
+        self,
+        tags: list[dict[str, Any]] | None,
+        documents: list[SourceDocument],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(tags, list):
+            return []
+
+        refined: list[dict[str, Any]] = []
+        global_candidates = self._collect_specific_candidates_from_documents(documents)
+        for index, item in enumerate(tags, start=1):
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label", "")).strip()
+            if not label:
+                continue
+
+            node: dict[str, Any] = {"label": label}
+            raw_children = item.get("child")
+            if isinstance(raw_children, list):
+                related_document_ids = self._related_document_ids_for_topic(label, documents)
+                scoped_documents = [
+                    document for document in documents if document.record_id in related_document_ids
+                ] or documents
+                candidate_pool = self._collect_specific_candidates_from_documents(scoped_documents)
+                if not candidate_pool:
+                    candidate_pool = global_candidates
+
+                used_labels = {
+                    self._normalize_topic_phrase(label),
+                }
+                children: list[dict[str, str]] = []
+                for child_index, child in enumerate(raw_children, start=1):
+                    if not isinstance(child, dict):
+                        continue
+                    child_label = str(child.get("label", "")).strip()
+                    replacement = child_label
+                    if self._is_generic_label(child_label):
+                        replacement = self._pick_specific_replacement(
+                            candidate_pool,
+                            used_labels=used_labels,
+                            fallback=child_label,
+                        )
+                    normalized_replacement = self._normalize_topic_phrase(replacement)
+                    if normalized_replacement:
+                        used_labels.add(normalized_replacement)
+                    if replacement:
+                        children.append({"label": f"{index}.{child_index} {normalized_replacement or replacement}"})
+                if children:
+                    node["child"] = children
+            refined.append(node)
+        return refined
+
+    def _collect_specific_candidates_from_documents(
+        self,
+        documents: list[SourceDocument],
+    ) -> list[str]:
+        counter: Counter[str] = Counter()
+        for document in documents:
+            for keyword in document.keywords[:12]:
+                normalized = self._normalize_topic_phrase(keyword)
+                if normalized and not self._is_generic_label(normalized):
+                    counter[normalized] += 5
+
+            for phrase in self._extract_candidate_phrases(document.title)[:12]:
+                normalized = self._normalize_topic_phrase(phrase)
+                if normalized and not self._is_generic_label(normalized):
+                    counter[normalized] += 4
+
+            for entry in self._filter_toc_entries(document.toc_entries)[:30]:
+                normalized = self._normalize_topic_phrase(str(entry.get("title", "")))
+                if normalized and not self._is_generic_label(normalized):
+                    level = int(entry.get("level", 1))
+                    counter[normalized] += 4 if level <= 2 else 2
+
+            for phrase in self._extract_candidate_phrases(document.abstract)[:20]:
+                normalized = self._normalize_topic_phrase(phrase)
+                if normalized and not self._is_generic_label(normalized):
+                    counter[normalized] += 1
+
+        return [name for name, _ in counter.most_common(24)]
+
+    def _related_document_ids_for_topic(
+        self,
+        topic: str,
+        documents: list[SourceDocument],
+    ) -> set[str]:
+        topic_tokens = {
+            self._keyword_token(token)
+            for token in self._tokenize_label(topic)
+            if self._keyword_token(token)
+        }
+        if not topic_tokens:
+            return set()
+
+        matched_ids: set[str] = set()
+        for document in documents:
+            document_topics = self._extract_document_topics(document)
+            for document_topic in document_topics:
+                document_tokens = {
+                    self._keyword_token(token)
+                    for token in self._tokenize_label(document_topic)
+                    if self._keyword_token(token)
+                }
+                if topic_tokens & document_tokens:
+                    matched_ids.add(document.record_id)
+                    break
+        return matched_ids
+
+    def _pick_specific_replacement(
+        self,
+        candidates: list[str],
+        *,
+        used_labels: set[str],
+        fallback: str,
+    ) -> str:
+        for candidate in candidates:
+            normalized = self._normalize_topic_phrase(candidate)
+            if not normalized:
+                continue
+            if normalized in used_labels:
+                continue
+            if self._is_generic_label(normalized):
+                continue
+            return normalized
+        return fallback
 
     def _domain_keywords_from_tree(self, tags: list[dict[str, Any]]) -> dict[str, set[str]]:
         mapping: dict[str, set[str]] = {}
@@ -1032,6 +1292,18 @@ class DomainTreeAgent:
         if len(cleaned) < 3:
             return ""
         return cleaned
+
+    def _is_generic_label(self, label: str) -> bool:
+        normalized = self._normalize_topic_phrase(label)
+        if not normalized:
+            return True
+        lowered = normalized.lower()
+        if lowered in _GENERIC_LABEL_TOKENS or lowered in _GENERIC_SECTION_TITLES:
+            return True
+        chinese = re.sub(r"^\d+(?:\.\d+)*\s*", "", normalized).strip()
+        if chinese in _GENERIC_LABEL_TOKENS:
+            return True
+        return False
 
     def _filter_toc_entries(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         filtered: list[dict[str, Any]] = []
