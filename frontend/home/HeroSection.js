@@ -2,6 +2,7 @@
 
 export default function HeroSection({
   onCreateProject,
+  onOpenResearchChat,
   onOpenDownload,
   onOpenBrowse,
   onOpenDomainTree,
@@ -20,8 +21,9 @@ export default function HeroSection({
         </p>
 
         <div className="hero-actions">
-          <button type="button" className="hero-button hero-button-primary" onClick={onCreateProject}>
-            创建项目
+
+          <button type="button" className="hero-button hero-button-secondary" onClick={onOpenResearchChat}>
+            研究对话
           </button>
 
           <button type="button" className="hero-button hero-button-secondary" onClick={onOpenDownload}>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import DatasetBrowser from "@/app/_views/DatasetBrowserView";
 import DatasetDownloadPage from "@/app/_views/DatasetDownloadView";
 import DomainTreePage from "@/app/_views/DomainTreeView";
@@ -21,6 +22,7 @@ type HomeWorkspaceProps = {
 };
 
 export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
+  const router = useRouter();
   const [manualView, setManualView] = useState<WorkspaceView | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const activeView = manualView ?? parseWorkspaceView(initialView);
@@ -45,6 +47,9 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
           </button>
 
           <nav className="workspace-tabs" aria-label="数据集工作台">
+            <button type="button" className="workspace-tab" onClick={() => router.push("/research-chat")}>
+              研究对话
+            </button>
             {navItems.map((item) => (
               <button
                 key={item.id}
@@ -68,6 +73,7 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
           <main className="home-page">
             <HeroSection
               onCreateProject={() => setCreateDialogOpen(true)}
+              onOpenResearchChat={() => router.push("/research-chat")}
               onOpenDownload={() => setManualView("download")}
               onOpenBrowse={() => setManualView("browse")}
               onOpenDomainTree={() => setManualView("domain-tree")}
