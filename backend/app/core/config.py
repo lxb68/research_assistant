@@ -73,6 +73,25 @@ class Settings:
         or "gpt-4o-mini"
     )
     request_timeout = int(os.getenv("REQUEST_TIMEOUT", "15"))
+    research_agent_max_papers = int(os.getenv("RESEARCH_AGENT_MAX_PAPERS", "100"))
+    research_agent_max_sources = int(os.getenv("RESEARCH_AGENT_MAX_SOURCES", "6"))
+    research_agent_chunk_size = int(os.getenv("RESEARCH_AGENT_CHUNK_SIZE", "1800"))
+    research_agent_max_context_chars = int(os.getenv("RESEARCH_AGENT_MAX_CONTEXT_CHARS", "18000"))
+    research_agent_request_timeout = int(os.getenv("RESEARCH_AGENT_REQUEST_TIMEOUT", "90"))
+    rag_embedding_model = os.getenv("RAG_EMBEDDING_MODEL", "")
+    rag_embedding_base_url = (os.getenv("RAG_EMBEDDING_BASE_URL") or "").rstrip("/")
+    rag_embedding_api_key = os.getenv("RAG_EMBEDDING_API_KEY", "")
+    rag_embedding_timeout = int(os.getenv("RAG_EMBEDDING_TIMEOUT", "60"))
+    rag_vector_store_path = os.getenv("RAG_VECTOR_STORE_PATH") or str(
+        BACKEND_DIR / "storage" / "metadata" / "rag_vectors.sqlite3",
+    )
+    rag_bm25_weight = float(os.getenv("RAG_BM25_WEIGHT", "0.45"))
+    rag_vector_weight = float(os.getenv("RAG_VECTOR_WEIGHT", "0.55"))
+    orchestrator_min_evidence = int(os.getenv("ORCHESTRATOR_MIN_EVIDENCE", "2"))
+    orchestrator_min_query_coverage = float(os.getenv("ORCHESTRATOR_MIN_QUERY_COVERAGE", "0.28"))
+    orchestrator_search_limit_per_source = int(os.getenv("ORCHESTRATOR_SEARCH_LIMIT_PER_SOURCE", "3"))
+    error_recovery_max_cycles = int(os.getenv("ERROR_RECOVERY_MAX_CYCLES", "3"))
+    error_recovery_base_delay_seconds = float(os.getenv("ERROR_RECOVERY_BASE_DELAY_SECONDS", "0.5"))
     hunter_download_dir = os.getenv("HUNTER_DOWNLOAD_DIR") or str(
         BACKEND_DIR / "storage" / "papers",
     )

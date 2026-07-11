@@ -17,9 +17,14 @@ import SearchRounded from "@mui/icons-material/SearchRounded";
 import SendRounded from "@mui/icons-material/SendRounded";
 import SettingsOutlined from "@mui/icons-material/SettingsOutlined";
 import ThumbUpAltOutlined from "@mui/icons-material/ThumbUpAltOutlined";
+import { buildApiUrl } from "@/lib/api";
+import { readNdjsonStream } from "@/lib/stream";
 
 type Props = { onOpenDownload: () => void; onOpenBrowse: () => void; onOpenDomainTree: () => void; onOpenSettings: () => void };
-type Message = { id: number; role: "user" | "agent"; content: string };
+type Source = { index: number; title: string; year?: string; source?: string };
+type Message = { id: number; role: "user" | "agent"; content: string; sources?: Source[] };
+type StreamEvent = { type: "log"; message: string } | { type: "result"; result: OrchestratorResult } | { type: "error"; message: string } | { type: "done" };
+type OrchestratorResult = { action: string; result: { answer?: string; sources?: Source[]; status?: string; message?: string; requiredMaterials?: Array<{ description: string }> } };
 
 const seed: Message[] = [
   { id: 1, role: "user", content: "帮我梳理一下大语言模型在医疗问答领域的主要研究方向，并指出目前最值得关注的空白。" },
@@ -30,11 +35,12 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
   const [messages, setMessages] = useState(seed);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
+  const [thinkingText, setThinkingText] = useState("正在检索知识库并组织证据…");
   const [sidebar, setSidebar] = useState(true);
   const [copied, setCopied] = useState<number | null>(null);
   const nextMessageId = useRef(3);
 
-  function send(value = input) {
+  async function send(value = input) {
     const prompt = value.trim();
     if (!prompt || thinking) return;
     const id = nextMessageId.current;
@@ -42,10 +48,38 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
     setMessages((items) => [...items, { id, role: "user", content: prompt }]);
     setInput("");
     setThinking(true);
-    window.setTimeout(() => {
-      setMessages((items) => [...items, { id: id + 1, role: "agent", content: "我已在「医疗大模型研究」知识库中完成语义检索。综合现有证据，这个问题可以从评测基准、知识更新和临床安全三个层面展开。建议下一步先限定研究人群与应用场景，我可以继续生成对比表或研究方案。" }]);
+    setThinkingText("正在判断知识库证据是否充分…");
+    try {
+      const response = await fetch(buildApiUrl("/api/research/chat/stream"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: prompt,
+          history: messages.slice(-8).map((message) => ({
+            role: message.role === "agent" ? "assistant" : "user",
+            content: message.content,
+          })),
+        }),
+      });
+      if (!response.ok || !response.body) throw new Error("研究对话服务暂时不可用");
+      await readNdjsonStream<StreamEvent>(response.body, (event) => {
+        if (event.type === "log") setThinkingText(event.message);
+        if (event.type === "error") throw new Error(event.message);
+        if (event.type === "result") {
+          const payload = event.result.result;
+          const materialText = payload.requiredMaterials?.map((item, index) => `${index + 1}. ${item.description}`).join("\n");
+          const needsUserHelp = payload.status === "needs_materials" || payload.status === "needs_user_action";
+          const content = needsUserHelp
+            ? `${payload.message || "当前流程需要你的协助。"}${materialText ? `\n\n建议补充：\n${materialText}` : ""}`
+            : payload.answer || "研究任务已完成，但没有返回可展示的回答。";
+          setMessages((items) => [...items, { id: id + 1, role: "agent", content, sources: payload.sources }]);
+        }
+      });
+    } catch (error) {
+      setMessages((items) => [...items, { id: id + 1, role: "agent", content: error instanceof Error ? `请求失败：${error.message}` : "研究对话请求失败，请稍后重试。" }]);
+    } finally {
       setThinking(false);
-    }, 900);
+    }
   }
 
   function submit(event: FormEvent) { event.preventDefault(); send(); }
@@ -81,10 +115,10 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
             {messages.map((message) => <article className={`research-message ${message.role}`} key={message.id}>
               <div className="research-avatar">{message.role === "agent" ? <AutoAwesomeRounded /> : "LX"}</div>
               <div><header><strong>{message.role === "agent" ? "Research Agent" : "你"}</strong><span>{message.id <= 2 ? "10:24" : "刚刚"}</span></header><p>{message.content}</p>
-                {message.role === "agent" && <><div className="research-citations"><button>1 · Nature Medicine</button><button>2 · JAMIA</button><button>3 · arXiv</button></div><footer><button onClick={() => { navigator.clipboard?.writeText(message.content); setCopied(message.id); }}><ContentCopyRounded />{copied === message.id ? "已复制" : "复制"}</button><button><ThumbUpAltOutlined />有帮助</button></footer></>}
+                {message.role === "agent" && <>{message.sources?.length ? <div className="research-citations">{message.sources.map((source) => <button key={`${message.id}-${source.index}`}>{source.index} · {source.title}</button>)}</div> : null}<footer><button onClick={() => { navigator.clipboard?.writeText(message.content); setCopied(message.id); }}><ContentCopyRounded />{copied === message.id ? "已复制" : "复制"}</button><button><ThumbUpAltOutlined />有帮助</button></footer></>}
               </div>
             </article>)}
-            {thinking && <div className="research-thinking"><i /><i /><i />正在检索知识库并组织证据…</div>}
+            {thinking && <div className="research-thinking"><i /><i /><i />{thinkingText}</div>}
           </section>
           <div className="research-compose-wrap">
             <div className="research-prompts">{["生成一份文献综述大纲", "对比 RAG 与微调路线", "找出近两年的研究趋势"].map((text) => <button onClick={() => send(text)} key={text}><BoltRounded />{text}</button>)}</div>

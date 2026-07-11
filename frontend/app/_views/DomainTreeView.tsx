@@ -696,7 +696,11 @@ export default function DomainTreePage({
           </div>
         </header>
 
-        <section className="domain-tree-view-switcher" aria-label="领域树页面视图切换">
+        <section
+          className="domain-tree-view-switcher"
+          aria-label="领域树页面视图切换"
+          style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}
+        >
           <button
             type="button"
             className={`domain-tree-view-button${viewMode === "tree" ? " is-active" : ""}`}
@@ -713,20 +717,6 @@ export default function DomainTreePage({
           </button>
         </section>
 
-        <section className="domain-tree-selected-paper">
-          <div>
-            <strong>模型配置</strong>
-            <p>
-              {isLoadingModelStatus
-                ? "正在读取模型参数..."
-                : modelStatus?.configured
-                  ? `${modelStatus.model || "未命名模型"} · ${modelStatus.maskedApiKey || "已配置密钥"}`
-                  : "尚未配置模型参数"}
-            </p>
-          </div>
-          <span>{modelStatus?.configured ? "可直接生成" : "请先完成设置"}</span>
-        </section>
-
         {!modelStatus?.configured && !isLoadingModelStatus ? (
           <div className="domain-tree-empty">
             <strong>请先设置模型参数</strong>
@@ -739,7 +729,7 @@ export default function DomainTreePage({
           </div>
         ) : null}
 
-        <section className="domain-tree-selected-paper">
+        <section className="domain-tree-selected-paper domain-tree-literature-card">
           <div>
             <strong>当前文献集合</strong>
             <p>
@@ -748,10 +738,8 @@ export default function DomainTreePage({
             </p>
           </div>
           <span>{result ? `最近方式：${ACTION_LABELS[latestAction]}` : "首次生成"}</span>
-        </section>
-
-        {result ? (
-          <section className="domain-tree-change-panel">
+          {result ? (
+            <div className="domain-tree-change-panel domain-tree-change-inline">
             <div className="domain-tree-change-head">
               <div>
                 <strong>文献变更检测</strong>
@@ -765,8 +753,7 @@ export default function DomainTreePage({
             </div>
 
             {changeSummary.hasChanges ? (
-              <>
-                <div className="domain-tree-change-tags">
+              <div className="domain-tree-change-tags">
                   {changeSummary.added.map((paper) => (
                     <span key={`added-${paper.id}`} className="domain-tree-change-tag is-added">
                       新增：{paper.title || paper.id}
@@ -777,39 +764,37 @@ export default function DomainTreePage({
                       删除：{document.title || document.recordId}
                     </span>
                   ))}
-                </div>
-
-                <div className="domain-tree-mode-grid">
-                  {(["revise", "rebuild", "keep"] as const).map((mode) => (
-                    <label
-                      key={mode}
-                      className={`domain-tree-mode-card${generationMode === mode ? " is-active" : ""}`}
-                    >
-                      <input
-                        type="radio"
-                        name="domain-tree-mode"
-                        value={mode}
-                        checked={generationMode === mode}
-                        onChange={() => setManualGenerationMode(mode)}
-                      />
-                      <strong>{ACTION_LABELS[mode]}</strong>
-                      <span>{ACTION_DESCRIPTIONS[mode]}</span>
-                    </label>
-                  ))}
-                </div>
-              </>
+              </div>
             ) : (
               <div className="domain-tree-status">当前没有新增或删除文献，直接查看现有领域树即可。</div>
             )}
-          </section>
-        ) : null}
+            </div>
+          ) : null}
+        </section>
 
         <section className="domain-tree-controls">
           <div className="domain-tree-select-wrap">
             <span>本次执行模式</span>
-            <div className="domain-tree-control-summary">
-              <strong>{ACTION_LABELS[generationMode]}</strong>
-              <p>{ACTION_DESCRIPTIONS[generationMode]}</p>
+            <div
+              className="domain-tree-mode-grid"
+              style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}
+            >
+              {(["revise", "rebuild", "keep"] as const).map((mode) => (
+                <label
+                  key={mode}
+                  className={`domain-tree-mode-card${generationMode === mode ? " is-active" : ""}`}
+                >
+                  <input
+                    type="radio"
+                    name="domain-tree-mode"
+                    value={mode}
+                    checked={generationMode === mode}
+                    onChange={() => setManualGenerationMode(mode)}
+                  />
+                  <strong>{ACTION_LABELS[mode]}</strong>
+                  <span>{ACTION_DESCRIPTIONS[mode]}</span>
+                </label>
+              ))}
             </div>
           </div>
 

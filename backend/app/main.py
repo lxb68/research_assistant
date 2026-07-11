@@ -1,5 +1,6 @@
 ﻿import json
 import importlib.util
+import asyncio
 import queue
 import threading
 from pathlib import Path
@@ -9,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.agents import DomainTreeAgent, HunterAgent
+from app.agents import DomainTreeAgent, HunterAgent, OrchestratorAgent
 from app.core.config import settings
 from app.services.mineru import MinerURequest, mineru_processing
 from app.services.model_config import ModelConfigStore
@@ -78,6 +79,23 @@ class ModelConfigRequest(BaseModel):
     api_key: str = Field("", description="LLM API 密钥")
 
 
+class ChatMessage(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant)$", description="消息角色")
+    content: str = Field(..., min_length=1, max_length=20000, description="消息内容")
+
+
+class ResearchChatRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=20000, description="研究问题")
+    history: list[ChatMessage] = Field(default_factory=list, max_length=20, description="最近对话历史")
+    paper_ids: list[str] = Field(default_factory=list, max_length=100, description="可选：限定论文记录 ID")
+
+
+class OrchestratorRequest(BaseModel):
+    task: str = Field(..., min_length=1, max_length=20000, description="需要编排执行的研究任务")
+    action: str = Field("auto", pattern="^(auto|chat|search|domain_tree)$", description="指定动作或自动路由")
+    arguments: dict = Field(default_factory=dict, description="传递给目标 Agent 的受限参数")
+
+
 app = FastAPI(
     title="Research Assistant API",
     description="Python FastAPI backend for literature search.",
@@ -105,6 +123,84 @@ def health() -> dict:
 @app.get("/api/papers/sources")
 def paper_sources() -> dict:
     return {"sources": sorted(SUPPORTED_SOURCES.keys())}
+
+
+@app.post("/api/research/chat")
+async def research_chat(payload: ResearchChatRequest) -> dict:
+    try:
+        result = await OrchestratorAgent().run(
+            payload.question,
+            action="chat",
+            arguments={
+                "history": [message.model_dump() for message in payload.history],
+                "paper_ids": payload.paper_ids,
+                "allow_external_search": not bool(payload.paper_ids),
+            },
+        )
+        return {"status": "ok", **result}
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.post("/api/research/chat/stream")
+def research_chat_stream(payload: ResearchChatRequest) -> StreamingResponse:
+    def encode_event(event: dict) -> str:
+        return json.dumps(event, ensure_ascii=False) + "\n"
+
+    def event_stream():
+        events: queue.Queue[dict] = queue.Queue()
+
+        def push_log(message: str) -> None:
+            events.put({"type": "log", "message": message})
+
+        def run_agent() -> None:
+            try:
+                result = asyncio.run(
+                    OrchestratorAgent(log_callback=push_log).run(
+                        payload.question,
+                        action="chat",
+                        arguments={
+                            "history": [message.model_dump() for message in payload.history],
+                            "paper_ids": payload.paper_ids,
+                            "allow_external_search": not bool(payload.paper_ids),
+                        },
+                    )
+                )
+                events.put({"type": "result", "result": result})
+            except Exception as error:
+                events.put({"type": "error", "message": str(error)})
+            finally:
+                events.put({"type": "done"})
+
+        threading.Thread(target=run_agent, daemon=True).start()
+        while True:
+            event = events.get()
+            yield encode_event(event)
+            if event.get("type") == "done":
+                break
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/orchestrator/run")
+async def orchestrator_run(payload: OrchestratorRequest) -> dict:
+    try:
+        result = await OrchestratorAgent().run(
+            payload.task,
+            action=payload.action,
+            arguments=payload.arguments,
+        )
+        return {"status": "ok", **result}
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
 
 
 @app.get("/api/debug/routes")

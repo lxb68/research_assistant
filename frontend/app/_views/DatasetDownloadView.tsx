@@ -903,21 +903,12 @@ export default function DatasetDownloadPage({
               当前数据源：{selectedSourceText || "未选择"}。点击搜索后，HunterAgent 会优先检索已出版来源
               {selectedPublishedSources.length > 0 ? `（${selectedPublishedSources.map(getSourceLabel).join(" / ")}）` : ""}
               并应用 CCF/影响因子条件。
+              {selectedArxiv ? (
+                <Box component="span" sx={{ display: "block", mt: 0.5, color: "#fde68a" }}>
+                  arXiv 为预印本数据源，不代表已发表期刊或会议；后端不会用 CCF 等级和影响因子过滤 arXiv。
+                </Box>
+              ) : null}
             </Typography>
-            {selectedArxiv && (
-              <Alert
-                severity="warning"
-                sx={{
-                  mt: 1.5,
-                  border: "1px solid rgba(251, 191, 36, 0.34)",
-                  borderRadius: 2,
-                  background: "rgba(120, 53, 15, 0.22)",
-                  color: "#fde68a",
-                }}
-              >
-                arXiv 为预印本数据源，不代表已发表期刊或会议；后端不会用 CCF 等级和影响因子过滤 arXiv。
-              </Alert>
-            )}
           </Paper>
 
           <Box>
