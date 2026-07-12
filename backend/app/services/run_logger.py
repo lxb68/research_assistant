@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+import json
+import re
+import threading
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+class RunLogger:
+    """为一次 Agent 编排运行写入可读日志和 JSONL 结构化日志。"""
+
+    def __init__(self, root_dir: str | Path, *, run_id: str | None = None) -> None:
+        self.run_id = run_id or uuid.uuid4().hex
+        day = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+        self.run_dir = Path(root_dir) / day
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.text_path = self.run_dir / f"{self.run_id}.log"
+        self.jsonl_path = self.run_dir / f"{self.run_id}.jsonl"
+        self._lock = threading.Lock()
+
+    def log(self, component: str, message: str, *, event: str = "log", data: dict[str, Any] | None = None) -> None:
+        timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="milliseconds")
+        safe_message = self._redact(str(message))
+        safe_data = self._redact_value(data or {})
+        record = {
+            "timestamp": timestamp,
+            "runId": self.run_id,
+            "component": component,
+            "event": event,
+            "message": safe_message,
+            "data": safe_data,
+        }
+        text_line = f"{timestamp} [{self.run_id}] [{component}] [{event}] {safe_message}"
+        if safe_data:
+            text_line += f" | {json.dumps(safe_data, ensure_ascii=False, default=str)}"
+        with self._lock:
+            with self.text_path.open("a", encoding="utf-8") as handle:
+                handle.write(text_line + "\n")
+            with self.jsonl_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+    def public_info(self) -> dict[str, str]:
+        return {"runId": self.run_id, "logPath": str(self.text_path), "jsonlPath": str(self.jsonl_path)}
+
+    def _redact(self, value: str) -> str:
+        patterns = (
+            (r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+", r"\1***"),
+            (r"(?i)((?:api[_ -]?key|token|secret)\s*[:=]\s*)[^\s,;]+", r"\1***"),
+            (r"\bsk-[A-Za-z0-9_-]{8,}\b", "sk-***"),
+        )
+        redacted = value
+        for pattern, replacement in patterns:
+            redacted = re.sub(pattern, replacement, redacted)
+        return redacted
+
+    def _redact_value(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): "***" if any(token in str(key).lower() for token in ("key", "token", "secret", "authorization")) else self._redact_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._redact_value(item) for item in value]
+        if isinstance(value, str):
+            return self._redact(value)
+        return value
+
+
+__all__ = ["RunLogger"]

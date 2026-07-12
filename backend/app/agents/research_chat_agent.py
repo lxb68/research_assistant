@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -36,7 +37,7 @@ class ResearchChatAgent:
     ) -> None:
         self.config = config or ResearchAgentConfig()
         self.log_callback = log_callback
-        self.hunter = HunterAgent()
+        self.hunter = HunterAgent(log_callback=self._log)
         embedding_client = EmbeddingClient(
             base_url=settings.rag_embedding_base_url,
             api_key=settings.rag_embedding_api_key,
@@ -47,6 +48,7 @@ class ResearchChatAgent:
             chunk_size=self.config.chunk_size,
             max_chunks=self.config.max_sources,
             max_context_chars=self.config.max_context_chars,
+            max_chunks_per_paper=settings.rag_max_chunks_per_paper,
             embedding_client=embedding_client,
             vector_store=SQLiteVectorStore(settings.rag_vector_store_path),
             bm25_weight=settings.rag_bm25_weight,
@@ -76,7 +78,7 @@ class ResearchChatAgent:
             for message in (history or [])[-4:]
             if message.get("role") == "user" and str(message.get("content") or "").strip()
         ]
-        retrieval_query = "\n".join([*recent_questions, normalized_question])
+        retrieval_query = self._expand_retrieval_query("\n".join([*recent_questions, normalized_question]))
         evidence = self.retriever.retrieve(retrieval_query, papers)
         self._log(f"检索模式：{self.retriever.last_retrieval_mode}")
         if not evidence:
@@ -89,7 +91,7 @@ class ResearchChatAgent:
             history=history or [],
             evidence=evidence,
         )
-        sources = [
+        retrieved_sources = [
             {
                 "index": index,
                 "recordId": item["record_id"],
@@ -104,10 +106,18 @@ class ResearchChatAgent:
             }
             for index, item in enumerate(evidence, start=1)
         ]
+        cited_indices = self._extract_citation_indices(answer, len(retrieved_sources))
+        sources = [source for source in retrieved_sources if source["index"] in cited_indices]
         self._log("研究回答生成完成")
         return {
             "answer": answer,
             "sources": sources,
+            "retrievedSources": retrieved_sources,
+            "citationDiagnostics": {
+                "retrievedCount": len(retrieved_sources),
+                "citedCount": len(sources),
+                "citedIndices": sorted(cited_indices),
+            },
             "model": model["model"],
             "retrievalMode": self.retriever.last_retrieval_mode,
             "retrievalDiagnostics": self.retriever.last_diagnostics,
@@ -129,7 +139,8 @@ class ResearchChatAgent:
             for message in (history or [])[-4:]
             if message.get("role") == "user" and str(message.get("content") or "").strip()
         ]
-        evidence = self.retriever.retrieve("\n".join([*recent_questions, normalized_question]), papers)
+        retrieval_query = self._expand_retrieval_query("\n".join([*recent_questions, normalized_question]))
+        evidence = self.retriever.retrieve(retrieval_query, papers)
         diagnostics = {"paperCount": len(papers), **self.retriever.last_diagnostics}
         return evidence, diagnostics
 
@@ -138,6 +149,12 @@ class ResearchChatAgent:
             papers = [self.hunter.get_saved_paper(record_id) for record_id in paper_ids]
             return [paper for paper in papers if isinstance(paper, dict)]
         return self.hunter.list_saved_papers(limit=self.config.max_papers)
+
+    def _expand_retrieval_query(self, query: str) -> str:
+        translated = self.hunter.translate_search_query(query)
+        if translated.strip().lower() == query.strip().lower():
+            return query
+        return f"{query}\n{translated}".strip()
 
     def _complete(
         self,
@@ -179,6 +196,25 @@ class ResearchChatAgent:
         if not prompt_path.exists():
             raise FileNotFoundError(f"研究助手 Prompt 不存在：{prompt_path}")
         return prompt_path.read_text(encoding="utf-8")
+
+    def _extract_citation_indices(self, answer: str, source_count: int) -> set[int]:
+        indices: set[int] = set()
+        for content in re.findall(r"\[([0-9,，\-–—\s]+)\]", answer):
+            normalized = content.replace("，", ",").replace("–", "-").replace("—", "-")
+            for part in normalized.split(","):
+                value = part.strip()
+                if not value:
+                    continue
+                if "-" in value:
+                    bounds = [item.strip() for item in value.split("-", 1)]
+                    if len(bounds) == 2 and all(item.isdigit() for item in bounds):
+                        start, end = int(bounds[0]), int(bounds[1])
+                        if start <= end and end - start <= 20:
+                            indices.update(range(start, end + 1))
+                    continue
+                if value.isdigit():
+                    indices.add(int(value))
+        return {index for index in indices if 1 <= index <= source_count}
 
     def _log(self, message: str) -> None:
         if self.log_callback:

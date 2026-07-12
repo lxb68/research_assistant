@@ -9,6 +9,7 @@ from app.agents.hunter_agent import HunterAgent
 from app.agents.research_chat_agent import ResearchChatAgent
 from app.core.config import settings
 from app.services.model_config import ModelConfigStore
+from app.services.run_logger import RunLogger
 
 
 class OrchestratorAgent:
@@ -17,11 +18,13 @@ class OrchestratorAgent:
     ALLOWED_ACTIONS = {"auto", "chat", "search", "domain_tree"}
 
     def __init__(self, *, log_callback: Callable[[str], None] | None = None) -> None:
-        self.log_callback = log_callback
+        self.ui_log_callback = log_callback
+        self.run_logger = RunLogger(settings.agent_run_log_dir)
+        self.log_callback = self._child_log
         self.recovery = ErrorRecoveryAgent(
             max_cycles=settings.error_recovery_max_cycles,
             base_delay_seconds=settings.error_recovery_base_delay_seconds,
-            log_callback=log_callback,
+            log_callback=self.log_callback,
         )
 
     async def run(self, task: str, *, action: str = "auto", arguments: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -32,6 +35,12 @@ class OrchestratorAgent:
         if normalized_action not in self.ALLOWED_ACTIONS:
             raise ValueError(f"不支持的编排动作：{normalized_action}")
         args = arguments or {}
+        self.run_logger.log(
+            "OrchestratorAgent",
+            "研究任务开始",
+            event="run_start",
+            data={"task": normalized_task, "requestedAction": normalized_action, "arguments": args},
+        )
         selected = self._select_action(normalized_task) if normalized_action == "auto" else normalized_action
         self._log(f"编排器已选择 {selected} Agent")
 
@@ -46,7 +55,13 @@ class OrchestratorAgent:
                     download_pdf=bool(args.get("download_pdf", True)),
                 ),
             )
-            return {"agent": "hunter", "action": selected, "result": result, "recoveryTrace": recovery_trace}
+            return {
+                "agent": "hunter",
+                "action": selected,
+                "result": result,
+                "recoveryTrace": recovery_trace,
+                "runLog": self.run_logger.public_info(),
+            }
 
         if selected == "domain_tree":
             model = ModelConfigStore().build_model_payload()
@@ -69,6 +84,7 @@ class OrchestratorAgent:
                 "action": selected,
                 "result": result,
                 "recoveryTrace": recovery_trace,
+                "runLog": self.run_logger.public_info(),
             }
 
         return await self._run_research_pipeline(normalized_task, args)
@@ -88,6 +104,12 @@ class OrchestratorAgent:
             paper_ids=paper_ids,
         )
         sufficient, reasons = self._assess_evidence(diagnostics)
+        self.run_logger.log(
+            "RAGRetriever",
+            "本地证据充分度评估完成",
+            event="evidence_assessment",
+            data={"diagnostics": diagnostics, "sufficient": sufficient, "reasons": reasons},
+        )
         trace.append(
             {
                 "step": "local_retrieval",
@@ -102,12 +124,21 @@ class OrchestratorAgent:
         search_error = ""
         if not sufficient and allow_search:
             self._log("本地证据不足，正在调用 HunterAgent 搜索补充论文")
+            hunter_agent = HunterAgent(log_callback=self.log_callback)
+            requested_search_keyword = str(args.get("search_keyword") or task)
+            search_keyword = await asyncio.to_thread(hunter_agent.translate_search_query, requested_search_keyword)
+            self.run_logger.log(
+                "OrchestratorAgent",
+                "已通过后端翻译服务生成英文论文检索词",
+                event="search_query",
+                data={"originalQuestion": requested_search_keyword, "searchKeyword": search_keyword},
+            )
             try:
                 search_result, recovery_trace = await self.recovery.execute(
                     "HunterAgent 证据补充搜索",
                     lambda: asyncio.to_thread(
-                        HunterAgent(log_callback=self.log_callback).run,
-                        str(args.get("search_keyword") or task),
+                        hunter_agent.run,
+                        search_keyword,
                         sources=list(args.get("sources") or ["arxiv", "crossref", "open_access"]),
                         limit_per_source=max(
                             1,
@@ -129,6 +160,19 @@ class OrchestratorAgent:
                         "recoveryTrace": recovery_trace,
                     }
                 )
+                if search_result.get("errors"):
+                    self.run_logger.log(
+                        "HunterAgent",
+                        "论文搜索部分失败；HunterAgent 返回结果但包含数据源错误",
+                        event="partial_failure",
+                        data={
+                            "keyword": search_result.get("keyword"),
+                            "searchKeyword": search_result.get("searchKeyword"),
+                            "savedCount": search_result.get("savedCount"),
+                            "targetCount": search_result.get("targetCount"),
+                            "errors": search_result.get("errors"),
+                        },
+                    )
             except RecoveryExhaustedError as error:
                 search_error = str(error)
                 trace.append({
@@ -147,6 +191,12 @@ class OrchestratorAgent:
                 history=history,
             )
             sufficient, reasons = self._assess_evidence(diagnostics)
+            self.run_logger.log(
+                "RAGRetriever",
+                "补充搜索后的证据充分度评估完成",
+                event="evidence_assessment",
+                data={"diagnostics": diagnostics, "sufficient": sufficient, "reasons": reasons},
+            )
             trace.append(
                 {
                     "step": "retrieval_after_search",
@@ -170,6 +220,7 @@ class OrchestratorAgent:
                     "retrievalDiagnostics": diagnostics,
                     "evidencePreview": self._evidence_preview(evidence),
                     "trace": trace,
+                    "runLog": self.run_logger.public_info(),
                 },
             }
 
@@ -200,6 +251,7 @@ class OrchestratorAgent:
                     "message": str(error),
                     "requiredAction": error.decision.action,
                     "trace": trace,
+                    "runLog": self.run_logger.public_info(),
                 },
             }
         trace.append({
@@ -211,7 +263,7 @@ class OrchestratorAgent:
         return {
             "agent": "orchestrator",
             "action": "chat",
-            "result": {**result, "trace": trace},
+            "result": {**result, "trace": trace, "runLog": self.run_logger.public_info()},
         }
 
     def _assess_evidence(self, diagnostics: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -281,8 +333,15 @@ class OrchestratorAgent:
         return "chat"
 
     def _log(self, message: str) -> None:
-        if self.log_callback:
-            self.log_callback(message)
+        self.run_logger.log("OrchestratorAgent", message)
+        if self.ui_log_callback:
+            self.ui_log_callback(message)
+
+    def _child_log(self, message: str) -> None:
+        component = "HunterAgent" if message.startswith("[") or "数据源" in message or "论文" in message else "Agent"
+        self.run_logger.log(component, message)
+        if self.ui_log_callback:
+            self.ui_log_callback(message)
 
 
 __all__ = ["OrchestratorAgent"]

@@ -87,11 +87,15 @@ class Settings:
     )
     rag_bm25_weight = float(os.getenv("RAG_BM25_WEIGHT", "0.45"))
     rag_vector_weight = float(os.getenv("RAG_VECTOR_WEIGHT", "0.55"))
+    rag_max_chunks_per_paper = int(os.getenv("RAG_MAX_CHUNKS_PER_PAPER", "1"))
     orchestrator_min_evidence = int(os.getenv("ORCHESTRATOR_MIN_EVIDENCE", "2"))
     orchestrator_min_query_coverage = float(os.getenv("ORCHESTRATOR_MIN_QUERY_COVERAGE", "0.28"))
     orchestrator_search_limit_per_source = int(os.getenv("ORCHESTRATOR_SEARCH_LIMIT_PER_SOURCE", "3"))
     error_recovery_max_cycles = int(os.getenv("ERROR_RECOVERY_MAX_CYCLES", "3"))
     error_recovery_base_delay_seconds = float(os.getenv("ERROR_RECOVERY_BASE_DELAY_SECONDS", "0.5"))
+    agent_run_log_dir = os.getenv("AGENT_RUN_LOG_DIR") or str(
+        BACKEND_DIR / "storage" / "logs" / "research_runs",
+    )
     hunter_download_dir = os.getenv("HUNTER_DOWNLOAD_DIR") or str(
         BACKEND_DIR / "storage" / "papers",
     )

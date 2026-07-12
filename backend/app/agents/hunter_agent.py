@@ -2000,6 +2000,13 @@ class HunterAgent:
     def _is_chinese(self, text: str) -> bool:
         return any('\u4e00' <= ch <= '\u9fff' for ch in text)
 
+    def translate_search_query(self, query: str) -> str:
+        """将中文研究问题转换为英文论文检索词；供 RAG 与编排器统一复用。"""
+        normalized = str(query).strip()
+        if not normalized:
+            raise ValueError("检索问题不能为空")
+        return self._expand_keyword(normalized)
+
     def _expand_keyword(self, keyword: str) -> str:
         normalized = keyword.strip().lower()
 

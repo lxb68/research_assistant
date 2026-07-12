@@ -684,6 +684,7 @@ export default function DomainTreePage({
 
   const latestAction = (result?.action as DomainTreeAction | undefined) ?? "rebuild";
   const treeCardTitle = latestAction === "revise" ? "修订标签树" : "领域树";
+  const isModelConfigurationMissing = modelStatus?.configured === false;
 
   return (
     <main className="domain-tree-page">
@@ -717,8 +718,8 @@ export default function DomainTreePage({
           </button>
         </section>
 
-        {!modelStatus?.configured && !isLoadingModelStatus ? (
-          <div className="domain-tree-empty">
+        {isModelConfigurationMissing && !isLoadingModelStatus ? (
+          <div className="domain-tree-empty domain-tree-config-empty">
             <strong>请先设置模型参数</strong>
             <span>在设置页面填写模型名称、Base URL 和 API Key 后，才可进行领域树构建。</span>
             {onOpenSettings ? (
@@ -811,14 +812,9 @@ export default function DomainTreePage({
         </section>
 
         {status ? <div className="domain-tree-status">{status}</div> : null}
-        {error ? (
+        {error && !isModelConfigurationMissing ? (
           <div className="domain-tree-error">
             <span>{error}</span>
-            {!modelStatus?.configured && onOpenSettings ? (
-              <button type="button" className="domain-tree-inline-button" onClick={onOpenSettings}>
-                去设置
-              </button>
-            ) : null}
           </div>
         ) : null}
 
