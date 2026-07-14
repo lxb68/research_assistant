@@ -42,6 +42,7 @@ class EvidenceChunk:
     chunk_index: int = 0
 
     def to_dict(self) -> dict[str, Any]:
+        """把当前数据对象转换为接口可返回的字典。"""
         return {
             "record_id": self.record_id,
             "title": self.title,
@@ -70,6 +71,7 @@ class RAGRetriever:
         bm25_weight: float = 0.45,
         vector_weight: float = 0.55,
     ) -> None:
+        """初始化当前对象所需的配置与运行状态。"""
         self.chunk_size = max(400, chunk_size)
         self.max_chunks = max(1, max_chunks)
         self.max_context_chars = max(1000, max_context_chars)
@@ -168,6 +170,7 @@ class RAGRetriever:
         return "\n\n---\n\n".join(blocks)
 
     def _paper_chunks(self, paper: dict[str, Any]) -> list[EvidenceChunk]:
+        """把单篇论文整理为可检索的证据片段。"""
         base = {
             "record_id": str(paper.get("id") or paper.get("recordId") or ""),
             "title": str(paper.get("title") or "未命名文献"),
@@ -207,6 +210,7 @@ class RAGRetriever:
         ]
 
     def _read_markdown(self, paper: dict[str, Any]) -> str:
+        """读取Markdown。"""
         for key in ("markdownPath", "markdown_path"):
             path_value = str(paper.get(key) or "").strip()
             if path_value:
@@ -221,6 +225,7 @@ class RAGRetriever:
         return ""
 
     def _split_text(self, text: str) -> list[str]:
+        """切分文本。"""
         paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
         chunks: list[str] = []
         current = ""
@@ -234,6 +239,7 @@ class RAGRetriever:
         return chunks
 
     def _is_excluded(self, *, category: str, section: str, text: str) -> bool:
+        """判断片段是否属于参考文献等应排除内容。"""
         normalized_category = category.replace("-", "_").replace(" ", "_")
         if normalized_category in _EXCLUDED_CATEGORIES:
             return True
@@ -244,9 +250,11 @@ class RAGRetriever:
         return any(first_line.startswith(pattern) for pattern in _EXCLUDED_SECTION_PATTERNS)
 
     def _searchable_text(self, chunk: EvidenceChunk) -> str:
+        """拼接证据片段中参与检索的字段。"""
         return f"{chunk.title} {chunk.section} {chunk.text}"
 
     def _tokenize(self, text: str) -> list[str]:
+        """按中英文规则把文本切分为检索词元。"""
         lowered = str(text).lower()
         tokens = re.findall(r"[a-z0-9][a-z0-9+._-]{1,}", lowered)
         for sequence in re.findall(r"[\u4e00-\u9fff]+", lowered):
@@ -265,6 +273,7 @@ class RAGRetriever:
         document_count: int,
         average_length: float,
     ) -> float:
+        """计算查询与文档集合之间的 BM25 得分。"""
         frequencies = Counter(document_tokens)
         length = len(document_tokens)
         score = 0.0
@@ -278,6 +287,7 @@ class RAGRetriever:
         return score
 
     def _select_diverse(self, ranked: list[EvidenceChunk]) -> list[EvidenceChunk]:
+        """从排序结果中选择来源和内容更丰富的证据。"""
         selected: list[EvidenceChunk] = []
         per_paper: defaultdict[str, int] = defaultdict(int)
         context_size = 0
@@ -297,11 +307,13 @@ class RAGRetriever:
         return selected
 
     def _jaccard(self, left: set[str], right: set[str]) -> float:
+        """计算两个词元集合的 Jaccard 相似度。"""
         if not left or not right:
             return 0.0
         return len(left & right) / len(left | right)
 
     def _normalize_scores(self, scores: list[float]) -> list[float]:
+        """规范化得分。"""
         if not scores:
             return []
         minimum = min(scores)

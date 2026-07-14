@@ -25,6 +25,7 @@ class RecoveryDecision:
 class RecoveryExhaustedError(RuntimeError):
     """表示安全重试次数已耗尽，并携带完整恢复轨迹。"""
     def __init__(self, message: str, *, decision: RecoveryDecision, trace: list[dict[str, Any]]) -> None:
+        """初始化当前对象所需的配置与运行状态。"""
         super().__init__(message)
         self.decision = decision
         self.trace = trace
@@ -40,6 +41,7 @@ class ErrorRecoveryAgent:
         base_delay_seconds: float = 0.5,
         log_callback: Callable[[str], None] | None = None,
     ) -> None:
+        """初始化当前对象所需的配置与运行状态。"""
         self.max_cycles = max(1, min(max_cycles, 8))
         self.base_delay_seconds = max(0.0, min(base_delay_seconds, 10.0))
         self.log_callback = log_callback
@@ -105,11 +107,13 @@ class ErrorRecoveryAgent:
         return RecoveryDecision("unknown", False, "停止，保留错误轨迹供排查", "流程遇到无法自动恢复的错误，请检查编排轨迹。")
 
     def _status_code(self, error: Exception) -> int | None:
+        """从异常对象中提取 HTTP 状态码。"""
         response = getattr(error, "response", None)
         value = getattr(response, "status_code", None)
         return int(value) if isinstance(value, int) else None
 
     def _safe_error_message(self, error: Exception) -> str:
+        """生成异常信息、日志消息。"""
         message = str(error).strip()
         lowered = message.lower()
         if any(token in lowered for token in ("api key", "authorization", "bearer ", "token=")):
@@ -117,6 +121,7 @@ class ErrorRecoveryAgent:
         return message[:500] or error.__class__.__name__
 
     def _log(self, message: str) -> None:
+        """把运行消息转发给已配置的日志回调。"""
         if self.log_callback:
             self.log_callback(message)
 

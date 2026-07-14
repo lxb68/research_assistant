@@ -3,6 +3,7 @@
 import StandalonePageShell from "@/app/_components/StandalonePageShell";
 import SettingsView from "@/app/_views/SettingsView";
 
+/** 渲染独立的设置页面。 */
 export default function SettingPage() {
   return <StandalonePageShell><SettingsView /></StandalonePageShell>;
 }

@@ -7,6 +7,7 @@ export function splitDelimitedText(value: string): string[] {
     .filter(Boolean);
 }
 
+/** 清理字符串数组并去除重复值。 */
 export function uniqueTrimmedValues(values: Array<string | undefined>): string[] {
   return Array.from(
     new Set(values.map((value) => value?.trim()).filter(Boolean)),

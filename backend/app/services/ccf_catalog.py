@@ -19,6 +19,7 @@ class CcfCatalog:
     """CCF 会议/期刊目录本地缓存。"""
 
     def __init__(self, db_path: str | Path | None = None) -> None:
+        """初始化当前对象所需的配置与运行状态。"""
         self.db_path = Path(db_path or settings.ccf_catalog_db)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
@@ -34,6 +35,7 @@ class CcfCatalog:
         return self.count()
 
     def count(self) -> int:
+        """统计当前存储中的有效记录数量。"""
         with sqlite3.connect(self.db_path) as connection:
             row = connection.execute("SELECT COUNT(*) FROM ccf_catalog").fetchone()
         return int(row[0] if row else 0)
@@ -71,6 +73,7 @@ class CcfCatalog:
         return best_match or {"ccfLevel": "", "ccfSource": "", "ccfMatchedName": ""}
 
     def upsert_entries(self, entries: list[dict]) -> None:
+        """批量新增或更新目录条目。"""
         with sqlite3.connect(self.db_path) as connection:
             connection.executemany(
                 """
@@ -94,6 +97,7 @@ class CcfCatalog:
             connection.commit()
 
     def _download_entries(self) -> list[dict]:
+        """下载条目。"""
         request = Request(CCF_CATALOG_URL, headers={"User-Agent": "research-assistant/0.1"})
         try:
             with urlopen(request, timeout=settings.request_timeout) as response:
@@ -118,6 +122,7 @@ class CcfCatalog:
         return entries
 
     def _parse_catalog_cells(self, text: str) -> list[dict]:
+        """解析目录文本、表格单元。"""
         cells = [line.strip() for line in text.splitlines() if line.strip()]
         entries: list[dict] = []
         index = 0
@@ -162,6 +167,7 @@ class CcfCatalog:
         return entries
 
     def _parse_catalog_line(self, line: str) -> dict | None:
+        """解析目录文本、文本行。"""
         clean_line = re.sub(r"\s+", " ", line).strip()
         if not re.match(r"^\d+\s+", clean_line):
             return None
@@ -191,6 +197,7 @@ class CcfCatalog:
         }
 
     def _split_names(self, value: str) -> tuple[str, str]:
+        """切分名称。"""
         tokens = value.split()
         if not tokens:
             return "", ""
@@ -200,10 +207,12 @@ class CcfCatalog:
         return short_name, full_name
 
     def _html_to_text(self, html: str) -> str:
+        """去除 HTML 标签并还原实体为纯文本。"""
         without_tags = re.sub(r"<[^>]+>", "\n", html)
         return unescape(without_tags)
 
     def _init_db(self) -> None:
+        """初始化本地 SQLite 数据表和索引。"""
         with sqlite3.connect(self.db_path) as connection:
             connection.execute(
                 """
@@ -221,7 +230,9 @@ class CcfCatalog:
             connection.commit()
 
     def _normalize(self, value: str) -> str:
+        """把输入文本规范化为便于匹配的形式。"""
         return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
     def _contains_normalized_phrase(self, text: str, phrase: str) -> bool:
+        """判断短语。"""
         return f" {phrase} " in f" {text} "

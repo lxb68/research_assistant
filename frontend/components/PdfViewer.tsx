@@ -24,6 +24,7 @@ type PdfPageCanvasProps = {
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.mjs", import.meta.url).toString();
 
+/** 把指定 PDF 页面渲染到画布。 */
 function PdfPageCanvas({ pageNumber, pdf, scale }: PdfPageCanvasProps) {
   const [pageState, setPageState] = useState<"loading" | "ready" | "error">("loading");
 
@@ -31,6 +32,7 @@ function PdfPageCanvas({ pageNumber, pdf, scale }: PdfPageCanvasProps) {
     let cancelled = false;
     let activeRenderTask: PdfRenderTask | null = null;
 
+    /** 执行单页 PDF 画布渲染。 */
     async function renderPage() {
       setPageState("loading");
 
@@ -90,6 +92,7 @@ function PdfPageCanvas({ pageNumber, pdf, scale }: PdfPageCanvasProps) {
   );
 }
 
+/** 加载 PDF 并提供分页与缩放展示。 */
 export default function PdfViewer({ title, url }: PdfViewerProps) {
   const [pdf, setPdf] = useState<PdfDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
@@ -101,6 +104,7 @@ export default function PdfViewer({ title, url }: PdfViewerProps) {
     let cancelled = false;
     const loadingTask = pdfjsLib.getDocument({ url });
 
+    /** 加载 PDF 文档并更新查看器状态。 */
     async function loadPdf() {
       setIsLoading(true);
       setError("");

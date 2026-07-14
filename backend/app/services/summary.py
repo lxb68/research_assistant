@@ -73,6 +73,7 @@ def summarize_paragraph(paragraph: str, *, max_length: int = 120) -> str:
 
 
 def _build_heading_paths(section: dict[str, Any], outline: list[dict[str, Any]]) -> list[str]:
+    """构建标题、路径。"""
     headings = section.get("headings") or []
     if not headings and section.get("heading"):
         headings = [
@@ -100,6 +101,7 @@ def _build_heading_paths(section: dict[str, Any], outline: list[dict[str, Any]])
 
 
 def _build_single_heading_path(title: str, level: int, outline: list[dict[str, Any]]) -> str:
+    """构建标题、路径。"""
     heading_index = -1
     for index, item in enumerate(outline):
         if str(item.get("title", "")).strip() == title and int(item.get("level", 0) or 0) == level:
@@ -123,6 +125,7 @@ def _build_single_heading_path(title: str, level: int, outline: list[dict[str, A
 
 
 def _merge_heading_paths(paths: list[str]) -> str:
+    """合并标题、路径。"""
     split_paths = [path.split(" > ") for path in paths if path]
     if not split_paths:
         return "未命名段落"
@@ -142,6 +145,7 @@ def _merge_heading_paths(paths: list[str]) -> str:
 
 
 def _find_document_title(outline: list[dict[str, Any]]) -> str:
+    """查找来源文档、文档标题。"""
     for item in outline:
         if int(item.get("level", 0) or 0) == 1 and str(item.get("title", "")).strip():
             return str(item.get("title", "")).strip()
@@ -149,6 +153,7 @@ def _find_document_title(outline: list[dict[str, Any]]) -> str:
 
 
 def _pick_lead_sentence(text: str) -> str:
+    """选择首句。"""
     sentence_endings = ".!?。！？；;"
     for index, char in enumerate(text):
         if char in sentence_endings and index >= 20:

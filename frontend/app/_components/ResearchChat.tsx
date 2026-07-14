@@ -47,6 +47,7 @@ const CONVERSATIONS_KEY = "research-agent.conversations";
 const ACTIVE_CONVERSATION_KEY = "research-agent.active-conversation";
 const RESEARCH_RECORDS_KEY = "research-agent.research-records";
 
+/** 管理研究对话、流式响应和本地会话记录。 */
 export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomainTree, onOpenSettings }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -108,6 +109,7 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
     window.localStorage.setItem(RESEARCH_RECORDS_KEY, JSON.stringify(researchRecords));
   }, [hasHydrated, researchRecords]);
 
+  /** 提交问题并消费后端返回的流式研究事件。 */
   async function send(value = input) {
     const prompt = value.trim();
     if (!prompt || thinking) return;
@@ -180,9 +182,12 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
     }
   }
 
+  /** 处理研究问题表单提交。 */
   function submit(event: FormEvent) { event.preventDefault(); send(); }
+  /** 处理输入框回车发送和换行行为。 */
   function keyDown(event: KeyboardEvent<HTMLTextAreaElement>) { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } }
 
+  /** 切换到指定历史会话。 */
   function openConversation(id: string) {
     const conversation = conversations.find((item) => item.id === id);
     if (!conversation || thinking) return;
@@ -193,6 +198,7 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
     setInput("");
   }
 
+  /** 创建并激活一个空白研究会话。 */
   function startNewConversation() {
     if (thinking) return;
     setWorkspaceView("chat");
@@ -202,6 +208,7 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
     setInput("");
   }
 
+  /** 删除指定会话并选择新的活动会话。 */
   function deleteConversation(id: string) {
     if (thinking) return;
     const remaining = conversations.filter((conversation) => conversation.id !== id);
@@ -220,6 +227,7 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
     setInput("");
   }
 
+  /** 把回答保存为研究归档记录。 */
   function saveResearchRecord(message: Message) {
     if (message.role !== "agent") return;
     const messageIndex = messages.findIndex((item) => item.id === message.id);
@@ -243,12 +251,14 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
     }, ...items]);
   }
 
+  /** 打开研究归档关联的原始会话。 */
   function openRecordConversation(record: ResearchRecord) {
     if (record.conversationId && conversations.some((conversation) => conversation.id === record.conversationId)) {
       openConversation(record.conversationId);
     }
   }
 
+  /** 删除指定研究归档记录。 */
   function deleteResearchRecord(id: string) {
     setResearchRecords((items) => items.filter((record) => record.id !== id));
   }

@@ -16,6 +16,7 @@ import requests
 class EmbeddingClient:
     """封装兼容 OpenAI 协议的文本嵌入请求。"""
     def __init__(self, *, base_url: str, api_key: str, model: str, timeout: int = 60) -> None:
+        """初始化当前对象所需的配置与运行状态。"""
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
@@ -23,9 +24,11 @@ class EmbeddingClient:
 
     @property
     def configured(self) -> bool:
+        """判断当前客户端配置是否完整可用。"""
         return bool(self.base_url and self.api_key and self.model)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        """为一组文本请求并返回稠密向量。"""
         if not texts:
             return []
         response = requests.post(
@@ -50,6 +53,7 @@ class SQLiteVectorStore:
     """以文本指纹为键缓存稠密向量，避免重复调用 Embedding API。"""
 
     def __init__(self, path: str | Path) -> None:
+        """初始化当前对象所需的配置与运行状态。"""
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
@@ -72,6 +76,7 @@ class SQLiteVectorStore:
         client: EmbeddingClient,
         batch_size: int = 32,
     ) -> list[list[float]]:
+        """读取缓存向量，并仅为缺失文本生成新向量。"""
         fingerprints = [self.fingerprint(text) for text in texts]
         cached = self._load(fingerprints, client.model)
         missing_indices = [index for index, fingerprint in enumerate(fingerprints) if fingerprint not in cached]
@@ -83,9 +88,11 @@ class SQLiteVectorStore:
         return [cached[fingerprint] for fingerprint in fingerprints]
 
     def fingerprint(self, text: str) -> str:
+        """计算规范化文本的稳定指纹。"""
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def _load(self, fingerprints: list[str], model: str) -> dict[str, list[float]]:
+        """从 SQLite 批量读取已有向量。"""
         if not fingerprints:
             return {}
         result: dict[str, list[float]] = {}
@@ -101,6 +108,7 @@ class SQLiteVectorStore:
         return result
 
     def _save(self, entries: Iterable[tuple[str, list[float]]], model: str) -> None:
+        """把新生成的向量批量写入 SQLite。"""
         rows = [(fingerprint, model, json.dumps(vector)) for fingerprint, vector in entries]
         if not rows:
             return
@@ -112,6 +120,7 @@ class SQLiteVectorStore:
             connection.commit()
 
     def _connect(self) -> sqlite3.Connection:
+        """创建带行对象支持的 SQLite 连接。"""
         return sqlite3.connect(self.path)
 
 

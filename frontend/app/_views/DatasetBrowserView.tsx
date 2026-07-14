@@ -40,6 +40,7 @@ const emptyPdfImportForm: PdfImportForm = {
   tags: "",
 };
 
+/** 读取并校验浏览器保存的分块长度。 */
 function getSplitLengthsFromSettings() {
   // 浏览器存储异常或配置无效时使用后端一致的默认切分长度。
   if (typeof window === "undefined") {
@@ -75,6 +76,7 @@ function getSplitLengthsFromSettings() {
   }
 }
 
+/** 管理本地论文浏览、导入、删除和重新分块。 */
 export default function DatasetBrowserView() {
   const [papers, setPapers] = useState<SavedPaper[]>([]);
   const [query, setQuery] = useState("");
@@ -90,6 +92,7 @@ export default function DatasetBrowserView() {
   const [splitLogs, setSplitLogs] = useState<string[]>([]);
   const [error, setError] = useState("");
 
+  /** 按关键词加载本地论文列表。 */
   async function loadPapers(keyword = "", options: { initial?: boolean } = {}) {
     if (!options.initial) {
       setIsLoading(true);
@@ -123,6 +126,7 @@ export default function DatasetBrowserView() {
   }
 
   useEffect(() => {
+    /** 首次挂载后异步加载论文，避免在同步 effect 中直接更新状态。 */
     const run = async () => {
       await loadPapers("", { initial: true });
     };
@@ -130,15 +134,18 @@ export default function DatasetBrowserView() {
     void run();
   }, []);
 
+  /** 提交论文列表搜索条件。 */
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void loadPapers(query);
   }
 
+  /** 记录用户选择的本地 PDF 文件。 */
   function handlePdfFileChange(event: ChangeEvent<HTMLInputElement>) {
     setPdfFile(event.target.files?.[0] ?? null);
   }
 
+  /** 切换论文的批量选择状态。 */
   function togglePaperSelection(paperId: string) {
     setSelectedIds((currentIds) => {
       const nextIds = new Set(currentIds);
@@ -151,6 +158,7 @@ export default function DatasetBrowserView() {
     });
   }
 
+  /** 上传 PDF 并消费解析进度事件。 */
   async function importPdfPaper(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!pdfFile || isImporting) {
@@ -215,6 +223,7 @@ export default function DatasetBrowserView() {
     }
   }
 
+  /** 批量删除当前选中的论文。 */
   async function deleteSelectedPapers() {
     const ids = Array.from(selectedIds);
     if (ids.length === 0 || isDeleting) {
@@ -251,6 +260,7 @@ export default function DatasetBrowserView() {
     }
   }
 
+  /** 按工作区配置重新切分选中论文。 */
   async function splitSelectedPapers() {
     const selectedPapers = papers.filter((paper) => paper.id && selectedIds.has(paper.id));
     if (selectedPapers.length === 0 || isSplitting) {

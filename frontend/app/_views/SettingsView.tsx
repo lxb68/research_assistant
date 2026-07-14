@@ -75,10 +75,12 @@ const strategies = [
 const TABS = ["基本信息", "模型配置", "任务配置", "提示词配置"] as const;
 type TabIndex = 0 | 1 | 2 | 3;
 
+/** 返回分块策略的中文说明。 */
 function getStrategyDescription(strategy: SplitStrategy) {
   return strategies.find((item) => item.value === strategy)?.desc ?? "";
 }
 
+/** 管理工作区与模型配置表单。 */
 export default function SettingsWorkspace() {
   const [settings, setSettings] = useState<SettingsState>(() => {
     if (typeof window === "undefined") return defaultSettings;
@@ -104,6 +106,7 @@ export default function SettingsWorkspace() {
   const [modelError, setModelError] = useState("");
   const [systemConstraint, setSystemConstraint] = useState("");
 
+  /** 以类型安全方式更新单个设置字段。 */
   function set<K extends keyof SettingsState>(key: K, value: SettingsState[K]) {
     setSettings((current) => ({ ...current, [key]: value }));
     if (key === "selectedModel") {
@@ -115,6 +118,7 @@ export default function SettingsWorkspace() {
   useEffect(() => {
     let cancelled = false;
 
+    /** 从后端加载脱敏后的模型配置。 */
     async function loadModelConfig() {
       setIsLoadingModelConfig(true);
       setModelError("");
@@ -156,6 +160,7 @@ export default function SettingsWorkspace() {
     };
   }, []);
 
+  /** 把工作区设置保存到浏览器。 */
   function saveLocalSettings() {
     window.localStorage.setItem(
       WORKSPACE_SETTINGS_STORAGE_KEY,
@@ -164,6 +169,7 @@ export default function SettingsWorkspace() {
     setSaved(true);
   }
 
+  /** 校验并向后端保存模型配置。 */
   async function saveModelConfig() {
     setIsSavingModelConfig(true);
     setModelError("");
@@ -200,6 +206,7 @@ export default function SettingsWorkspace() {
     }
   }
 
+  /** 恢复设置表单的默认值。 */
   function reset() {
     setSettings(defaultSettings);
     setModelName(defaultSettings.selectedModel);
@@ -208,6 +215,7 @@ export default function SettingsWorkspace() {
     setSaved(true);
   }
 
+  /** 保存本地设置和模型配置。 */
   async function handleSave() {
     if (activeTab === 1) {
       await saveModelConfig();

@@ -185,6 +185,7 @@ _STOPWORDS = {
 
 @dataclass(slots=True)
 class SourceDocument:
+    """保存用于领域树分析的单篇来源文档及其目录信息。"""
     record_id: str
     title: str
     abstract: str
@@ -204,6 +205,7 @@ class DomainTreeAgent:
         metadata_db_path: str | Path | None = None,
         prompt_dir: str | Path | None = None,
     ) -> None:
+        """初始化当前对象所需的配置与运行状态。"""
         self.storage_dir = self._resolve_storage_dir(storage_dir)
         self.metadata_db_path = Path(metadata_db_path or settings.hunter_metadata_db).resolve()
         self.prompt_dir = Path(prompt_dir or (Path(__file__).resolve().parents[2] / "src" / "prompt")).resolve()
@@ -222,6 +224,7 @@ class DomainTreeAgent:
         delete_toc: str | None = None,
         project: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]] | None:
+        """根据请求动作生成、修订或读取领域树结果。"""
         normalized_project_id = self._normalize_project_id(project_id)
         # 直接调用 get_tags 返回当前已存储的标签，不进行任何计算或生成
         if action == "keep":
@@ -301,6 +304,7 @@ class DomainTreeAgent:
 
     # 获取当前项目的领域树标签，如果不存在则返回 None
     def get_tags(self, project_id: str) -> list[dict[str, Any]] | None:
+        """读取项目当前保存的领域树标签。"""
         domain_tree_path = self._analysis_dir(project_id) / "domain_tree.json"
         if not domain_tree_path.exists():
             return None
@@ -319,6 +323,7 @@ class DomainTreeAgent:
         return payload if isinstance(payload, list) else None
 
     def get_result(self, project_id: str) -> dict[str, Any] | None:
+        """读取项目完整的领域树、知识图谱和清单结果。"""
         output_dir = self._analysis_dir(self._normalize_project_id(project_id))
         domain_tree_path = output_dir / "domain_tree.json"
         knowledge_graph_path = output_dir / "knowledge_graph.json"
@@ -359,6 +364,7 @@ class DomainTreeAgent:
         }
 
     def _load_manifest(self, project_id: str) -> dict[str, Any]:
+        """加载项目清单。"""
         manifest_path = self._analysis_dir(self._normalize_project_id(project_id)) / "manifest.json"
         if not manifest_path.exists():
             return {}
@@ -370,18 +376,22 @@ class DomainTreeAgent:
         return payload if isinstance(payload, dict) else {}
 
     def get_project_tocs(self, project_id: str) -> str:
+        """读取项目中各文档的目录结构。"""
         documents = self._load_documents(project_id)
         return self._build_catalog_text(documents)
 
     def get_label_prompt(self, language: str, data: dict[str, Any]) -> str:
+        """读取领域标签生成提示词模板。"""
         template = self._read_prompt_file("lable", language)
         return self._render_prompt(template, data)
 
     def get_label_revise_prompt(self, language: str, data: dict[str, Any]) -> str:
+        """读取领域标签修订提示词模板。"""
         template = self._read_prompt_file("labelRevise", language)
         return self._render_prompt(template, data)
 
     def filter_domain_tree(self, tags: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """清理领域树中的空节点、泛化节点和重复节点。"""
         filtered: list[dict[str, Any]] = []
         for index, item in enumerate(tags, start=1):
             if not isinstance(item, dict):
@@ -415,6 +425,7 @@ class DomainTreeAgent:
         action: str,
         language: str,
     ) -> None:
+        """批量保存领域树标签及相关分析产物。"""
         output_dir = self._analysis_dir(project_id)
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -475,6 +486,7 @@ class DomainTreeAgent:
         language: str,
         model: Any | None,
     ) -> list[dict[str, Any]]:
+        """生成领域、树。"""
         llm_output = self._call_llm(prompt, language=language, model=model)
         tags = self.extract_json_from_llm_output(llm_output) if llm_output else None
         if tags:
@@ -483,6 +495,7 @@ class DomainTreeAgent:
         return self._heuristic_domain_tree(documents, catalog_text)
 
     def _call_llm(self, prompt: str, *, language: str, model: Any | None) -> str | None:
+        """调用大模型生成领域树，并校验返回结构。"""
         api_key = ""
         if isinstance(model, dict):
             api_key = str(model.get("api_key") or model.get("apiKey") or "").strip()
@@ -547,6 +560,7 @@ class DomainTreeAgent:
         return str(content).strip()
 
     def extract_json_from_llm_output(self, output: str | None) -> list[dict[str, Any]] | None:
+        """从大模型文本响应中提取 JSON 对象。"""
         if not output:
             return None
 
@@ -570,6 +584,7 @@ class DomainTreeAgent:
         return None
 
     def _load_documents(self, project_id: str) -> list[SourceDocument]:
+        """加载来源文档。"""
         specific_document = self._load_document_for_project(project_id)
         if specific_document:
             return [specific_document]
@@ -595,6 +610,7 @@ class DomainTreeAgent:
         return fallback_documents
 
     def _load_document_for_project(self, project_id: str) -> SourceDocument | None:
+        """加载来源文档、项目标识。"""
         if self.metadata_db_path.exists():
             with sqlite3.connect(self.metadata_db_path) as connection:
                 connection.row_factory = sqlite3.Row
@@ -615,6 +631,7 @@ class DomainTreeAgent:
         return None
 
     def _load_documents_from_metadata_db(self) -> list[SourceDocument]:
+        """加载来源文档、元数据。"""
         with sqlite3.connect(self.metadata_db_path) as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute("SELECT id, title, metadata_json FROM papers").fetchall()
@@ -634,6 +651,7 @@ class DomainTreeAgent:
         *,
         fallback_title: str = "",
     ) -> SourceDocument | None:
+        """构建来源文档、元数据。"""
         markdown_path = self._resolve_optional_path(metadata.get("markdownPath"))
         markdown_dir = self._resolve_optional_path(metadata.get("markdownOutputDir"))
         if markdown_dir is None and markdown_path is not None:
@@ -669,6 +687,7 @@ class DomainTreeAgent:
         metadata: dict[str, Any],
         markdown_dir: Path,
     ) -> SourceDocument:
+        """构建来源文档、Markdown。"""
         markdown_path = self._detect_markdown_path(markdown_dir)
         title = str(metadata.get("title") or (markdown_path.stem if markdown_path else record_id)).strip()
         abstract = str(metadata.get("abstract") or "").strip()
@@ -685,12 +704,14 @@ class DomainTreeAgent:
         )
 
     def _build_catalog_text(self, documents: list[SourceDocument]) -> str:
+        """构建目录文本、文本。"""
         return "\n\n".join(
             self._build_document_catalog_text(document, index)
             for index, document in enumerate(documents, start=1)
         )
 
     def _build_document_catalog_text(self, document: SourceDocument, index: int) -> str:
+        """构建来源文档、目录文本、文本。"""
         lines = [f"## 文档{index}: {document.title}", f"记录ID: {document.record_id}"]
         if document.abstract:
             lines.append(f"摘要: {self._truncate(document.abstract, 1000)}")
@@ -716,12 +737,14 @@ class DomainTreeAgent:
         return "\n".join(lines)
 
     def _document_catalog_map(self, documents: list[SourceDocument]) -> dict[str, str]:
+        """建立文档 ID 到目录文本的映射。"""
         return {
             document.record_id: self._build_document_catalog_text(document, index)
             for index, document in enumerate(documents, start=1)
         }
 
     def _manifest_document_catalog_map(self, manifest: dict[str, Any]) -> dict[str, str]:
+        """从项目清单建立文档目录映射。"""
         documents = manifest.get("documents")
         if not isinstance(documents, list):
             return {}
@@ -737,10 +760,12 @@ class DomainTreeAgent:
         return mapping
 
     def _join_catalog_sections(self, sections: Any) -> str:
+        """拼接目录文本、章节。"""
         values = [str(section).strip() for section in sections if str(section).strip()]
         return "\n\n".join(values)
 
     def _load_toc_entries(self, markdown_dir: Path | None, markdown_path: Path | None) -> list[dict[str, Any]]:
+        """加载目录条目、条目。"""
         if markdown_dir:
             toc_entries = self._filter_toc_entries(self._extract_toc_from_content_list(markdown_dir))
             if toc_entries:
@@ -750,6 +775,7 @@ class DomainTreeAgent:
         return []
 
     def _extract_toc_from_content_list(self, markdown_dir: Path) -> list[dict[str, Any]]:
+        """提取目录条目。"""
         candidates = sorted(markdown_dir.glob("*_content_list_v2.json")) or sorted(markdown_dir.glob("*_content_list.json"))
         if not candidates:
             return []
@@ -792,6 +818,7 @@ class DomainTreeAgent:
         return entries
 
     def _extract_headings_from_markdown(self, markdown_path: Path) -> list[dict[str, Any]]:
+        """提取标题、Markdown。"""
         entries: list[dict[str, Any]] = []
         seen: set[tuple[int, str]] = set()
         try:
@@ -813,6 +840,7 @@ class DomainTreeAgent:
         return entries
 
     def _extract_keywords(self, metadata: dict[str, Any], markdown_path: Path | None) -> list[str]:
+        """提取关键词。"""
         for key in ("keywords", "keywordList"):
             value = metadata.get(key)
             if isinstance(value, list):
@@ -845,6 +873,7 @@ class DomainTreeAgent:
         catalog_text: str,
         project: dict[str, Any],
     ) -> dict[str, Any]:
+        """构建知识、图谱。"""
         del catalog_text, project
 
         nodes: list[dict[str, Any]] = []
@@ -854,12 +883,14 @@ class DomainTreeAgent:
         domain_keywords = self._domain_keywords_from_tree(tags)
 
         def add_node(node_id: str, name: str, node_type: str, **extra: Any) -> None:
+            """向知识图谱加入一个去重后的节点。"""
             if not node_id or node_id in node_ids:
                 return
             node_ids.add(node_id)
             nodes.append({"id": node_id, "name": name, "type": node_type, **extra})
 
         def add_edge(source: str, target: str, relation: str, **extra: Any) -> None:
+            """向知识图谱加入一条去重后的关系边。"""
             key = (source, target, relation)
             if not source or not target or key in edge_keys:
                 return
@@ -924,6 +955,7 @@ class DomainTreeAgent:
         documents: list[SourceDocument],
         catalog_text: str,
     ) -> list[dict[str, Any]]:
+        """在大模型不可用时按启发式规则生成领域树。"""
         del catalog_text
         topic_scores, topic_documents = self._collect_topic_candidates(documents)
         if not topic_scores:
@@ -955,6 +987,7 @@ class DomainTreeAgent:
 
     # 收集主题候选词
     def _collect_topic_candidates(self, documents: list[SourceDocument]) -> tuple[Counter[str], dict[str, set[str]]]:
+        """收集主题、候选项。"""
         topic_scores: Counter[str] = Counter()
         topic_documents: dict[str, set[str]] = defaultdict(set)
         for document in documents:
@@ -987,6 +1020,7 @@ class DomainTreeAgent:
         return topic_scores, topic_documents
 
     def _extract_document_topics(self, document: SourceDocument) -> list[str]:
+        """提取来源文档、主题。"""
         phrases: list[str] = []
         title_phrases = self._extract_candidate_phrases(document.title)
         heading_phrases = [
@@ -1005,6 +1039,7 @@ class DomainTreeAgent:
 
     # 提取候选短语，用于生成主题标签
     def _extract_candidate_phrases(self, text: str) -> list[str]:
+        """提取候选项、短语。"""
         if not text:
             return []
 
@@ -1035,6 +1070,7 @@ class DomainTreeAgent:
         related_document_ids: set[str],
         documents: list[SourceDocument],
     ) -> list[str]:
+        """收集子主题。"""
         counter: Counter[str] = Counter()
         for document in documents:
             if document.record_id not in related_document_ids:
@@ -1062,6 +1098,7 @@ class DomainTreeAgent:
         tags: list[dict[str, Any]] | None,
         documents: list[SourceDocument],
     ) -> list[dict[str, Any]]:
+        """用更具体的候选主题替换泛化领域标签。"""
         if not isinstance(tags, list):
             return []
 
@@ -1114,6 +1151,7 @@ class DomainTreeAgent:
         self,
         documents: list[SourceDocument],
     ) -> list[str]:
+        """收集候选项、来源文档。"""
         counter: Counter[str] = Counter()
         for document in documents:
             for keyword in document.keywords[:12]:
@@ -1144,6 +1182,7 @@ class DomainTreeAgent:
         topic: str,
         documents: list[SourceDocument],
     ) -> set[str]:
+        """查找与指定主题相关的来源文档 ID。"""
         topic_tokens = {
             self._keyword_token(token)
             for token in self._tokenize_label(topic)
@@ -1173,6 +1212,7 @@ class DomainTreeAgent:
         used_labels: set[str],
         fallback: str,
     ) -> str:
+        """为泛化主题选择更具体且未使用的替代标签。"""
         for candidate in candidates:
             normalized = self._normalize_topic_phrase(candidate)
             if not normalized:
@@ -1185,6 +1225,7 @@ class DomainTreeAgent:
         return fallback
 
     def _domain_keywords_from_tree(self, tags: list[dict[str, Any]]) -> dict[str, set[str]]:
+        """从领域树提取用于主题归属判断的关键词。"""
         mapping: dict[str, set[str]] = {}
         for index, tag in enumerate(tags, start=1):
             node_id = f"domain:{index}"
@@ -1195,6 +1236,7 @@ class DomainTreeAgent:
         return mapping
 
     def _match_topic_to_domain(self, phrase: str, domain_keywords: dict[str, set[str]]) -> str | None:
+        """匹配主题、领域。"""
         phrase_tokens = {self._keyword_token(token) for token in self._tokenize_label(phrase)}
         phrase_tokens = {token for token in phrase_tokens if token}
         if not phrase_tokens:
@@ -1210,11 +1252,13 @@ class DomainTreeAgent:
         return best_node_id or None
 
     def _read_prompt_file(self, category: str, language: str) -> str:
+        """读取提示词。"""
         language_code = "zh" if self._is_chinese_language(language) else "en"
         prompt_path = self.prompt_dir / category / f"{language_code}.md"
         return prompt_path.read_text(encoding="utf-8")
 
     def _render_prompt(self, template: str, data: dict[str, Any]) -> str:
+        """渲染提示词。"""
         rendered = template
         for key, value in data.items():
             if isinstance(value, (dict, list)):
@@ -1225,6 +1269,7 @@ class DomainTreeAgent:
         return rendered
 
     def _resolve_model_name(self, model: Any | None) -> str:
+        """解析模型名称。"""
         if isinstance(model, dict):
             name = model.get("model") or model.get("name")
             if isinstance(name, str) and name.strip():
@@ -1234,9 +1279,11 @@ class DomainTreeAgent:
         return os.getenv("DOMAIN_TREE_MODEL") or os.getenv("OPENAI_MODEL") or settings.llm_translation_model
 
     def _analysis_dir(self, project_id: str) -> Path:
+        """返回指定项目的领域树分析目录。"""
         return self.analysis_root / project_id
 
     def _resolve_storage_dir(self, storage_dir: str | Path | None) -> Path:
+        """解析存储目录。"""
         configured = Path(storage_dir or settings.backend_storage_dir)
         candidates = [configured]
 
@@ -1263,6 +1310,7 @@ class DomainTreeAgent:
         raise PermissionError(f"unable to use storage directory for domain tree outputs: {last_error}")
 
     def _resolve_optional_path(self, value: Any) -> Path | None:
+        """解析路径。"""
         raw = str(value or "").strip()
         if not raw:
             return None
@@ -1272,6 +1320,7 @@ class DomainTreeAgent:
         return (self.storage_dir / candidate).resolve()
 
     def _detect_markdown_path(self, markdown_dir: Path | None) -> Path | None:
+        """检测Markdown、路径。"""
         if markdown_dir is None or not markdown_dir.exists():
             return None
         preferred = markdown_dir / "full.md"
@@ -1281,6 +1330,7 @@ class DomainTreeAgent:
         return markdown_files[0].resolve() if markdown_files else None
 
     def _parse_metadata_json(self, raw: Any) -> dict[str, Any]:
+        """解析元数据、JSON 数据。"""
         if isinstance(raw, dict):
             return raw
         try:
@@ -1289,16 +1339,19 @@ class DomainTreeAgent:
             return {}
 
     def _split_keywords(self, raw: str) -> list[str]:
+        """切分关键词。"""
         values = [raw]
         for separator in (";", "；", ",", "，", "|"):
             values = [part for item in values for part in item.split(separator)]
         return [part.strip() for part in values if part.strip()]
 
     def _normalize_project_id(self, value: str) -> str:
+        """规范化项目标识。"""
         cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
         return cleaned[:120] or "default"
 
     def _normalize_topic_phrase(self, phrase: str) -> str:
+        """规范化主题、短语。"""
         cleaned = re.sub(r"^\d+(?:\.\d+)*\s*", "", str(phrase).strip())
         cleaned = re.sub(r"^[A-Z]\s+", "", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned)
@@ -1319,6 +1372,7 @@ class DomainTreeAgent:
         return cleaned
 
     def _is_generic_label(self, label: str) -> bool:
+        """判断标签。"""
         normalized = self._normalize_topic_phrase(label)
         if not normalized:
             return True
@@ -1331,6 +1385,7 @@ class DomainTreeAgent:
         return False
 
     def _filter_toc_entries(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """筛选目录条目、条目。"""
         filtered: list[dict[str, Any]] = []
         for entry in entries:
             if not isinstance(entry, dict):
@@ -1342,6 +1397,7 @@ class DomainTreeAgent:
         return filtered
 
     def _is_non_core_section(self, title: str) -> bool:
+        """判断章节。"""
         normalized = re.sub(r"^\d+(?:\.\d+)*\s*", "", str(title).strip())
         normalized = re.sub(r"\s+", " ", normalized).strip(" -_#:.").lower()
         if not normalized:
@@ -1353,6 +1409,7 @@ class DomainTreeAgent:
         return any(pattern in normalized for pattern in _NON_CORE_SECTION_PATTERNS)
 
     def _short_label(self, phrase: str) -> str:
+        """把主题文本压缩为适合树节点展示的短标签。"""
         cleaned = self._normalize_topic_phrase(phrase)
         words = cleaned.split()
         if not words:
@@ -1362,23 +1419,28 @@ class DomainTreeAgent:
         return cleaned[:36]
 
     def _slugify(self, value: str) -> str:
+        """把文本转换为稳定、可用于标识的短字符串。"""
         slug = re.sub(r"[^A-Za-z0-9]+", "-", value.strip().lower()).strip("-")
         return slug[:80] or "unknown"
 
     def _tokenize_label(self, label: str) -> list[str]:
+        """分词标签。"""
         cleaned = re.sub(r"^\d+(?:\.\d+)*\s*", "", label.strip())
         return [token for token in re.split(r"[^A-Za-z0-9\u4e00-\u9fff]+", cleaned) if token]
 
     def _keyword_token(self, token: str) -> str:
+        """把关键词规范化为便于比较的词元。"""
         return token.strip().lower()
 
     def _truncate(self, text: str, max_length: int) -> str:
+        """按最大长度截断文本并保留省略标记。"""
         normalized = re.sub(r"\s+", " ", text.strip())
         if len(normalized) <= max_length:
             return normalized
         return normalized[: max_length - 3].rstrip() + "..."
 
     def _is_chinese_language(self, language: str) -> bool:
+        """判断语言配置是否表示中文。"""
         normalized = str(language).strip().lower()
         return normalized in {"zh", "中文", "cn", "chinese"}
 
@@ -1393,6 +1455,7 @@ async def handle_domain_tree(
     delete_toc: str | None = None,
     project: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]] | None:
+    """根据请求动作生成、修订或读取领域树结果。"""
     agent = DomainTreeAgent()
     return await agent.handle_domain_tree(
         project_id,

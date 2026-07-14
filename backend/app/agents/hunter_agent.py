@@ -562,6 +562,7 @@ class HunterAgent:
         }
 
     def deduplicate_saved_papers(self, record_id: str | None = None) -> dict:
+        """合并本地数据库中的重复论文记录。"""
         papers = self.list_saved_papers(limit=500)
         groups: dict[str, list[Paper]] = {}
 
@@ -684,6 +685,7 @@ class HunterAgent:
         }
 
     def _delete_paper_rows_only(self, ids: list[str]) -> None:
+        """删除论文。"""
         normalized_ids = [str(record_id).strip() for record_id in ids if str(record_id).strip()]
         if not normalized_ids:
             return
@@ -705,6 +707,7 @@ class HunterAgent:
         return self._find_existing_paper_by_fields(record_id=normalized_id)
 
     def update_saved_paper(self, record_id: str, updates: dict[str, object]) -> Paper:
+        """更新指定论文记录中允许修改的字段。"""
         normalized_id = record_id.strip()
         if not normalized_id:
             raise ValueError("record_id is required")
@@ -723,6 +726,7 @@ class HunterAgent:
         *,
         markdown_path: str | Path | None = None,
     ) -> Paper:
+        """从解析后的 Markdown 刷新论文元数据。"""
         normalized_id = record_id.strip()
         if not normalized_id:
             raise ValueError("record_id is required")
@@ -756,6 +760,7 @@ class HunterAgent:
         min_split_length: int | None = None,
         max_split_length: int | None = None,
     ) -> Paper:
+        """读取论文 Markdown 并重新生成结构化分块。"""
         normalized_id = record_id.strip()
         if not normalized_id:
             raise ValueError("record_id is required")
@@ -1057,10 +1062,12 @@ class HunterAgent:
         return {"text": text, "metadata": metadata, "parser": "pymupdf", "warning": fallback_warning}
 
     def _pdf_text_looks_usable(self, text: str) -> bool:
+        """判断 PDF 提取文本是否达到可用质量。"""
         compact = re.sub(r"\s+", "", text)
         return len(compact) >= 800
 
     def _parsed_pdf_metadata_is_sparse(self, parsed: Paper) -> bool:
+        """判断 PDF 解析得到的元数据是否过少。"""
         filled_count = 0
         for value in (
             str(parsed.get("title", "")).strip(),
@@ -1162,6 +1169,7 @@ class HunterAgent:
         paper: Paper,
         markdown_path: str | Path | None,
     ) -> Path:
+        """解析Markdown、元数据。"""
         if markdown_path:
             resolved = self._resolve_managed_markdown_path(markdown_path)
         else:
@@ -1174,6 +1182,7 @@ class HunterAgent:
         return resolved
 
     def _parse_markdown_metadata(self, markdown_text: str, paper: Paper) -> Paper:
+        """解析Markdown、元数据。"""
         cleaned_text = self._strip_markdown_for_metadata(markdown_text)
         parsed = self._parse_imported_reference(cleaned_text)
 
@@ -1220,6 +1229,7 @@ class HunterAgent:
         parsed: Paper,
         markdown_path: Path,
     ) -> dict[str, object]:
+        """构建元数据。"""
         updates: dict[str, object] = {}
         manual_override_fields = {
             str(field).strip()
@@ -1274,6 +1284,7 @@ class HunterAgent:
         return updates
 
     def _collect_manual_override_fields(self, **field_values: object) -> list[str]:
+        """收集用户明确填写、应优先保留的元数据字段。"""
         manual_fields: list[str] = []
         for field, value in field_values.items():
             if isinstance(value, list):
@@ -1292,6 +1303,7 @@ class HunterAgent:
         current_value: object,
         manual_override_fields: set[str],
     ) -> bool:
+        """判断 Markdown 元数据是否应覆盖当前字段。"""
         if field not in manual_override_fields:
             return True
 
@@ -1301,6 +1313,7 @@ class HunterAgent:
         return not str(current_value or "").strip()
 
     def _strip_markdown_for_metadata(self, markdown_text: str) -> str:
+        """清理Markdown、元数据。"""
         text = markdown_text.replace("\r\n", "\n")
         text = re.sub(r"```.*?```", "\n", text, flags=re.DOTALL)
         text = re.sub(r"`([^`]+)`", r"\1", text)
@@ -1315,6 +1328,7 @@ class HunterAgent:
         return text.strip()
 
     def _infer_year_from_text(self, text: str) -> str:
+        """推断文本。"""
         years: list[int] = []
         max_year = datetime.now(timezone.utc).year + 1
         for match in re.finditer(r"\b(19|20)\d{2}\b", text[:4000]):
@@ -1351,6 +1365,7 @@ class HunterAgent:
         return ""
 
     def _delete_local_pdf_if_managed(self, pdf_path: str) -> bool:
+        """删除PDF。"""
         resolved_path = self._resolve_managed_pdf_path(pdf_path)
         if not resolved_path or not resolved_path.exists() or not resolved_path.is_file():
             return False
@@ -1362,6 +1377,7 @@ class HunterAgent:
         return True
 
     def _delete_markdown_output_if_managed(self, paper: Paper) -> bool:
+        """删除Markdown、输出结果。"""
         output_dir = self._resolve_managed_markdown_output_dir(paper)
         if output_dir and output_dir.exists():
             shutil.rmtree(output_dir, ignore_errors=False)
@@ -1396,6 +1412,7 @@ class HunterAgent:
             return None
 
     def _resolve_managed_markdown_output_dir(self, paper: Paper) -> Path | None:
+        """解析Markdown、输出结果。"""
         output_dir = str(
             paper.get("markdownOutputDir")
             or paper.get("outputDir")
@@ -1415,6 +1432,7 @@ class HunterAgent:
         return None
 
     def _resolve_managed_markdown_path(self, target_path: str | Path, *, expect_dir: bool = False) -> Path | None:
+        """解析Markdown、路径。"""
         if not target_path:
             return None
 
@@ -1546,6 +1564,7 @@ class HunterAgent:
         }
 
     def _build_duplicate_group_key(self, paper: Paper) -> str:
+        """为论文生成跨来源去重分组键。"""
         pdf_path = self._normalize_path_for_compare(str(paper.get("pdfPath") or paper.get("pdf_path") or ""))
         if pdf_path:
             return f"pdf:{pdf_path}"
@@ -1563,6 +1582,7 @@ class HunterAgent:
         return ""
 
     def _select_canonical_paper(self, papers: list[Paper], *, preferred_id: str = "") -> Paper:
+        """选择论文。"""
         preferred_id = preferred_id.strip()
         if preferred_id:
             for paper in papers:
@@ -1570,6 +1590,7 @@ class HunterAgent:
                     return paper
 
         def sort_key(paper: Paper) -> tuple[int, int, str, str]:
+            """生成用于选择规范论文记录的排序键。"""
             return (
                 self._paper_quality_score(paper),
                 1 if str(paper.get("pdfParsedBy", "")).strip() == "markdown" else 0,
@@ -1580,6 +1601,7 @@ class HunterAgent:
         return max(papers, key=sort_key)
 
     def _merge_paper_group(self, canonical: Paper, duplicates: list[Paper]) -> Paper:
+        """合并论文。"""
         merged = dict(canonical)
         merge_fields = (
             "title",
@@ -1624,6 +1646,7 @@ class HunterAgent:
         return merged
 
     def _paper_quality_score(self, paper: Paper) -> int:
+        """计算论文记录完整度和本地资源质量得分。"""
         score = 0
         for field in (
             "title",
@@ -1653,6 +1676,7 @@ class HunterAgent:
         return score
 
     def _paper_recency_marker(self, paper: Paper) -> str:
+        """生成论文记录的新旧排序标记。"""
         return max(
             str(paper.get("markdownMetadataUpdatedAt", "")).strip(),
             str(paper.get("updatedAt", "")).strip(),
@@ -1660,6 +1684,7 @@ class HunterAgent:
         )
 
     def _merge_string_lists(self, left: object, right: object) -> list[str]:
+        """合并多个字符串列表并保持去重顺序。"""
         values: list[str] = []
         for source in (left, right):
             if not isinstance(source, list):
@@ -1671,6 +1696,7 @@ class HunterAgent:
         return values
 
     def _normalize_path_for_compare(self, raw_path: str) -> str:
+        """规范化路径。"""
         candidate = raw_path.strip()
         if not candidate:
             return ""
@@ -1782,6 +1808,7 @@ class HunterAgent:
         }
 
     def _json_safe_value(self, value: object) -> object:
+        """把数据库值转换为可安全 JSON 序列化的类型。"""
         if isinstance(value, (str, int, float, bool)) or value is None:
             return value
         if isinstance(value, list):
@@ -1794,6 +1821,7 @@ class HunterAgent:
         return str(value)
 
     def _clear_preprint_metrics(self, paper: Paper) -> Paper:
+        """清除不适用于预印本的期刊和会议指标。"""
         return {
             **paper,
             "impactFactor": None,
@@ -1833,6 +1861,7 @@ class HunterAgent:
 
 
     def _translate_tencent_cloud(self, text: str, timeout: int = 10) -> str | None:
+        """调用腾讯云接口把中文检索词翻译为英文。"""
         secret_id = settings.tencent_translation_secret_id
         secret_key = settings.tencent_translation_secret_key
         if not secret_id or not secret_key:
@@ -1935,6 +1964,7 @@ class HunterAgent:
 
     # 在线翻译方案
     def _translate_online(self, text: str,timeout: int = 10) -> str | None:
+        """调用在线翻译服务转换检索词。"""
         try:
             if self.translator is None:
                 os.environ.setdefault("translators_default_region", "CN")
@@ -1951,6 +1981,7 @@ class HunterAgent:
             return None
     
     def _translate_with_llm(self, text: str) -> str | None:
+        """调用大模型翻译检索词。"""
         if not settings.llm_translation_api_key:
             self._log("大模型翻译跳过：未配置 LLM_TRANSLATION_API_KEY 或 OPENAI_API_KEY")
             return None
@@ -2000,6 +2031,7 @@ class HunterAgent:
         return translated
 
     def _is_chinese(self, text: str) -> bool:
+        """判断文本是否包含中文字符。"""
         return any('\u4e00' <= ch <= '\u9fff' for ch in text)
 
     def translate_search_query(self, query: str) -> str:
@@ -2010,6 +2042,7 @@ class HunterAgent:
         return self._expand_keyword(normalized)
 
     def _expand_keyword(self, keyword: str) -> str:
+        """把研究关键词扩展为适合多来源检索的英文词组。"""
         normalized = keyword.strip().lower()
 
         # 1. 若不包含中文，直接返回原词

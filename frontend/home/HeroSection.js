@@ -2,6 +2,7 @@
 
 "use client";
 
+/** 渲染首页介绍和工作流快捷入口。 */
 export default function HeroSection({
   onCreateProject,
   onOpenResearchChat,

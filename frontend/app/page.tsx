@@ -6,6 +6,7 @@ type HomePageProps = {
   searchParams: Promise<{ view?: string | string[] }>;
 };
 
+/** 解析首页查询参数并渲染对应工作区。 */
 export default async function Page({ searchParams }: HomePageProps) {
   // Next.js 16 的 searchParams 是 Promise，必须先等待解析。
   const resolvedSearchParams = await searchParams;

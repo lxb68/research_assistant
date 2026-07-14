@@ -15,6 +15,7 @@ class RunLogger:
     """为一次 Agent 编排运行写入可读日志和 JSONL 结构化日志。"""
 
     def __init__(self, root_dir: str | Path, *, run_id: str | None = None) -> None:
+        """初始化当前对象所需的配置与运行状态。"""
         self.run_id = run_id or uuid.uuid4().hex
         day = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
         self.run_dir = Path(root_dir) / day
@@ -24,6 +25,7 @@ class RunLogger:
         self._lock = threading.Lock()
 
     def log(self, component: str, message: str, *, event: str = "log", data: dict[str, Any] | None = None) -> None:
+        """写入脱敏后的人类可读日志和结构化日志。"""
         timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="milliseconds")
         safe_message = self._redact(str(message))
         safe_data = self._redact_value(data or {})
@@ -45,9 +47,11 @@ class RunLogger:
                 handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
     def public_info(self) -> dict[str, str]:
+        """返回可安全公开的运行标识与日志路径。"""
         return {"runId": self.run_id, "logPath": str(self.text_path), "jsonlPath": str(self.jsonl_path)}
 
     def _redact(self, value: str) -> str:
+        """递归脱敏日志消息中的凭据和敏感字段。"""
         patterns = (
             (r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+", r"\1***"),
             (r"(?i)((?:api[_ -]?key|token|secret)\s*[:=]\s*)[^\s,;]+", r"\1***"),
@@ -59,6 +63,7 @@ class RunLogger:
         return redacted
 
     def _redact_value(self, value: Any) -> Any:
+        """对单个字符串值执行凭据模式脱敏。"""
         if isinstance(value, dict):
             return {
                 str(key): "***" if any(token in str(key).lower() for token in ("key", "token", "secret", "authorization")) else self._redact_value(item)

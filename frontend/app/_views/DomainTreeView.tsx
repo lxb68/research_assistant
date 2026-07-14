@@ -107,10 +107,12 @@ const ACTION_DESCRIPTIONS: Record<DomainTreeAction, string> = {
   keep: "继续沿用当前领域树结构，不根据本次文献变化做任何修改。",
 };
 
+/** 规范化领域树标签以便匹配。 */
 function cleanLabel(label: string) {
   return label.replace(/^\d+(?:\.\d+)*\s*/, "").trim();
 }
 
+/** 把领域标签拆为可检索词元。 */
 function tokenizeLabel(label: string) {
   return cleanLabel(label)
     .toLowerCase()
@@ -119,6 +121,7 @@ function tokenizeLabel(label: string) {
     .filter((token) => token.length >= 2);
 }
 
+/** 汇总分块中可参与检索的文本。 */
 function buildChunkSearchText(chunk: SplitChunk) {
   const headings = (chunk.headings ?? [])
     .map((heading) => heading.heading?.trim() || "")
@@ -131,10 +134,12 @@ function buildChunkSearchText(chunk: SplitChunk) {
   return `${headings}\n${chunk.summary || ""}\n${paragraphSummaries}\n${chunk.content || ""}`.toLowerCase();
 }
 
+/** 去除空字符串和重复字符串。 */
 function uniqueStrings(values: string[]) {
   return Array.from(new Set(values.filter(Boolean)));
 }
 
+/** 计算领域标签与论文分块的匹配得分。 */
 function scoreChunk(label: string, chunk: SplitChunk) {
   // 标签短语命中优先于分词命中，标题命中再给予额外权重。
   const normalizedLabel = cleanLabel(label).toLowerCase();
@@ -184,6 +189,7 @@ function scoreChunk(label: string, chunk: SplitChunk) {
   return score;
 }
 
+/** 递归渲染领域树节点。 */
 function renderTree(
   nodes: DomainTreeNode[],
   options: {
@@ -226,6 +232,7 @@ function renderTree(
   );
 }
 
+/** 管理领域树生成、修订和证据关联。 */
 export default function DomainTreePage({
   embedded = false,
   isActiveView = true,
@@ -413,6 +420,7 @@ export default function DomainTreePage({
   useEffect(() => {
     let cancelled = false;
 
+    /** 读取当前模型配置状态。 */
     async function loadModelStatus() {
       setIsLoadingModelStatus(true);
       try {
@@ -448,6 +456,7 @@ export default function DomainTreePage({
   useEffect(() => {
     let cancelled = false;
 
+    /** 按关键词加载本地论文列表。 */
     async function loadPapers() {
       setIsLoadingPapers(true);
       setError("");
@@ -488,6 +497,7 @@ export default function DomainTreePage({
   useEffect(() => {
     let cancelled = false;
 
+    /** 读取已有领域树结果。 */
     async function loadExistingResult() {
       setIsLoadingExisting(true);
       setError("");
@@ -548,6 +558,7 @@ export default function DomainTreePage({
     return "keep";
   }, [changeSummary.hasChanges, manualGenerationMode, result]);
 
+  /** 提交领域树生成或修订任务。 */
   async function handleGenerate() {
     if (isGenerating) {
       return;
@@ -604,6 +615,7 @@ export default function DomainTreePage({
     }
   }
 
+  /** 补充加载领域树引用的论文详情。 */
   async function ensurePaperDetails(recordIds: string[]) {
     const missingIds = recordIds.filter((recordId) => !paperDetails[recordId]);
     if (missingIds.length === 0) {
@@ -629,6 +641,7 @@ export default function DomainTreePage({
     return nextDetails;
   }
 
+  /** 选择二级领域并检索关联证据。 */
   async function handleSelectSecondary(key: string, label: string) {
     setSelectedSecondaryKey(key);
     setSelectedSecondaryLabel(label);

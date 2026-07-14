@@ -20,6 +20,7 @@ class OrchestratorAgent:
     ALLOWED_ACTIONS = {"auto", "chat", "search", "domain_tree"}
 
     def __init__(self, *, log_callback: Callable[[str], None] | None = None) -> None:
+        """初始化当前对象所需的配置与运行状态。"""
         self.ui_log_callback = log_callback
         self.run_logger = RunLogger(settings.agent_run_log_dir)
         self.log_callback = self._child_log
@@ -30,6 +31,7 @@ class OrchestratorAgent:
         )
 
     async def run(self, task: str, *, action: str = "auto", arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        """执行当前代理的主要业务流程并返回结构化结果。"""
         normalized_task = str(task).strip()
         if not normalized_task:
             raise ValueError("编排任务不能为空")
@@ -92,6 +94,7 @@ class OrchestratorAgent:
         return await self._run_research_pipeline(normalized_task, args)
 
     async def _run_research_pipeline(self, task: str, args: dict[str, Any]) -> dict[str, Any]:
+        """依次评估本地证据、补充论文并生成研究回答。"""
         history = list(args.get("history") or [])
         paper_ids = list(args.get("paper_ids") or []) or None
         allow_search = bool(args.get("allow_external_search", True)) and not paper_ids
@@ -269,6 +272,7 @@ class OrchestratorAgent:
         }
 
     def _assess_evidence(self, diagnostics: dict[str, Any]) -> tuple[bool, list[str]]:
+        """根据检索诊断信息判断当前证据是否充分。"""
         reasons: list[str] = []
         evidence_count = int(diagnostics.get("evidenceCount") or 0)
         distinct_papers = int(diagnostics.get("distinctPaperCount") or 0)
@@ -288,6 +292,7 @@ class OrchestratorAgent:
         search_result: dict[str, Any] | None,
         search_error: str,
     ) -> list[dict[str, str]]:
+        """根据证据缺口生成需要用户补充的材料清单。"""
         materials = [
             {
                 "type": "core_papers",
@@ -313,6 +318,7 @@ class OrchestratorAgent:
         return materials
 
     def _evidence_preview(self, evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """整理可安全返回前端的证据摘要。"""
         return [
             {
                 "recordId": item.get("record_id", ""),
@@ -324,6 +330,7 @@ class OrchestratorAgent:
         ]
 
     def _select_action(self, task: str) -> str:
+        """根据任务文本选择研究问答、搜索或领域树动作。"""
         lowered = task.lower()
         if any(token in lowered for token in ("下载论文", "搜索论文", "检索论文", "search papers", "find papers")):
             return "search"
@@ -335,11 +342,13 @@ class OrchestratorAgent:
         return "chat"
 
     def _log(self, message: str) -> None:
+        """把运行消息转发给已配置的日志回调。"""
         self.run_logger.log("OrchestratorAgent", message)
         if self.ui_log_callback:
             self.ui_log_callback(message)
 
     def _child_log(self, message: str) -> None:
+        """记录子代理日志并同步给界面回调。"""
         component = "HunterAgent" if message.startswith("[") or "数据源" in message or "论文" in message else "Agent"
         self.run_logger.log(component, message)
         if self.ui_log_callback:

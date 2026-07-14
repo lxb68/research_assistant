@@ -21,6 +21,7 @@ PROCESSING_STATES = {
 
 # -------------------- 请求模型 --------------------
 class MinerURequest(BaseModel):
+    """定义 MinerU 转换任务的输入参数。"""
     project_id: str
     file_name: str
     # 可选：若 token 不从配置读取，也可直接传入

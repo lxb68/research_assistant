@@ -6,6 +6,7 @@ import ResearchChat from "@/app/_components/ResearchChat";
 import StandalonePageShell from "@/app/_components/StandalonePageShell";
 import { useRouter } from "next/navigation";
 
+/** 渲染研究对话页面并配置工具导航。 */
 export default function ResearchChatPage() {
   const router = useRouter();
 

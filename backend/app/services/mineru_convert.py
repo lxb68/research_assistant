@@ -9,6 +9,7 @@ from app.services.mineru import mineru_processing
 
 
 def main() -> None:
+    """解析命令行参数并执行 MinerU 转换。"""
     parser = argparse.ArgumentParser(
         description="使用 MinerU 将 PDF 转换为 Markdown，并把图片、表格资源保存到 backend/storage/markdown。",
     )

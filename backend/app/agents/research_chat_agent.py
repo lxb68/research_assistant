@@ -21,6 +21,7 @@ LogCallback = Callable[[str], None]
 
 @dataclass(slots=True)
 class ResearchAgentConfig:
+    """集中描述研究问答代理的运行参数。"""
     max_papers: int = settings.research_agent_max_papers
     max_sources: int = settings.research_agent_max_sources
     chunk_size: int = settings.research_agent_chunk_size
@@ -37,6 +38,7 @@ class ResearchChatAgent:
         config: ResearchAgentConfig | None = None,
         log_callback: LogCallback | None = None,
     ) -> None:
+        """初始化当前对象所需的配置与运行状态。"""
         self.config = config or ResearchAgentConfig()
         self.log_callback = log_callback
         self.hunter = HunterAgent(log_callback=self._log)
@@ -64,6 +66,7 @@ class ResearchChatAgent:
         history: list[dict[str, str]] | None = None,
         paper_ids: list[str] | None = None,
     ) -> dict[str, Any]:
+        """执行当前代理的主要业务流程并返回结构化结果。"""
         normalized_question = str(question).strip()
         if not normalized_question:
             raise ValueError("研究问题不能为空")
@@ -132,6 +135,7 @@ class ResearchChatAgent:
         history: list[dict[str, str]] | None = None,
         paper_ids: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """从本地论文库检索与问题相关的证据片段。"""
         normalized_question = str(question).strip()
         if not normalized_question:
             raise ValueError("研究问题不能为空")
@@ -147,12 +151,14 @@ class ResearchChatAgent:
         return evidence, diagnostics
 
     def _load_papers(self, paper_ids: list[str] | None) -> list[dict[str, Any]]:
+        """加载论文。"""
         if paper_ids:
             papers = [self.hunter.get_saved_paper(record_id) for record_id in paper_ids]
             return [paper for paper in papers if isinstance(paper, dict)]
         return self.hunter.list_saved_papers(limit=self.config.max_papers)
 
     def _expand_retrieval_query(self, query: str) -> str:
+        """扩展检索词。"""
         translated = self.hunter.translate_search_query(query)
         if translated.strip().lower() == query.strip().lower():
             return query
@@ -166,6 +172,7 @@ class ResearchChatAgent:
         history: list[dict[str, str]],
         evidence: list[dict[str, Any]],
     ) -> str:
+        """调用已配置模型，根据证据上下文生成研究回答。"""
         context = self.retriever.build_context(evidence)
         system_prompt = self._load_prompt().replace("{{evidence}}", context)
         system_prompt = f"{system_prompt}\n\n{SYSTEM_SECURITY_CONSTRAINT}"
@@ -194,12 +201,14 @@ class ResearchChatAgent:
         return answer
 
     def _load_prompt(self) -> str:
+        """加载提示词。"""
         prompt_path = Path(__file__).resolve().parents[2] / "src" / "prompt" / "research_agent" / "zh.md"
         if not prompt_path.exists():
             raise FileNotFoundError(f"研究助手 Prompt 不存在：{prompt_path}")
         return prompt_path.read_text(encoding="utf-8")
 
     def _extract_citation_indices(self, answer: str, source_count: int) -> set[int]:
+        """从回答文本中提取有效引用序号。"""
         indices: set[int] = set()
         for content in re.findall(r"\[([0-9,，\-–—\s]+)\]", answer):
             normalized = content.replace("，", ",").replace("–", "-").replace("—", "-")
@@ -219,6 +228,7 @@ class ResearchChatAgent:
         return {index for index in indices if 1 <= index <= source_count}
 
     def _log(self, message: str) -> None:
+        """把运行消息转发给已配置的日志回调。"""
         if self.log_callback:
             self.log_callback(message)
 

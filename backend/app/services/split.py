@@ -256,6 +256,7 @@ def parse_markdown_sections(markdown_text: str) -> tuple[list[dict[str, Any]], l
     current_content_lines: list[str] = []
 
     def flush_current_section() -> None:
+        """把当前累积内容整理为一个章节记录。"""
         nonlocal current_content_lines, current_heading, current_level, current_position
         content = "\n".join(current_content_lines).strip()
         if not content and not current_heading:
@@ -302,6 +303,7 @@ def parse_markdown_sections(markdown_text: str) -> tuple[list[dict[str, Any]], l
 
 
 def _normalize_section(section: dict[str, Any], index: int) -> dict[str, Any]:
+    """规范化章节。"""
     content = str(section.get("content", "")).strip()
     heading = str(section.get("heading", "")).strip()
     level = int(section.get("level", 0) or 0)
@@ -339,6 +341,7 @@ def _merge_small_neighbor_sections(
     min_split_length: int,
     max_split_length: int,
 ) -> list[dict[str, Any]]:
+    """合并章节。"""
     merged_sections: list[dict[str, Any]] = []
 
     for section in sections:
@@ -367,6 +370,7 @@ def _emit_section_chunks(
     outline: list[dict[str, Any]],
     max_split_length: int,
 ) -> list[dict[str, Any]]:
+    """生成章节、证据片段。"""
     chunks = split_long_section(section, max_split_length)
     if not chunks:
         return []
@@ -398,6 +402,7 @@ def _emit_section_chunks(
 
 
 def _emit_whole_section_chunk(section: dict[str, Any], outline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """生成章节。"""
     content = str(section.get("content", "")).strip()
     if not content:
         return []
@@ -418,6 +423,7 @@ def _emit_whole_section_chunk(section: dict[str, Any], outline: list[dict[str, A
 
 
 def _merge_sections(left: dict[str, Any] | None, right: dict[str, Any]) -> dict[str, Any]:
+    """合并章节。"""
     if left is None:
         return dict(right)
 
@@ -435,6 +441,7 @@ def _merge_sections(left: dict[str, Any] | None, right: dict[str, Any]) -> dict[
 
 
 def _merge_chunk_content(left: str, right: str) -> str:
+    """合并相邻分块文本并保持段落边界。"""
     left = left.strip()
     right = right.strip()
     if not left:
@@ -445,6 +452,7 @@ def _merge_chunk_content(left: str, right: str) -> str:
 
 
 def _same_heading_branch(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """判断两个章节是否位于同一标题分支。"""
     left_headings = left.get("headings", [])
     right_headings = right.get("headings", [])
     if not left_headings or not right_headings:
@@ -453,14 +461,17 @@ def _same_heading_branch(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 
 def _extract_paragraphs(content: str) -> list[str]:
+    """提取段落。"""
     return [paragraph.strip() for paragraph in re.split(r"\n\s*\n+", content) if paragraph.strip()]
 
 
 def _join_paragraphs(paragraphs: list[str]) -> str:
+    """拼接段落。"""
     return "\n\n".join(paragraph.strip() for paragraph in paragraphs if paragraph.strip())
 
 
 def _split_oversized_paragraph(paragraph: str, max_split_length: int) -> list[str]:
+    """按句子边界切分超长段落，必要时强制截断。"""
     sentences = _split_sentences(paragraph)
     if not sentences:
         return _hard_split_text(paragraph, max_split_length)
@@ -487,11 +498,13 @@ def _split_oversized_paragraph(paragraph: str, max_split_length: int) -> list[st
 
 
 def _split_sentences(paragraph: str) -> list[str]:
+    """切分句子。"""
     matches = re.findall(r".+?(?:[.!?\u3002\uff01\uff1f\uff1b;](?=\s|$)|$)", paragraph, flags=re.S)
     return [match.strip() for match in matches if match.strip()]
 
 
 def _hard_split_text(text: str, max_split_length: int) -> list[str]:
+    """强制切分文本。"""
     pieces: list[str] = []
     remaining = text.strip()
     while remaining:
@@ -508,11 +521,13 @@ def _hard_split_text(text: str, max_split_length: int) -> list[str]:
 
 
 def _build_heading_prefix(heading: str, level: int) -> str:
+    """构建标题。"""
     safe_level = max(1, min(level or 1, 6))
     return f"{'#' * safe_level} {heading.strip()}".strip()
 
 
 def _annotate_semantic_categories(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """标注语义类别。"""
     abstract_index = _find_first_heading_index(sections, ABSTRACT_HEADINGS)
     introduction_index = _find_first_heading_index(sections, INTRODUCTION_HEADINGS)
     core_start_index = abstract_index if abstract_index is not None else introduction_index
@@ -557,6 +572,7 @@ def _annotate_semantic_categories(sections: list[dict[str, Any]]) -> list[dict[s
 
 
 def _group_semantic_sections(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """分组章节。"""
     grouped_sections: list[dict[str, Any]] = []
 
     for section in sections:
@@ -575,6 +591,7 @@ def _group_semantic_sections(sections: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def _find_first_heading_index(sections: list[dict[str, Any]], candidates: set[str]) -> int | None:
+    """查找标题。"""
     for index, section in enumerate(sections):
         if _normalize_heading_key(section.get("heading", "")) in candidates:
             return index
@@ -582,12 +599,14 @@ def _find_first_heading_index(sections: list[dict[str, Any]], candidates: set[st
 
 
 def _normalize_heading_key(value: Any) -> str:
+    """规范化标题。"""
     text = str(value or "").strip().lower()
     text = re.sub(r"^[\d.\-()\[\]\s]+", "", text)
     return re.sub(r"\s+", " ", text)
 
 
 def _looks_like_front_matter_heading(heading_key: str) -> bool:
+    """判断标题。"""
     if not heading_key:
         return True
     if heading_key in FRONT_MATTER_HEADINGS:

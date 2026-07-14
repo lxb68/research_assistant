@@ -7,6 +7,7 @@ import { CacheProvider } from "@emotion/react";
 import { useServerInsertedHTML } from "next/navigation";
 import { useState } from "react";
 
+/** 收集并注入服务端渲染所需的 Emotion 样式。 */
 export default function ThemeRegistry({ children }) {
   const [{ cache, flush }] = useState(() => {
     const cache = createCache({ key: "css" });
@@ -23,6 +24,7 @@ export default function ThemeRegistry({ children }) {
       return previousInsert(...args);
     };
 
+    /** 返回本轮新增样式名，并清空待注入队列。 */
     const flush = () => {
       const previous = inserted;
       inserted = [];

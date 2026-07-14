@@ -9,6 +9,7 @@ import PdfViewer from "@/components/PdfViewer";
 import { buildApiUrl } from "@/lib/api";
 import { SavedPaper } from "@/lib/papers";
 
+/** 加载论文记录并展示对应 PDF。 */
 export default function PaperViewerPage() {
   const params = useParams<{ recordId: string }>();
   const recordId = typeof params.recordId === "string" ? params.recordId : "";

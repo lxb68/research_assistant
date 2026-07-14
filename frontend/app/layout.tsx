@@ -11,6 +11,7 @@ export const metadata: Metadata = {
   description: "A smart research assistant for academic and professional use",
 };
 
+/** 渲染应用根布局并注入全局主题。 */
 export default function RootLayout({
   children,
 }: Readonly<{

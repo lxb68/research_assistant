@@ -120,10 +120,12 @@ const paperSources: Array<{
 ];
 
 const defaultSelectedSources: PaperSource[] = ["arxiv", "crossref", "open_access"];
+/** 返回论文来源对应的中文名称。 */
 function getSourceLabel(source: PaperSource) {
   return paperSources.find((item) => item.id === source)?.label ?? source;
 }
 
+/** 为选中来源创建初始进度记录。 */
 function createProgressForSources(sources: PaperSource[]): SourceProgress[] {
   // 每次检索都为选中来源创建独立状态，便于流式更新进度。
   return sources.map((source) => ({
@@ -134,6 +136,7 @@ function createProgressForSources(sources: PaperSource[]): SourceProgress[] {
   }));
 }
 
+/** 把来源状态映射为进度图标和颜色。 */
 function getProgressVisual(state: SourceState) {
   // 将后端状态映射为统一的图标和界面颜色。
   switch (state) {
@@ -173,6 +176,7 @@ type DatasetDownloadPageProps = {
   isActiveView?: boolean;
 };
 
+/** 管理多来源论文检索、筛选和下载。 */
 export default function DatasetDownloadPage({
   embedded = false,
   isActiveView = true,
@@ -262,6 +266,7 @@ export default function DatasetDownloadPage({
     activeViewRef.current = isActiveView;
   }, [isActiveView]);
 
+  /** 切换论文检索来源。 */
   function toggleSource(source: PaperSource) {
     setSelectedSources((current) => {
       const next = current.includes(source)
@@ -272,12 +277,14 @@ export default function DatasetDownloadPage({
     });
   }
 
+  /** 切换 CCF 等级筛选条件。 */
   function toggleCcfLevel(level: string) {
     setSelectedCcfLevels((current) =>
       current.includes(level) ? current.filter((item) => item !== level) : [...current, level],
     );
   }
 
+  /** 合并更新指定来源的检索进度。 */
   function updateProgress(source: PaperSource, patch: Partial<SourceProgress>) {
     setProgress((current) => {
       const exists = current.some((item) => item.source === source);
@@ -296,6 +303,7 @@ export default function DatasetDownloadPage({
     });
   }
 
+  /** 发起流式数据集检索并处理进度事件。 */
   async function streamDataset(
     keyword: string,
     limit: number,
@@ -354,11 +362,13 @@ export default function DatasetDownloadPage({
     return finalResult;
   }
 
+  /** 筛选属于指定来源的运行日志。 */
   function getLogsForSource(logs: string[], source: PaperSource) {
     const sourceKey = `[${source}]`;
     return logs.filter((log) => log.includes(sourceKey)).slice(-4);
   }
 
+  /** 从日志前缀识别对应论文来源。 */
   function getSourceFromLog(log: string): PaperSource | null {
     const bracketMatch = log.match(/^\[(arxiv|pubmed|crossref|ieee|open_access)\]/i);
     if (bracketMatch) {
@@ -373,6 +383,7 @@ export default function DatasetDownloadPage({
     return null;
   }
 
+  /** 把检索表单和结果恢复为初始状态。 */
   function handleReset() {
     setQuery("");
     setSelectedSources(defaultSelectedSources);
@@ -391,6 +402,7 @@ export default function DatasetDownloadPage({
     setProgress(createProgressForSources(defaultSelectedSources));
   }
 
+  /** 请求后端清理缺失 PDF 的元数据。 */
   async function cleanupMissingPdfs() {
     setIsCleaningMetadata(true);
     setError("");
@@ -423,6 +435,7 @@ export default function DatasetDownloadPage({
     }
   }
 
+  /** 把用户输入的本地 PDF 路径关联到论文。 */
   async function linkLocalPdf(paper: PaperResult) {
     const paperKey = paper.id || `${paper.source}-${paper.externalId || paper.title}`;
     const pdfPath = (localPdfPaths[paperKey] || "").trim();
@@ -477,6 +490,7 @@ export default function DatasetDownloadPage({
     }
   }
 
+  /** 校验检索条件并汇总各来源的流式结果。 */
   async function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 

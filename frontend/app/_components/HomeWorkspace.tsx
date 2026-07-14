@@ -12,6 +12,7 @@ import HeroSection from "@/home/HeroSection";
 
 type WorkspaceView = "home" | "download" | "browse" | "domain-tree" | "settings";
 
+/** 把查询参数转换为受支持的工作区视图。 */
 function parseWorkspaceView(value: string | null): WorkspaceView {
   // 只接受白名单视图，未知参数统一回退到首页。
   if (value === "download" || value === "browse" || value === "domain-tree" || value === "settings") {
@@ -24,6 +25,7 @@ type HomeWorkspaceProps = {
   initialView: string | null;
 };
 
+/** 管理首页内嵌视图和导航状态。 */
 export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
   const router = useRouter();
   const [manualView, setManualView] = useState<WorkspaceView | null>(null);

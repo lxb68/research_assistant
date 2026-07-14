@@ -33,6 +33,7 @@ def enrich_paper_metrics(paper: dict, *, ccf_catalog: CcfCatalog, sjr_metrics: S
 
 
 def _metric_text(paper: dict) -> str:
+    """从论文对象中提取可用于指标匹配的刊会名称。"""
     values = [
         str(paper.get("venue", "")),
         str(paper.get("journal", "")),

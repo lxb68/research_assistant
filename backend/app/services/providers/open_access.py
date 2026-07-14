@@ -58,6 +58,7 @@ def search_open_access(query: str, limit: int = 10) -> list[dict]:
 
 
 def _extract_authors(item: dict) -> list[str]:
+    """提取作者列表。"""
     authors = []
     for authorship in item.get("authorships", []):
         author = authorship.get("author") or {}
@@ -68,6 +69,7 @@ def _extract_authors(item: dict) -> list[str]:
 
 
 def _rebuild_abstract(inverted_index: dict) -> str:
+    """重建摘要。"""
     if not inverted_index:
         return ""
 
@@ -80,4 +82,5 @@ def _rebuild_abstract(inverted_index: dict) -> str:
 
 
 def _normalize_doi(value: str) -> str:
+    """规范化DOI。"""
     return value.replace("https://doi.org/", "").strip()

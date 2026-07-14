@@ -14,6 +14,7 @@ const pages = [
   { href: "/setting", label: "设置" },
 ];
 
+/** 为独立功能页渲染统一页头和导航。 */
 export default function StandalonePageShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
 

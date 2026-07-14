@@ -19,16 +19,20 @@ except ImportError:  # 可选依赖：只有无法使用命令行降级方案时
     MinerU = None
 
     class MinerUError(Exception):
+        """表示 MinerU 通用处理异常。"""
         pass
 
     class NoAuthClientError(Exception):
+        """表示 MinerU 客户端缺少有效认证。"""
         pass
 
     class TimeoutError(Exception):
+        """表示 MinerU 处理超时。"""
         pass
 
 
 class MinerURequest(BaseModel):
+    """定义 MinerU 转换任务的输入参数。"""
     record_id: str | None = Field(None, description="已保存的论文记录 ID")
     project_id: str | None = Field(None, description="兼容旧接口的项目 ID")
     file_name: str | None = Field(None, description="兼容旧接口的 PDF 文件名")
@@ -41,6 +45,7 @@ class MinerURequest(BaseModel):
 
 @dataclass(slots=True)
 class MinerUPaths:
+    """保存 MinerU 转换过程涉及的输入与输出路径。"""
     pdf_path: Path
     output_dir: Path
 
@@ -105,6 +110,7 @@ def _resolve_paths(
     pdf_path: str | None,
     output_name: str | None,
 ) -> MinerUPaths:
+    """解析路径。"""
     resolved_pdf = _resolve_pdf_path(project_id=project_id, file_name=file_name, pdf_path=pdf_path)
     if not resolved_pdf.exists() or not resolved_pdf.is_file():
         raise RuntimeError(f"PDF file does not exist: {resolved_pdf}")
@@ -122,6 +128,7 @@ def _resolve_pdf_path(
     file_name: str | None,
     pdf_path: str | None,
 ) -> Path:
+    """解析PDF、路径。"""
     if pdf_path:
         candidate = Path(pdf_path).expanduser()
         if candidate.is_absolute():
@@ -140,12 +147,14 @@ def _resolve_pdf_path(
 
 
 def _build_output_name(name: str) -> str:
+    """构建输出结果。"""
     normalized = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in name.strip())
     normalized = normalized.strip("._") or "mineru_output"
     return normalized[:120]
 
 
 def _run_local_mineru_cli(pdf_path: Path, output_dir: Path) -> None:
+    """调用本地 MinerU 命令行工具转换 PDF。"""
     command = shutil.which("mineru") or shutil.which("magic-pdf")
     if not command:
         raise RuntimeError("Local mineru or magic-pdf CLI is not installed")
@@ -177,6 +186,7 @@ def _run_local_mineru_cli(pdf_path: Path, output_dir: Path) -> None:
 
 
 def _run_mineru_sdk(pdf_path: Path, output_dir: Path, token: str) -> None:
+    """调用 MinerU Python SDK 转换 PDF。"""
     if MinerU is None:
         raise RuntimeError("MinerU Python package is not installed")
 
@@ -212,10 +222,12 @@ def _run_mineru_sdk(pdf_path: Path, output_dir: Path, token: str) -> None:
 
 
 def _has_markdown_output(output_dir: Path) -> bool:
+    """判断Markdown、输出结果。"""
     return any(path.is_file() and path.suffix.lower() == ".md" for path in output_dir.rglob("*.md"))
 
 
 def _select_primary_markdown(output_dir: Path) -> Path | None:
+    """选择Markdown。"""
     markdown_files = sorted(path for path in output_dir.rglob("*.md") if path.is_file())
     if not markdown_files:
         return None
@@ -223,6 +235,7 @@ def _select_primary_markdown(output_dir: Path) -> Path | None:
 
 
 def _summarize_output(output_dir: Path) -> dict:
+    """汇总输出结果。"""
     all_files = [path for path in output_dir.rglob("*") if path.is_file()]
     image_exts = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"}
     table_markers = ("table", "tables")

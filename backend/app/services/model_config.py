@@ -19,6 +19,7 @@ SYSTEM_SECURITY_CONSTRAINT = (
 class ModelConfigStore:
     """管理模型配置的落盘、脱敏读取和运行时装配。"""
     def __init__(self, storage_dir: str | Path | None = None) -> None:
+        """初始化当前对象所需的配置与运行状态。"""
         self.storage_dir = Path(storage_dir or settings.backend_storage_dir).resolve()
         self.config_path = self.storage_dir / "settings" / "model_config.json"
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,6 +35,7 @@ class ModelConfigStore:
         return payload if isinstance(payload, dict) else {}
 
     def load_runtime(self) -> dict[str, str]:
+        """合并保存配置与环境变量，得到运行时模型配置。"""
         saved = self.load_saved()
         api_key = str(
             saved.get("apiKey")
@@ -61,10 +63,12 @@ class ModelConfigStore:
         }
 
     def is_configured(self) -> bool:
+        """判断模型调用所需配置是否完整。"""
         runtime = self.load_runtime()
         return bool(runtime["api_key"] and runtime["base_url"] and runtime["model"])
 
     def save(self, *, model: str, base_url: str, api_key: str) -> dict[str, Any]:
+        """校验并持久化模型配置。"""
         normalized_model = str(model).strip()
         normalized_base_url = str(base_url).strip().rstrip("/")
         normalized_api_key = str(api_key).strip()
@@ -87,6 +91,7 @@ class ModelConfigStore:
         return self.get_public_config()
 
     def clear(self) -> dict[str, Any]:
+        """清除已保存的模型配置。"""
         if self.config_path.exists():
             self.config_path.unlink()
         return self.get_public_config()
@@ -113,6 +118,7 @@ class ModelConfigStore:
         return runtime
 
     def _mask_secret(self, value: str) -> str:
+        """脱敏密钥。"""
         secret = str(value or "").strip()
         if not secret:
             return ""
