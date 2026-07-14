@@ -1,3 +1,5 @@
+"""把 SJR、影响因子和 CCF 等级合并到论文元数据中。"""
+
 from app.services.ccf_catalog import CcfCatalog
 from app.services.sjr_metrics import SjrMetrics
 

@@ -1,1 +1,1 @@
-"""Research Assistant Python backend."""
+"""研究助手 Python 后端应用包。"""

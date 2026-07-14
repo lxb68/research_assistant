@@ -1,3 +1,5 @@
+"""将每次代理运行同时记录为人类可读日志和结构化 JSONL。"""
+
 from __future__ import annotations
 
 import json

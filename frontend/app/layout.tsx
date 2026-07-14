@@ -1,3 +1,5 @@
+/* 定义站点元数据、中文文档语言和全局主题注入入口。 */
+
 import type { Metadata } from "next";
 import ThemeRegistry from "../components/ThemeRegistry";
 import "./globals.css";

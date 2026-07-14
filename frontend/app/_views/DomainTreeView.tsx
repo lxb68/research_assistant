@@ -1,3 +1,5 @@
+/* 生成、读取和修订领域树，并将树节点关联到论文证据片段。 */
+
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -134,6 +136,7 @@ function uniqueStrings(values: string[]) {
 }
 
 function scoreChunk(label: string, chunk: SplitChunk) {
+  // 标签短语命中优先于分词命中，标题命中再给予额外权重。
   const normalizedLabel = cleanLabel(label).toLowerCase();
   const tokens = tokenizeLabel(label);
   if (!normalizedLabel || tokens.length === 0) {
@@ -189,6 +192,7 @@ function renderTree(
   },
   parentKey = "root",
 ): React.ReactNode {
+  // 递归渲染任意深度的领域树，同时保持稳定节点路径。
   return (
     <div className="domain-tree-node-list">
       {nodes.map((node, index) => {

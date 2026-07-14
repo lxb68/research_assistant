@@ -1,3 +1,5 @@
+/* 编辑工作区、模型、任务和提示词配置，并同步到本地与后端。 */
+
 "use client";
 
 import { useEffect, useState } from "react";

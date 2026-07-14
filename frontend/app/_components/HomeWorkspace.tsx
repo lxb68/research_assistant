@@ -1,3 +1,5 @@
+/* 管理首页内嵌工作区视图，并同步浏览器地址与返回导航。 */
+
 "use client";
 
 import { useMemo, useState } from "react";
@@ -11,6 +13,7 @@ import HeroSection from "@/home/HeroSection";
 type WorkspaceView = "home" | "download" | "browse" | "domain-tree" | "settings";
 
 function parseWorkspaceView(value: string | null): WorkspaceView {
+  // 只接受白名单视图，未知参数统一回退到首页。
   if (value === "download" || value === "browse" || value === "domain-tree" || value === "settings") {
     return value;
   }

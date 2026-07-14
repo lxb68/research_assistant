@@ -1,3 +1,5 @@
+"""调用文本嵌入接口，并在 SQLite 中缓存向量以供语义检索。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -12,6 +14,7 @@ import requests
 
 
 class EmbeddingClient:
+    """封装兼容 OpenAI 协议的文本嵌入请求。"""
     def __init__(self, *, base_url: str, api_key: str, model: str, timeout: int = 60) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -113,6 +116,7 @@ class SQLiteVectorStore:
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
+    """计算两个等长向量的余弦相似度。"""
     if not left or len(left) != len(right):
         return 0.0
     dot = sum(a * b for a, b in zip(left, right, strict=True))

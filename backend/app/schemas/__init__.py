@@ -1,1 +1,1 @@
-"""Response schema helpers."""
+"""接口响应结构辅助模块。"""

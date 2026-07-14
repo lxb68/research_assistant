@@ -1,3 +1,5 @@
+"""通过 Crossref REST API 检索 DOI 与出版物元数据。"""
+
 from app.schemas.paper import paper_item
 from app.utils.http import get_json
 from app.utils.text import clean_text

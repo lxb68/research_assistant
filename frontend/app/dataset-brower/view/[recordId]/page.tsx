@@ -1,3 +1,5 @@
+/* 根据路由记录 ID 加载论文元数据，并在客户端展示 PDF。 */
+
 "use client";
 
 import Link from "next/link";

@@ -1,3 +1,5 @@
+"""在安全边界内编排检索、问答和领域树等研究任务。"""
+
 from __future__ import annotations
 
 import asyncio

@@ -1,3 +1,5 @@
+/* 解析首页查询参数，并把初始工作区视图交给客户端组件。 */
+
 import HomeWorkspace from "./_components/HomeWorkspace";
 
 type HomePageProps = {
@@ -5,6 +7,7 @@ type HomePageProps = {
 };
 
 export default async function Page({ searchParams }: HomePageProps) {
+  // Next.js 16 的 searchParams 是 Promise，必须先等待解析。
   const resolvedSearchParams = await searchParams;
   const view = Array.isArray(resolvedSearchParams.view)
     ? resolvedSearchParams.view[0] ?? null

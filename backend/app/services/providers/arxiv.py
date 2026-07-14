@@ -1,3 +1,5 @@
+"""通过 arXiv Atom API 检索和解析预印本文献。"""
+
 from xml.etree import ElementTree
 
 from app.schemas.paper import paper_item

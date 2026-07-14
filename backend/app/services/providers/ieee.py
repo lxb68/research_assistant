@@ -1,3 +1,5 @@
+"""通过 IEEE Xplore API 检索 IEEE 出版物元数据。"""
+
 from app.core.config import settings
 from app.schemas.paper import paper_item
 from app.utils.http import get_json

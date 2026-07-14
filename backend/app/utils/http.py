@@ -1,3 +1,5 @@
+"""封装第三方 HTTP GET 请求、查询参数和统一异常信息。"""
+
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError

@@ -1397,7 +1397,7 @@ main {
   }
 }
 
-/* Refined dataset download page layout. */
+/* 优化后的数据集下载页面布局。 */
 .dataset-download-page-refined {
   background:
     radial-gradient(circle at 16% 8%, rgba(42, 92, 170, 0.12), transparent 30%),
@@ -2985,7 +2985,7 @@ select.settings-input {
   }
 }
 
-/* Research conversation workspace */
+/* 研究对话工作区。 */
 .research-chat { --ink:#18211d; --muted:#718078; --line:#e5e9e6; --green:#315e4c; display:grid; grid-template-columns:260px minmax(480px,1fr) 320px; height:100vh; overflow:hidden; background:#f8f9f7; color:var(--ink); font-family:Arial,"Microsoft YaHei",sans-serif; }
 .research-chat button { font:inherit; }
 .research-sidebar { display:flex; flex-direction:column; min-width:0; border-right:1px solid var(--line); background:#f1f4f1; padding:22px 14px 16px; }
@@ -3044,7 +3044,7 @@ select.settings-input {
 @media(max-width:1100px){.research-chat{grid-template-columns:235px minmax(480px,1fr)}.research-context{display:none}.research-chat.is-collapsed{grid-template-columns:1fr}}
 @media(max-width:760px){.research-chat{display:block}.research-sidebar{display:none}.research-main{height:100vh}.research-topbar{padding:0 14px}.research-thread,.research-compose-wrap{padding-left:16px;padding-right:16px}.research-topbar .research-export{font-size:0;width:36px;padding:0;justify-content:center}.research-prompts button:nth-child(n+2){display:none}.research-chat.is-collapsed{display:block}}
 
-/* Match the existing dataset workspace visual language. */
+/* 与现有数据集工作区保持一致的视觉语言。 */
 .research-chat {
   --ink: #f8fafc;
   --muted: rgba(203, 213, 225, 0.68);
@@ -3091,7 +3091,7 @@ select.settings-input {
 @media(max-width:900px){.standalone-page-topbar{grid-template-columns:auto minmax(0,1fr);gap:12px}.standalone-page-topbar .workspace-brand{display:none}.standalone-page-topbar .workspace-tabs{gap:16px;overflow-x:auto}.standalone-page-tab{white-space:nowrap}}
 @media(max-width:600px){.standalone-page-topbar{padding:0 12px}.standalone-back-button span{display:none}.standalone-back-button{width:36px;justify-content:center;padding:0}.standalone-page-topbar .workspace-tabs{gap:13px}.standalone-page-tab{font-size:.78rem}}
 
-/* Research archive: use a focused two-column workspace instead of the chat context grid. */
+/* 研究归档采用聚焦的双栏工作区，不复用对话上下文网格。 */
 .standalone-page-content>.research-chat.is-records {
   grid-template-columns: 260px minmax(0, 1fr) !important;
 }

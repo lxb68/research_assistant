@@ -1,3 +1,5 @@
+/* 展示本地论文数据集，并处理 PDF 导入、解析、分块与删除操作。 */
+
 "use client";
 
 import Link from "next/link";
@@ -39,6 +41,7 @@ const emptyPdfImportForm: PdfImportForm = {
 };
 
 function getSplitLengthsFromSettings() {
+  // 浏览器存储异常或配置无效时使用后端一致的默认切分长度。
   if (typeof window === "undefined") {
     return {
       minimumLength: DEFAULT_MINIMUM_SPLIT_LENGTH,

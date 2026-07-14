@@ -1,3 +1,5 @@
+"""下载、缓存并匹配 CCF 推荐会议和期刊目录。"""
+
 from __future__ import annotations
 
 from html import unescape

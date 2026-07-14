@@ -1,3 +1,5 @@
+"""融合 BM25 与向量相似度，为研究问答召回本地证据片段。"""
+
 from __future__ import annotations
 
 import math
@@ -28,6 +30,7 @@ _EXCLUDED_SECTION_PATTERNS = (
 
 @dataclass(slots=True)
 class EvidenceChunk:
+    """表示一个可排序、可追溯到论文来源的证据片段。"""
     record_id: str
     title: str
     text: str
@@ -80,6 +83,7 @@ class RAGRetriever:
         self.last_diagnostics: dict[str, Any] = {}
 
     def retrieve(self, query: str, papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """融合稀疏与向量得分，返回去冗余后的高相关证据。"""
         normalized_query = str(query).strip()
         if not normalized_query:
             return []
@@ -152,6 +156,7 @@ class RAGRetriever:
         return [item.to_dict() for item in selected]
 
     def build_context(self, evidence: list[dict[str, Any]]) -> str:
+        """把证据列表整理成适合发送给大模型的上下文文本。"""
         blocks: list[str] = []
         for index, item in enumerate(evidence, start=1):
             metadata = [str(item.get("title") or "未命名文献")]

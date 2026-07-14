@@ -1,3 +1,6 @@
+"""定义跨文献平台共用的论文响应结构。"""
+
+
 def paper_item(
     *,
     source: str,

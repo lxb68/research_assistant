@@ -1,3 +1,5 @@
+"""选择 MinerU SDK 或命令行工具，将 PDF 转换为 Markdown 资源。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,7 +15,7 @@ from app.core.config import settings
 try:
     from mineru import MinerU
     from mineru.exceptions import MinerUError, NoAuthClientError, TimeoutError
-except ImportError:  # Optional dependency: only required when CLI fallback cannot be used.
+except ImportError:  # 可选依赖：只有无法使用命令行降级方案时才必须安装。
     MinerU = None
 
     class MinerUError(Exception):
@@ -27,14 +29,14 @@ except ImportError:  # Optional dependency: only required when CLI fallback cann
 
 
 class MinerURequest(BaseModel):
-    record_id: str | None = Field(None, description="Saved paper record ID")
-    project_id: str | None = Field(None, description="Legacy project ID")
-    file_name: str | None = Field(None, description="Legacy PDF file name")
-    pdf_path: str | None = Field(None, description="Absolute PDF path or file name under storage/papers")
-    output_name: str | None = Field(None, description="Optional MinerU output directory name")
-    mineru_token: str | None = Field(None, description="Optional MinerU API token override")
-    split_min_length: int | None = Field(None, ge=100, description="Optional minimum chunk length")
-    split_max_length: int | None = Field(None, ge=200, description="Optional maximum chunk length")
+    record_id: str | None = Field(None, description="已保存的论文记录 ID")
+    project_id: str | None = Field(None, description="兼容旧接口的项目 ID")
+    file_name: str | None = Field(None, description="兼容旧接口的 PDF 文件名")
+    pdf_path: str | None = Field(None, description="PDF 绝对路径或 storage/papers 下的文件名")
+    output_name: str | None = Field(None, description="可选的 MinerU 输出目录名")
+    mineru_token: str | None = Field(None, description="可选的 MinerU API 令牌覆盖值")
+    split_min_length: int | None = Field(None, ge=100, description="可选的最小分块长度")
+    split_max_length: int | None = Field(None, ge=200, description="可选的最大分块长度")
 
 
 @dataclass(slots=True)
@@ -53,7 +55,7 @@ def mineru_processing(
     output_name: str | None = None,
     mineru_token: str | None = None,
 ) -> dict:
-    """Convert a PDF into Markdown and related assets under storage/markdown."""
+    """把 PDF 转换为 Markdown，并将关联资源写入 storage/markdown。"""
     del update_task_callback, task_info
 
     paths = _resolve_paths(

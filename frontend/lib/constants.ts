@@ -1,3 +1,5 @@
+/* 前后端共享的浏览器存储键、项目标识和默认切分参数。 */
+
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:4000";
 

@@ -1,3 +1,5 @@
+/* 使用 PDF.js 在客户端按页渲染论文，并管理缩放、加载和错误状态。 */
+
 "use client";
 
 import { useEffect, useState } from "react";
@@ -62,7 +64,7 @@ function PdfPageCanvas({ pageNumber, pdf, scale }: PdfPageCanvasProps) {
         }
       } catch (error) {
         if (!cancelled) {
-          console.error(`Render page ${pageNumber} failed`, error);
+          console.error(`第 ${pageNumber} 页渲染失败`, error);
           setPageState("error");
         }
       }
@@ -113,7 +115,7 @@ export default function PdfViewer({ title, url }: PdfViewerProps) {
         setNumPages(documentProxy.numPages);
       } catch (loadError) {
         if (!cancelled) {
-          console.error("Load pdf failed", loadError);
+          console.error("PDF 加载失败", loadError);
           setError(loadError instanceof Error ? loadError.message : "PDF 加载失败");
           setPdf(null);
           setNumPages(0);

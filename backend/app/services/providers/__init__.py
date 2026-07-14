@@ -1,1 +1,1 @@
-"""Literature search providers."""
+"""各外部文献检索平台的适配器。"""

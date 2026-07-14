@@ -1,3 +1,5 @@
+"""检索、筛选、下载和持久化论文，并维护本地论文元数据。"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -1042,13 +1044,13 @@ class HunterAgent:
             self._log(warning)
 
         if self._pdf_text_looks_usable(text):
-            self._log(f"metadata={metadata}, text length={len(text)}")
+            self._log(f"PDF 元数据={metadata}，文本长度={len(text)}")
             return {"text": text, "metadata": metadata, "parser": "pymupdf", "warning": warning}
 
         mineru_text = self._extract_pdf_text_with_mineru(pdf_path)
         if mineru_text:
             combined_warning = warning or "PyMuPDF 提取文本较少，已使用 MinerU 精细解析"
-            self._log(f"metadata={metadata}, mineru text length={len(mineru_text)}")
+            self._log(f"PDF 元数据={metadata}，MinerU 文本长度={len(mineru_text)}")
             return {"text": mineru_text, "metadata": metadata, "parser": "mineru", "warning": combined_warning}
 
         fallback_warning = warning or "PyMuPDF 提取文本较少，且 MinerU 不可用"
@@ -1514,7 +1516,7 @@ class HunterAgent:
         with sqlite3.connect(self.metadata_db_path) as connection:
             connection.row_factory = sqlite3.Row
             row = connection.execute(query, params).fetchone()
-            self._log(f"row={row} params={params}")
+            self._log(f"数据库行={row}，查询参数={params}")
 
         if not row:
             return None

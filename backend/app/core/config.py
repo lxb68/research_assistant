@@ -1,3 +1,5 @@
+"""从环境变量与 backend/.env 汇总后端运行配置。"""
+
 from pathlib import Path
 import os
 
@@ -42,6 +44,7 @@ class Settings:
         ).split(",")
         if origin.strip()
     ]
+    # 第三方 API Key 配置
     ncbi_api_key = os.getenv("NCBI_API_KEY", "")
     ncbi_email = os.getenv("NCBI_EMAIL", "")
     ieee_api_key = os.getenv("IEEE_API_KEY", "")

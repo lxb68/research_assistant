@@ -1,3 +1,5 @@
+/* 基于统一后端地址构造 API URL，避免各组件手工拼接。 */
+
 import { API_BASE_URL } from "@/lib/constants";
 
 export function buildApiUrl(path: string): URL {

@@ -1,4 +1,5 @@
 ﻿import json
+# FastAPI 应用入口：集中定义论文、解析、领域树和研究代理相关接口。
 import importlib.util
 import asyncio
 import queue
@@ -25,6 +26,7 @@ if not MULTIPART_AVAILABLE:
     Form = lambda *args, **kwargs: None  # type: ignore[assignment]
 
 
+# 请求模型集中约束接口输入，避免业务函数重复校验基础字段。
 class DatasetDownloadRequest(BaseModel):
     keyword: str = Field(..., min_length=1, description="检索关键词")
     sources: list[str] = Field(default_factory=lambda: ["arxiv", "crossref"], description="论文来源")
@@ -98,7 +100,7 @@ class OrchestratorRequest(BaseModel):
 
 app = FastAPI(
     title="Research Assistant API",
-    description="Python FastAPI backend for literature search.",
+    description="用于文献检索与研究代理的 Python FastAPI 后端。",
     version="0.1.0",
 )
 
@@ -111,6 +113,7 @@ app.add_middleware(
 )
 
 
+# --- 健康检查与基础能力发现 ---
 @app.get("/api/health")
 def health() -> dict:
     return {
@@ -125,6 +128,7 @@ def paper_sources() -> dict:
     return {"sources": sorted(SUPPORTED_SOURCES.keys())}
 
 
+# --- 研究问答与代理编排 ---
 @app.post("/api/research/chat")
 async def research_chat(payload: ResearchChatRequest) -> dict:
     try:
@@ -216,6 +220,7 @@ def debug_routes() -> dict:
     }
 
 
+# --- 模型配置：对外只返回脱敏后的公开信息 ---
 @app.get("/api/settings/model-config")
 def get_model_config() -> dict:
     store = ModelConfigStore()
@@ -238,11 +243,12 @@ def save_model_config(payload: ModelConfigRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(error)) from error
 
 
+# --- 论文检索、下载和本地数据集管理 ---
 @app.get("/api/papers/search")
 def paper_search(
-    q: str = Query(..., min_length=1, description="Search keyword"),
-    source: str = Query("arxiv", description="Paper source"),
-    limit: int = Query(10, ge=1, le=50, description="Result count, 1-50"),
+    q: str = Query(..., min_length=1, description="搜索关键词"),
+    source: str = Query("arxiv", description="论文来源"),
+    limit: int = Query(10, ge=1, le=50, description="结果数量，范围 1～50"),
 ) -> dict:
     try:
         return search_papers(source=source, query=q, limit=limit)
@@ -568,6 +574,7 @@ def re_split_values(value: str) -> list[str]:
     return [part.strip() for part in values if part.strip()]
 
 
+# --- 领域树与知识图谱生成、读取 ---
 @app.post("/api/domain-tree/generate")
 async def generate_domain_tree(payload: DomainTreeGenerateRequest) -> dict:
     try:
@@ -616,6 +623,7 @@ def get_domain_tree(project_id: str) -> dict:
         raise HTTPException(status_code=502, detail=str(error)) from error
 
 
+# --- 独立 MinerU 转换接口 ---
 @app.post("/api/mineru/process")
 async def process_mineru(request: MinerURequest):
     try:

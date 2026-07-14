@@ -1,3 +1,5 @@
+"""持久化模型配置，并生成带安全约束的运行时模型参数。"""
+
 from __future__ import annotations
 
 import json
@@ -15,12 +17,14 @@ SYSTEM_SECURITY_CONSTRAINT = (
 
 
 class ModelConfigStore:
+    """管理模型配置的落盘、脱敏读取和运行时装配。"""
     def __init__(self, storage_dir: str | Path | None = None) -> None:
         self.storage_dir = Path(storage_dir or settings.backend_storage_dir).resolve()
         self.config_path = self.storage_dir / "settings" / "model_config.json"
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
 
     def load_saved(self) -> dict[str, Any]:
+        """读取原始保存配置；文件缺失或损坏时返回空配置。"""
         if not self.config_path.exists():
             return {}
         try:
@@ -88,6 +92,7 @@ class ModelConfigStore:
         return self.get_public_config()
 
     def get_public_config(self) -> dict[str, Any]:
+        """返回可安全展示给前端的脱敏配置。"""
         runtime = self.load_runtime()
         has_saved = self.config_path.exists()
         return {
@@ -101,6 +106,7 @@ class ModelConfigStore:
         }
 
     def build_model_payload(self) -> dict[str, str] | None:
+        """构造模型调用参数，配置不完整时返回空值。"""
         runtime = self.load_runtime()
         if not (runtime["api_key"] and runtime["base_url"] and runtime["model"]):
             return None

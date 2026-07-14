@@ -1,3 +1,5 @@
+"""统一调度各论文数据源，并规范检索结果结构。"""
+
 from app.services.providers.arxiv import search_arxiv
 from app.services.providers.crossref import search_crossref
 from app.services.providers.ieee import search_ieee

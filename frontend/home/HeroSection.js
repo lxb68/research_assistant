@@ -1,3 +1,5 @@
+/* 首页首屏：展示产品定位和各研究工作流的快捷入口。 */
+
 "use client";
 
 export default function HeroSection({

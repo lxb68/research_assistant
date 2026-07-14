@@ -1,3 +1,5 @@
+"""加载并匹配本地 SJR 期刊指标数据。"""
+
 from __future__ import annotations
 
 from pathlib import Path

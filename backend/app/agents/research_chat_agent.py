@@ -1,3 +1,5 @@
+"""结合本地论文、稀疏检索与向量检索完成研究问答。"""
+
 from __future__ import annotations
 
 import re

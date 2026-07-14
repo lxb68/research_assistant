@@ -1,1 +1,1 @@
-"""Core backend configuration."""
+"""后端核心配置模块。"""

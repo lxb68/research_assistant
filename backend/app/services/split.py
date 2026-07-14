@@ -1,3 +1,5 @@
+"""按文档结构和长度切分 Markdown，并为片段生成摘要信息。"""
+
 from __future__ import annotations
 
 import re
@@ -109,7 +111,7 @@ KEEP_WHOLE_CATEGORIES = {"front_matter", "references", "back_matter"}
 
 
 def split_long_section(section: dict[str, Any], max_split_length: int) -> list[str]:
-    """Split a long section while preferring paragraph and sentence boundaries."""
+    """切分过长章节，并优先保持段落和句子边界完整。"""
     content = str(section.get("content", "")).strip()
     if not content:
         return []
@@ -152,7 +154,7 @@ def process_sections(
     min_split_length: int,
     max_split_length: int,
 ) -> list[dict[str, Any]]:
-    """Split sections by structure and size while preserving paragraph summaries."""
+    """按结构和大小切分章节，同时保留段落摘要。"""
     if min_split_length <= 0 or max_split_length <= 0:
         raise ValueError("min_split_length and max_split_length must be positive")
     if min_split_length > max_split_length:
@@ -224,7 +226,7 @@ def split_markdown_document(
     min_split_length: int = DEFAULT_MIN_SPLIT_LENGTH,
     max_split_length: int = DEFAULT_MAX_SPLIT_LENGTH,
 ) -> dict[str, Any]:
-    """Parse markdown into outline/sections, then split and summarize it."""
+    """把 Markdown 解析为大纲和章节，再执行切分与摘要。"""
     outline, sections = parse_markdown_sections(markdown_text)
     chunks = process_sections(
         sections,
@@ -242,7 +244,7 @@ def split_markdown_document(
 
 
 def parse_markdown_sections(markdown_text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Convert markdown into structured outline and section records."""
+    """把 Markdown 转换为结构化大纲和章节记录。"""
     lines = markdown_text.replace("\r\n", "\n").split("\n")
     heading_pattern = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
     outline: list[dict[str, Any]] = []

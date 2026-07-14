@@ -1,3 +1,5 @@
+/* 管理研究会话、流式代理响应、本地历史记录和工作区快捷入口。 */
+
 "use client";
 
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
@@ -41,6 +43,7 @@ type ResearchRecord = {
 };
 
 const CONVERSATIONS_KEY = "research-agent.conversations";
+// 三组键分别保存会话列表、当前会话和归档研究记录。
 const ACTIVE_CONVERSATION_KEY = "research-agent.active-conversation";
 const RESEARCH_RECORDS_KEY = "research-agent.research-records";
 

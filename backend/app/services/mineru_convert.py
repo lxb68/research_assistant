@@ -1,3 +1,5 @@
+"""提供可直接从命令行调用的 MinerU PDF 转换入口。"""
+
 from __future__ import annotations
 
 import argparse
@@ -8,13 +10,13 @@ from app.services.mineru import mineru_processing
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Use MinerU to convert a PDF into Markdown plus image/table assets under backend/storage/markdown.",
+        description="使用 MinerU 将 PDF 转换为 Markdown，并把图片、表格资源保存到 backend/storage/markdown。",
     )
-    parser.add_argument("--pdf-path", help="Absolute PDF path or filename under backend/storage/papers.")
-    parser.add_argument("--file-name", help="PDF filename under backend/storage/papers for compatibility.")
-    parser.add_argument("--project-id", help="Optional legacy project id.")
-    parser.add_argument("--output-name", help="Optional output directory name under backend/storage/markdown.")
-    parser.add_argument("--mineru-token", help="Optional MinerU API token override.")
+    parser.add_argument("--pdf-path", help="PDF 绝对路径或 backend/storage/papers 下的文件名。")
+    parser.add_argument("--file-name", help="兼容旧接口的 backend/storage/papers 下 PDF 文件名。")
+    parser.add_argument("--project-id", help="可选的旧版项目 ID。")
+    parser.add_argument("--output-name", help="backend/storage/markdown 下可选的输出目录名。")
+    parser.add_argument("--mineru-token", help="可选的 MinerU API 令牌覆盖值。")
     args = parser.parse_args()
 
     result = mineru_processing(

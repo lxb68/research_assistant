@@ -1,3 +1,5 @@
+/* 在服务端渲染期间收集 Emotion 样式，并按请求注入到页面。 */
+
 "use client";
 
 import createCache from "@emotion/cache";
@@ -12,6 +14,7 @@ export default function ThemeRegistry({ children }) {
     const previousInsert = cache.insert;
     let inserted = [];
 
+    // 记录本轮渲染新增的样式名，避免重复输出已缓存样式。
     cache.insert = (...args) => {
       const serialized = args[1];
       if (cache.inserted[serialized.name] === undefined) {

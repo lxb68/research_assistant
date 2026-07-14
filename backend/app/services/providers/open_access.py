@@ -1,3 +1,5 @@
+"""从 OpenAlex 检索合法开放获取论文及其 PDF 链接。"""
+
 from app.schemas.paper import paper_item
 from app.utils.http import get_json
 from app.utils.text import clean_text

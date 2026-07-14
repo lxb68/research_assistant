@@ -1,3 +1,5 @@
+/* 组织多来源论文检索、筛选、下载进度与结果持久化界面。 */
+
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -123,6 +125,7 @@ function getSourceLabel(source: PaperSource) {
 }
 
 function createProgressForSources(sources: PaperSource[]): SourceProgress[] {
+  // 每次检索都为选中来源创建独立状态，便于流式更新进度。
   return sources.map((source) => ({
     source,
     state: "idle",
@@ -132,6 +135,7 @@ function createProgressForSources(sources: PaperSource[]): SourceProgress[] {
 }
 
 function getProgressVisual(state: SourceState) {
+  // 将后端状态映射为统一的图标和界面颜色。
   switch (state) {
     case "done":
       return {

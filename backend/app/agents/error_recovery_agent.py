@@ -1,3 +1,5 @@
+"""识别可恢复异常，并以受限重试和降级建议处理代理故障。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -13,6 +15,7 @@ AsyncOperation = Callable[[], Awaitable[T]]
 
 @dataclass(slots=True)
 class RecoveryDecision:
+    """记录异常分类、是否可恢复以及建议动作。"""
     category: str
     recoverable: bool
     action: str
@@ -20,6 +23,7 @@ class RecoveryDecision:
 
 
 class RecoveryExhaustedError(RuntimeError):
+    """表示安全重试次数已耗尽，并携带完整恢复轨迹。"""
     def __init__(self, message: str, *, decision: RecoveryDecision, trace: list[dict[str, Any]]) -> None:
         super().__init__(message)
         self.decision = decision
@@ -41,6 +45,7 @@ class ErrorRecoveryAgent:
         self.log_callback = log_callback
 
     async def execute(self, operation_name: str, operation: AsyncOperation[T]) -> tuple[T, list[dict[str, Any]]]:
+        """执行异步操作，并仅对明确可恢复的错误进行有限重试。"""
         trace: list[dict[str, Any]] = []
         for cycle in range(1, self.max_cycles + 1):
             try:
@@ -76,6 +81,7 @@ class ErrorRecoveryAgent:
         raise AssertionError("错误恢复循环不应执行到此处")
 
     def classify(self, error: Exception) -> RecoveryDecision:
+        """按 HTTP 状态和异常类型判断安全恢复策略。"""
         message = str(error).lower()
         status_code = self._status_code(error)
         if isinstance(error, (requests.Timeout, TimeoutError, asyncio.TimeoutError)) or "timeout" in message or "超时" in message:

@@ -1,8 +1,10 @@
+/* 配置 Turbopack 工作区根目录，并允许本机局域网地址访问开发服务器。 */
+
 import type { NextConfig } from "next";
 import path from "path";
-import os from 'os'; // 推荐使用 import 而非 require
+import os from "os";
 
-// 获取所有非内部 IPv4 地址
+// 收集所有非内部 IPv4 地址，供局域网设备访问开发服务。
 function getLocalIPs(): string[] {
   const ips: string[] = [];
   const interfaces = os.networkInterfaces();
@@ -20,13 +22,13 @@ function getLocalIPs(): string[] {
 
 const nextConfig: NextConfig = {
   turbopack: {
-    root: path.join(__dirname, '..'),
+    root: path.join(__dirname, ".."),
   },
   allowedDevOrigins: [
-    'localhost',
-    '127.0.0.1',
+    "localhost",
+    "127.0.0.1",
     ...getLocalIPs(),
   ],
 };
 
-export default nextConfig; // 只保留这一种导出
+export default nextConfig;

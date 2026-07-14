@@ -1,3 +1,5 @@
+/* 为独立功能页提供返回入口、品牌区和当前路由导航。 */
+
 "use client";
 
 import Link from "next/link";

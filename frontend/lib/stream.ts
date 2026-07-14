@@ -1,3 +1,5 @@
+/* 增量读取 NDJSON 响应，并逐条回调已解析事件。 */
+
 export async function readNdjsonStream<T>(
   stream: ReadableStream<Uint8Array>,
   onEvent: (event: T) => void,
@@ -12,6 +14,7 @@ export async function readNdjsonStream<T>(
       break;
     }
 
+    // 保留最后一段不完整行，等待下一批字节到达后再解析。
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";

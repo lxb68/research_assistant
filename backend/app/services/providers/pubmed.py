@@ -1,3 +1,5 @@
+"""通过 PubMed E-utilities 检索并解析生物医学文献。"""
+
 from xml.etree import ElementTree
 
 from app.core.config import settings

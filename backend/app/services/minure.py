@@ -1,3 +1,5 @@
+"""通过 MinerU 远程接口上传 PDF、轮询解析进度并提取 Markdown。"""
+
 import os
 import json
 import time
@@ -71,7 +73,7 @@ def download_and_extract_zip(zip_url: str, target_dir: Path, file_name: str) -> 
             output_name = Path(file_name).stem + ".md"
             output_path = target_dir / output_name
             output_path.write_text(content, encoding="utf-8")
-            print(f"Extracted to: {output_path}")
+            print(f"Markdown 已提取到：{output_path}")
             # 原逻辑只处理一个，若需多个可调整
             break  # 仅处理第一个
 
@@ -85,7 +87,7 @@ def mineru_processing(project_id: str, file_name: str, update_task_callback=None
     - task_info: 任务相关信息，包含 processedPage 等
     返回成功标志
     """
-    print("Executing PDF MinerU conversion strategy...")
+    print("正在执行 PDF MinerU 转换流程……")
 
     # 1. 获取项目根目录（此处模拟，实际可能从配置或数据库读取）
     #    建议将项目根路径作为环境变量或配置传入
@@ -106,7 +108,7 @@ def mineru_processing(project_id: str, file_name: str, update_task_callback=None
         raise RuntimeError("MinerU token missing in task configuration.")
 
     # 3. 获取上传 URL
-    print("Getting upload URL...")
+    print("正在获取上传地址……")
     request_payload = {
         "enable_formula": True,
         "layout_model": "doclayout_yolo",
@@ -136,12 +138,12 @@ def mineru_processing(project_id: str, file_name: str, update_task_callback=None
         raise RuntimeError("No batch_id returned.")
 
     # 4. 上传文件
-    print("Uploading file...")
+    print("正在上传文件……")
     upload_file(file_path, upload_url)
-    print("File uploaded.")
+    print("文件上传完成。")
 
     # 5. 轮询结果
-    print("Polling for results...")
+    print("正在轮询解析结果……")
     current_page = 0
     total_page = 0
     completed_count = 0  # 若需要累加，可从 task_info 获取
@@ -185,7 +187,7 @@ def mineru_processing(project_id: str, file_name: str, update_task_callback=None
             # 此处可根据实际调整
             # update_task_callback(task_id, {"completedCount": current_page + completed_count, "detail": json.dumps(task_info)})
 
-        print(f"MinerU {file_name} progress: {current_page}/{total_page}, state: {state}")
+        print(f"MinerU 文件 {file_name} 进度：{current_page}/{total_page}，状态：{state}")
 
         # 完成
         if state == PROCESSING_STATES["DONE"]:
@@ -204,5 +206,5 @@ def mineru_processing(project_id: str, file_name: str, update_task_callback=None
         # 等待下一次轮询
         time.sleep(POLL_INTERVAL)
 
-    print("MinerU conversion completed.")
+    print("MinerU 转换完成。")
     return {"success": True}

@@ -1,3 +1,5 @@
+/* 研究对话独立路由，并把工具入口映射为客户端导航。 */
+
 "use client";
 
 import ResearchChat from "@/app/_components/ResearchChat";

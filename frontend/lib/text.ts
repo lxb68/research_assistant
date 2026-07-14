@@ -1,3 +1,5 @@
+/* 处理中文和英文分隔符，并去除重复、空白文本。 */
+
 export function splitDelimitedText(value: string): string[] {
   return value
     .split(/\s*(?:,|;|，|；|、)\s*/)

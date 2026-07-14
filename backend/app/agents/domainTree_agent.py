@@ -1,3 +1,5 @@
+"""从本地 Markdown 资料生成领域树、知识图谱及其持久化结果。"""
+
 from __future__ import annotations
 
 import json
@@ -193,7 +195,7 @@ class SourceDocument:
 
 
 class DomainTreeAgent:
-    """Build a domain tree and a lightweight knowledge graph from stored markdown assets."""
+    """创建领域树和轻量级知识图谱的代理类。"""
 
     def __init__(
         self,
@@ -223,18 +225,18 @@ class DomainTreeAgent:
         normalized_project_id = self._normalize_project_id(project_id)
         # 直接调用 get_tags 返回当前已存储的标签，不进行任何计算或生成
         if action == "keep":
-            logger.info("[%s] use existing domain tree", normalized_project_id)
+            logger.info("[%s] 使用已有领域树", normalized_project_id)
             return self.get_tags(normalized_project_id)
 
         documents = self._load_documents(normalized_project_id)
         if not documents:
-            logger.warning("[%s] no markdown sources found in storage", normalized_project_id)
+            logger.warning("[%s] 存储目录中未找到 Markdown 来源", normalized_project_id)
             return None
 
         #
         catalog_text = all_toc or self._build_catalog_text(documents)
         if not catalog_text.strip():
-            logger.warning("[%s] empty catalog text, skip domain tree generation", normalized_project_id)
+            logger.warning("[%s] 目录文本为空，跳过领域树生成", normalized_project_id)
             return None
 
         existing_tags = self.get_tags(normalized_project_id)
@@ -275,7 +277,7 @@ class DomainTreeAgent:
         )
         tags = self._refine_tree_specificity(tags, documents)
         if not tags:
-            logger.error("[%s] failed to generate domain tree tags", normalized_project_id)
+            logger.error("[%s] 领域树标签生成失败", normalized_project_id)
             return None
 
         # 构建知识图谱
@@ -297,6 +299,7 @@ class DomainTreeAgent:
         )
         return tags
 
+    # 获取当前项目的领域树标签，如果不存在则返回 None
     def get_tags(self, project_id: str) -> list[dict[str, Any]] | None:
         domain_tree_path = self._analysis_dir(project_id) / "domain_tree.json"
         if not domain_tree_path.exists():
@@ -305,12 +308,14 @@ class DomainTreeAgent:
         try:
             payload = json.loads(domain_tree_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
-            logger.warning("[%s] failed to read domain tree: %s", project_id, error)
+            logger.warning("[%s] 读取领域树失败：%s", project_id, error)
             return None
 
+        # 解析 payload，确保返回的结果是一个列表
         if isinstance(payload, dict):
             tree = payload.get("domainTree")
             return tree if isinstance(tree, list) else None
+
         return payload if isinstance(payload, list) else None
 
     def get_result(self, project_id: str) -> dict[str, Any] | None:
@@ -337,7 +342,7 @@ class DomainTreeAgent:
             )
             catalog_text = catalog_path.read_text(encoding="utf-8") if catalog_path.exists() else ""
         except (OSError, json.JSONDecodeError) as error:
-            logger.warning("[%s] failed to read domain tree result: %s", project_id, error)
+            logger.warning("[%s] 读取领域树结果失败：%s", project_id, error)
             return None
 
         domain_tree = domain_payload.get("domainTree") if isinstance(domain_payload, dict) else domain_payload
@@ -360,7 +365,7 @@ class DomainTreeAgent:
         try:
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
-            logger.warning("[%s] failed to read manifest: %s", project_id, error)
+            logger.warning("[%s] 读取清单文件失败：%s", project_id, error)
             return {}
         return payload if isinstance(payload, dict) else {}
 
@@ -459,7 +464,7 @@ class DomainTreeAgent:
             json.dumps(manifest_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        logger.info("[%s] saved domain tree and knowledge graph to %s", project_id, output_dir)
+        logger.info("[%s] 已将领域树和知识图谱保存到 %s", project_id, output_dir)
 
     def _generate_domain_tree(
         self,
@@ -474,7 +479,7 @@ class DomainTreeAgent:
         tags = self.extract_json_from_llm_output(llm_output) if llm_output else None
         if tags:
             return self.filter_domain_tree(tags)
-        logger.info("LLM unavailable or returned invalid JSON, fallback to heuristic domain tree")
+        logger.info("大模型不可用或返回了无效 JSON，改用启发式规则生成领域树")
         return self._heuristic_domain_tree(documents, catalog_text)
 
     def _call_llm(self, prompt: str, *, language: str, model: Any | None) -> str | None:
@@ -531,13 +536,13 @@ class DomainTreeAgent:
             with urlopen(request, timeout=settings.request_timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except Exception as error:
-            logger.warning("domain tree LLM call failed: %s", error)
+            logger.warning("领域树大模型调用失败：%s", error)
             return None
 
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
-            logger.warning("domain tree LLM response format invalid: %s", data)
+            logger.warning("领域树大模型响应格式无效：%s", data)
             return None
         return str(content).strip()
 
@@ -752,7 +757,7 @@ class DomainTreeAgent:
         try:
             payload = json.loads(candidates[0].read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
-            logger.warning("failed to parse content list %s: %s", candidates[0], error)
+            logger.warning("解析内容列表失败 %s：%s", candidates[0], error)
             return []
 
         entries: list[dict[str, Any]] = []
@@ -804,7 +809,7 @@ class DomainTreeAgent:
                 seen.add(key)
                 entries.append({"level": level, "title": title})
         except OSError as error:
-            logger.warning("failed to read markdown headings %s: %s", markdown_path, error)
+            logger.warning("读取 Markdown 标题失败 %s：%s", markdown_path, error)
         return entries
 
     def _extract_keywords(self, metadata: dict[str, Any], markdown_path: Path | None) -> list[str]:
@@ -913,7 +918,7 @@ class DomainTreeAgent:
             "edges": edges,
         }
 
-    # 
+    # 启发式规则生成领域树标签，当大模型不可用或返回无效 JSON 时使用
     def _heuristic_domain_tree(
         self,
         documents: list[SourceDocument],
@@ -948,6 +953,7 @@ class DomainTreeAgent:
 
         return tree
 
+    # 收集主题候选词
     def _collect_topic_candidates(self, documents: list[SourceDocument]) -> tuple[Counter[str], dict[str, set[str]]]:
         topic_scores: Counter[str] = Counter()
         topic_documents: dict[str, set[str]] = defaultdict(set)
@@ -997,6 +1003,7 @@ class DomainTreeAgent:
                     phrases.append(cleaned)
         return phrases
 
+    # 提取候选短语，用于生成主题标签
     def _extract_candidate_phrases(self, text: str) -> list[str]:
         if not text:
             return []

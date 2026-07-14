@@ -1,3 +1,5 @@
+/* 前端使用的论文、分块与段落摘要数据结构。 */
+
 export type ParagraphSummary = {
   index?: number;
   summary?: string;

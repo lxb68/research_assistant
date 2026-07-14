@@ -1,3 +1,5 @@
+"""集中导出研究代理、编排器和错误恢复组件。"""
+
 from app.agents.domainTree_agent import DomainTreeAgent, handle_domain_tree
 from app.agents.hunter_agent import HunterAgent
 from app.agents.orchestrator_agent import OrchestratorAgent

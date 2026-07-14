@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+# 生成章节路径、段落摘要和适合界面展示的简短文本。
+
 
 def generate_enhanced_summary(
     section: dict[str, Any],
@@ -9,7 +11,7 @@ def generate_enhanced_summary(
     part_index: int | None = None,
     total_parts: int | None = None,
 ) -> str:
-    """Generate a human-readable summary path for a section or split part."""
+    """为章节或拆分片段生成便于阅读的摘要路径。"""
     heading_paths = _build_heading_paths(section, outline)
     if not heading_paths:
         doc_title = _find_document_title(outline) or "文档"
@@ -30,7 +32,7 @@ def generate_summary(
     part_index: int | None = None,
     total_parts: int | None = None,
 ) -> str:
-    """Backward-compatible wrapper."""
+    """保留旧调用方式的兼容包装。"""
     return generate_enhanced_summary(section, outline, part_index, total_parts)
 
 
@@ -39,7 +41,7 @@ def build_paragraph_summaries(
     *,
     max_summary_length: int = 120,
 ) -> list[dict[str, Any]]:
-    """Create concise summaries for each non-empty paragraph in a chunk."""
+    """为片段中的每个非空段落生成简短摘要。"""
     paragraph_summaries: list[dict[str, Any]] = []
     paragraphs = [paragraph.strip() for paragraph in content.split("\n\n") if paragraph.strip()]
 
@@ -56,7 +58,7 @@ def build_paragraph_summaries(
 
 
 def summarize_paragraph(paragraph: str, *, max_length: int = 120) -> str:
-    """Summarize a paragraph by keeping the lead sentence or a trimmed prefix."""
+    """优先保留首句；首句过长时截取前缀作为段落摘要。"""
     normalized = " ".join(paragraph.split())
     normalized = normalized.lstrip("#").strip()
     if not normalized:
