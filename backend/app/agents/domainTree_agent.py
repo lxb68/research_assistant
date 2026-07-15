@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import sqlite3
 from collections import Counter, defaultdict
@@ -12,9 +11,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.request import Request, urlopen
 
 from app.core.config import settings
+from app.services.model_client import chat_completion
+from app.services.model_config import ModelConfigStore
+from app.services.semantic_graph import SemanticGraphExtractor, SemanticSourceDocument
 
 
 logger = logging.getLogger(__name__)
@@ -290,6 +291,7 @@ class DomainTreeAgent:
             tags=tags,
             catalog_text=catalog_text,
             project=project or {},
+            model_runtime=self._resolve_model_runtime(model),
         )
         self.batch_save_tags(
             normalized_project_id,
@@ -496,68 +498,39 @@ class DomainTreeAgent:
 
     def _call_llm(self, prompt: str, *, language: str, model: Any | None) -> str | None:
         """调用大模型生成领域树，并校验返回结构。"""
-        api_key = ""
-        if isinstance(model, dict):
-            api_key = str(model.get("api_key") or model.get("apiKey") or "").strip()
-        if not api_key:
-            api_key = (
-                os.getenv("DOMAIN_TREE_API_KEY")
-                or os.getenv("OPENAI_API_KEY")
-                or settings.llm_translation_api_key
-            ).strip()
-        if not api_key:
+        runtime = self._resolve_model_runtime(model)
+        if not runtime:
             return None
-
-        base_url = ""
-        if isinstance(model, dict):
-            base_url = str(model.get("base_url") or model.get("baseUrl") or "").strip().rstrip("/")
-        if not base_url:
-            base_url = (
-                os.getenv("DOMAIN_TREE_BASE_URL")
-                or os.getenv("OPENAI_BASE_URL")
-                or settings.llm_translation_base_url
-            ).rstrip("/")
-        model_name = self._resolve_model_name(model)
-        system_constraint = ""
-        if isinstance(model, dict):
-            system_constraint = str(model.get("system_constraint") or model.get("systemConstraint") or "").strip()
-        payload = {
-            "model": model_name,
-            "temperature": 0.2,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a precise knowledge classification assistant. "
-                        "Return only valid JSON and do not include markdown fences. "
-                        f"{system_constraint}"
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-        }
-        request = Request(
-            f"{base_url}/chat/completions",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
+        system_constraint = str(runtime.get("system_constraint") or "").strip()
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a precise knowledge classification assistant. "
+                    "Return only valid JSON and do not include markdown fences. "
+                    f"{system_constraint}"
+                ),
             },
-        )
+            {"role": "user", "content": prompt},
+        ]
 
         try:
-            with urlopen(request, timeout=settings.request_timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            return chat_completion(
+                runtime,
+                messages,
+                temperature=0.2,
+                timeout=settings.request_timeout,
+            )
         except Exception as error:
             logger.warning("领域树大模型调用失败：%s", error)
             return None
 
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError):
-            logger.warning("领域树大模型响应格式无效：%s", data)
-            return None
-        return str(content).strip()
+    def _resolve_model_runtime(self, model: Any | None) -> dict[str, str]:
+        """把请求传入的模型设置统一转换为语义抽取可复用的运行时配置。"""
+        runtime = dict(model) if isinstance(model, dict) else ModelConfigStore().build_model_payload()
+        if isinstance(model, str) and model.strip():
+            runtime["model"] = model.strip()
+        return {str(key): str(value) for key, value in runtime.items() if value is not None}
 
     def extract_json_from_llm_output(self, output: str | None) -> list[dict[str, Any]] | None:
         """从大模型文本响应中提取 JSON 对象。"""
@@ -872,8 +845,9 @@ class DomainTreeAgent:
         tags: list[dict[str, Any]],
         catalog_text: str,
         project: dict[str, Any],
+        model_runtime: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """构建知识、图谱。"""
+        """构建领域结构图，并合并全文实体、证据和引用关系。"""
         del catalog_text, project
 
         nodes: list[dict[str, Any]] = []
@@ -943,10 +917,82 @@ class DomainTreeAgent:
                 add_node(section_id, title, "section", level=int(entry.get("level", 1)))
                 add_edge(doc_node_id, section_id, "has_section")
 
+        # 全文语义抽取独立于领域树规则：即使某个实体无法归入领域，也保留其原文证据。
+        semantic_graph = SemanticGraphExtractor(model_runtime).extract(
+            SemanticSourceDocument(
+                record_id=document.record_id,
+                title=document.title,
+                markdown_path=document.markdown_path,
+            )
+            for document in documents
+        )
+        for entity in semantic_graph.get("entities", []):
+            if not isinstance(entity, dict):
+                continue
+            entity_id = str(entity.get("id") or "")
+            add_node(
+                entity_id,
+                str(entity.get("name") or entity_id),
+                "entity",
+                entityType=str(entity.get("type") or "entity"),
+                aliases=entity.get("aliases") or [],
+                attributes=entity.get("attributes") or [],
+                evidenceIds=entity.get("evidenceIds") or [],
+            )
+            for document_id in entity.get("documentIds") or []:
+                add_edge(
+                    f"doc:{document_id}",
+                    entity_id,
+                    "mentions_entity",
+                    evidenceIds=entity.get("evidenceIds") or [],
+                )
+
+        for relation in semantic_graph.get("semanticRelations", []):
+            if not isinstance(relation, dict):
+                continue
+            add_edge(
+                str(relation.get("source") or ""),
+                str(relation.get("target") or ""),
+                "semantic_relation",
+                predicate=str(relation.get("predicate") or ""),
+                relationType=str(relation.get("relationType") or "general"),
+                confidence=relation.get("confidence", 0.5),
+                evidenceIds=relation.get("evidenceIds") or [],
+                documentIds=relation.get("documentIds") or [],
+            )
+
+        for citation in semantic_graph.get("citations", []):
+            if not isinstance(citation, dict):
+                continue
+            source = f"doc:{citation.get('documentId', '')}"
+            matched_document_id = str(citation.get("matchedDocumentId") or "")
+            if matched_document_id:
+                target = f"doc:{matched_document_id}"
+            else:
+                target = str(citation.get("id") or "")
+                add_node(
+                    target,
+                    str(citation.get("title") or citation.get("rawReference") or "未命名参考文献"),
+                    "reference",
+                    referenceNumber=citation.get("referenceNumber"),
+                    rawReference=str(citation.get("rawReference") or ""),
+                    doi=str(citation.get("doi") or ""),
+                    url=str(citation.get("url") or ""),
+                    year=citation.get("year"),
+                )
+            add_edge(
+                source,
+                target,
+                "cites",
+                referenceNumber=citation.get("referenceNumber"),
+                contexts=citation.get("contexts") or [],
+            )
+
         return {
             "projectId": project_id,
             "nodes": nodes,
             "edges": edges,
+            **semantic_graph,
         }
 
     # 启发式规则生成领域树标签，当大模型不可用或返回无效 JSON 时使用
@@ -1267,16 +1313,6 @@ class DomainTreeAgent:
                 replacement = str(value)
             rendered = rendered.replace(f"{{{{{key}}}}}", replacement)
         return rendered
-
-    def _resolve_model_name(self, model: Any | None) -> str:
-        """解析模型名称。"""
-        if isinstance(model, dict):
-            name = model.get("model") or model.get("name")
-            if isinstance(name, str) and name.strip():
-                return name.strip()
-        if isinstance(model, str) and model.strip():
-            return model.strip()
-        return os.getenv("DOMAIN_TREE_MODEL") or os.getenv("OPENAI_MODEL") or settings.llm_translation_model
 
     def _analysis_dir(self, project_id: str) -> Path:
         """返回指定项目的领域树分析目录。"""

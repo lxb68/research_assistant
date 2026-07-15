@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from app.agents import DomainTreeAgent, HunterAgent, OrchestratorAgent
 from app.core.config import settings
 from app.services.mineru import MinerURequest, mineru_processing
+from app.services.model_client import discover_models
 from app.services.model_config import ModelConfigStore
 from app.services.paper_search import SUPPORTED_SOURCES, search_papers
 
@@ -83,9 +84,19 @@ class DomainTreeGenerateRequest(BaseModel):
 
 class ModelConfigRequest(BaseModel):
     """定义模型配置保存接口的请求参数。"""
+    provider: str = Field("", description="供应商标识；为空时按 Base URL 自动识别")
+    protocol: str = Field("", description="模型服务协议；为空时使用供应商默认协议")
     model: str = Field(..., min_length=1, description="模型名称")
     base_url: str = Field(..., min_length=1, description="LLM Base URL")
     api_key: str = Field("", description="LLM API 密钥")
+
+
+class ModelDiscoveryRequest(BaseModel):
+    """定义供应商模型发现接口的请求参数。"""
+    provider: str = Field("", description="供应商标识；为空时按 Base URL 自动识别")
+    protocol: str = Field("", description="模型服务协议；为空时使用供应商默认协议")
+    base_url: str = Field(..., min_length=1, description="模型服务 Base URL")
+    api_key: str = Field("", description="模型服务 API Key；留空时尝试使用同供应商已保存密钥")
 
 
 class ChatMessage(BaseModel):
@@ -248,12 +259,39 @@ def get_model_config() -> dict:
     return {"status": "ok", **store.get_public_config()}
 
 
+@app.get("/api/settings/model-providers")
+def get_model_providers() -> dict:
+    """返回后端支持的模型供应商与协议目录。"""
+    return {"status": "ok", "providers": ModelConfigStore().get_provider_catalog()}
+
+
+@app.post("/api/settings/model-config/discover")
+def discover_provider_models(payload: ModelDiscoveryRequest) -> dict:
+    """连接模型服务并返回当前账号或本地运行时可用的模型。"""
+    try:
+        store = ModelConfigStore()
+        candidate = store.build_candidate(
+            provider=payload.provider,
+            protocol=payload.protocol,
+            base_url=payload.base_url,
+            api_key=payload.api_key,
+        )
+        models = discover_models(candidate)
+        return {"status": "ok", "models": models, "count": len(models)}
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"模型服务连接失败：{error}") from error
+
+
 @app.post("/api/settings/model-config")
 def save_model_config(payload: ModelConfigRequest) -> dict:
     """校验并保存模型配置。"""
     try:
         store = ModelConfigStore()
         result = store.save(
+            provider=payload.provider,
+            protocol=payload.protocol,
             model=payload.model,
             base_url=payload.base_url,
             api_key=payload.api_key,

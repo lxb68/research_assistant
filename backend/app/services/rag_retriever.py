@@ -11,7 +11,14 @@ from typing import Any
 
 import requests
 
-from app.services.embedding_store import EmbeddingClient, SQLiteVectorStore, cosine_similarity
+from app.services.embedding_store import (
+    EmbeddingClient,
+    SQLiteVectorStore,
+    cosine_similarity,
+    tfidf_cosine_scores,
+)
+from app.services.rag_chunking import BaseMarkdownBlock, MarkdownRAGChunker
+from app.services.split import parse_markdown_sections
 
 
 _EXCLUDED_CATEGORIES = {
@@ -40,6 +47,10 @@ class EvidenceChunk:
     url: str = ""
     section: str = ""
     chunk_index: int = 0
+    token_count: int = 0
+    overlap_token_count: int = 0
+    base_chunk_indices: list[int] | None = None
+    summary: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """把当前数据对象转换为接口可返回的字典。"""
@@ -53,6 +64,9 @@ class EvidenceChunk:
             "url": self.url,
             "section": self.section,
             "chunk_index": self.chunk_index,
+            "token_count": self.token_count,
+            "overlap_token_count": self.overlap_token_count,
+            "base_chunk_indices": self.base_chunk_indices or [],
         }
 
 
@@ -62,21 +76,32 @@ class RAGRetriever:
     def __init__(
         self,
         *,
-        chunk_size: int = 1800,
+        target_chunk_tokens: int = 500,
+        max_chunk_tokens: int = 700,
+        overlap_tokens: int = 80,
         max_chunks: int = 6,
         max_context_chars: int = 18000,
         max_chunks_per_paper: int = 2,
         embedding_client: EmbeddingClient | None = None,
+        embedding_clients: list[EmbeddingClient] | None = None,
         vector_store: SQLiteVectorStore | None = None,
         bm25_weight: float = 0.45,
         vector_weight: float = 0.55,
     ) -> None:
         """初始化当前对象所需的配置与运行状态。"""
-        self.chunk_size = max(400, chunk_size)
+        self.chunker = MarkdownRAGChunker(
+            target_tokens=target_chunk_tokens,
+            max_tokens=max_chunk_tokens,
+            overlap_tokens=overlap_tokens,
+        )
         self.max_chunks = max(1, max_chunks)
         self.max_context_chars = max(1000, max_context_chars)
         self.max_chunks_per_paper = max(1, max_chunks_per_paper)
-        self.embedding_client = embedding_client
+        self.embedding_clients = [
+            client
+            for client in [*(embedding_clients or []), *([embedding_client] if embedding_client else [])]
+            if client is not None
+        ]
         self.vector_store = vector_store
         total_weight = max(0.0001, bm25_weight + vector_weight)
         self.bm25_weight = bm25_weight / total_weight
@@ -121,22 +146,35 @@ class RAGRetriever:
             bm25_scores.append(score)
 
         vector_scores = [0.0] * len(candidates)
-        self.last_retrieval_mode = "bm25"
-        if self.embedding_client and self.embedding_client.configured and self.vector_store:
-            try:
-                searchable = [self._searchable_text(chunk) for chunk in candidates]
-                candidate_vectors = self.vector_store.get_or_create(searchable, client=self.embedding_client)
-                query_vector = self.embedding_client.embed([normalized_query])[0]
-                vector_scores = [cosine_similarity(query_vector, vector) for vector in candidate_vectors]
-                self.last_retrieval_mode = "hybrid"
-            except (requests.RequestException, RuntimeError, ValueError):
-                self.last_retrieval_mode = "bm25_fallback"
+        searchable = [self._searchable_text(chunk) for chunk in candidates]
+        embedding_failures: list[str] = []
+        active_embedding_backend = ""
+        self.last_retrieval_mode = "hybrid_tfidf"
+        if self.vector_store:
+            for embedding_client in self.embedding_clients:
+                if not embedding_client.configured:
+                    continue
+                try:
+                    candidate_vectors = self.vector_store.get_or_create(searchable, client=embedding_client)
+                    query_vector = embedding_client.embed([normalized_query])[0]
+                    vector_scores = [cosine_similarity(query_vector, vector) for vector in candidate_vectors]
+                    active_embedding_backend = embedding_client.provider
+                    self.last_retrieval_mode = f"hybrid_{embedding_client.provider}"
+                    break
+                except (requests.RequestException, RuntimeError, ValueError, KeyError, TypeError) as error:
+                    embedding_failures.append(f"{embedding_client.provider}:{type(error).__name__}")
+
+        if not active_embedding_backend:
+            # 百炼与本地嵌入均不可用时仍提供 TF-IDF 稀疏语义得分，不退化为单一 BM25。
+            vector_scores = tfidf_cosine_scores(normalized_query, searchable)
+            active_embedding_backend = "tfidf"
+            self.last_retrieval_mode = "hybrid_tfidf"
 
         normalized_bm25 = self._normalize_scores(bm25_scores)
         normalized_vectors = self._normalize_scores(vector_scores)
         ranked: list[EvidenceChunk] = []
         for index, chunk in enumerate(candidates):
-            if self.last_retrieval_mode == "hybrid":
+            if self.last_retrieval_mode.startswith("hybrid_"):
                 chunk.score = self.bm25_weight * normalized_bm25[index] + self.vector_weight * normalized_vectors[index]
             else:
                 chunk.score = normalized_bm25[index]
@@ -147,9 +185,19 @@ class RAGRetriever:
         selected_text = " ".join(self._searchable_text(item).lower() for item in selected)
         unique_query_tokens = set(query_tokens)
         matched_query_tokens = {token for token in unique_query_tokens if token in selected_text}
+        candidate_token_counts = [item.token_count for item in candidates if item.token_count > 0]
         self.last_diagnostics = {
             "retrievalMode": self.last_retrieval_mode,
+            "embeddingBackend": active_embedding_backend,
+            "embeddingFailures": embedding_failures,
+            "chunkingStrategy": "mineru_structure_semantic_token_overlap",
             "candidateCount": len(candidates),
+            "averageChunkTokens": round(
+                sum(candidate_token_counts) / max(1, len(candidate_token_counts)),
+                2,
+            ),
+            "maxChunkTokens": max(candidate_token_counts, default=0),
+            "overlappedChunkCount": sum(item.overlap_token_count > 0 for item in candidates),
             "evidenceCount": len(selected),
             "distinctPaperCount": len({item.record_id for item in selected}),
             "queryCoverage": round(len(matched_query_tokens) / max(1, len(unique_query_tokens)), 4),
@@ -180,7 +228,7 @@ class RAGRetriever:
         }
         split_chunks = paper.get("splitChunks") or paper.get("split_chunks")
         if isinstance(split_chunks, list):
-            chunks: list[EvidenceChunk] = []
+            base_blocks: list[BaseMarkdownBlock] = []
             for index, raw in enumerate(split_chunks):
                 if not isinstance(raw, dict):
                     continue
@@ -197,16 +245,70 @@ class RAGRetriever:
                 category = str(raw.get("semanticCategory") or raw.get("semantic_category") or "").strip().lower()
                 if self._is_excluded(category=category, section=section, text=f"{summary}\n{content}"):
                     continue
-                text = f"分块摘要：{summary}\n\n{content}" if summary else content
-                chunks.append(EvidenceChunk(**base, text=text, score=0, section=section, chunk_index=index))
-            if chunks:
-                return chunks
+                base_blocks.append(
+                    BaseMarkdownBlock(
+                        content=content,
+                        index=index,
+                        headings=headings,
+                        summary=summary,
+                        semantic_category=category or "body",
+                    )
+                )
+            if base_blocks:
+                outline = paper.get("splitOutline") or paper.get("split_outline") or []
+                prepared = self.chunker.build(
+                    base_blocks,
+                    outline=outline if isinstance(outline, list) else [],
+                )
+                return [
+                    EvidenceChunk(
+                        **base,
+                        text=item.text,
+                        score=0,
+                        section=item.section,
+                        chunk_index=index,
+                        token_count=item.token_count,
+                        overlap_token_count=item.overlap_token_count,
+                        base_chunk_indices=item.base_chunk_indices,
+                        summary=item.summary,
+                    )
+                    for index, item in enumerate(prepared)
+                ]
 
         content = self._read_markdown(paper) or str(paper.get("abstract") or "").strip()
+        outline, sections = parse_markdown_sections(content)
+        fallback_blocks: list[BaseMarkdownBlock] = []
+        for index, section_data in enumerate(sections):
+            section_content = str(section_data.get("content") or "").strip()
+            heading = str(section_data.get("heading") or "").strip()
+            heading_item = {
+                "heading": heading,
+                "level": int(section_data.get("level") or 1),
+                "position": int(section_data.get("position") or index + 1),
+            }
+            if not section_content or self._is_excluded(category="", section=heading, text=section_content):
+                continue
+            fallback_blocks.append(
+                BaseMarkdownBlock(
+                    content=section_content,
+                    index=index,
+                    headings=[heading_item] if heading else [],
+                )
+            )
+        prepared = self.chunker.build(fallback_blocks, outline=outline)
         return [
-            EvidenceChunk(**base, text=text, score=0, chunk_index=index)
-            for index, text in enumerate(self._split_text(content))
-            if text and not self._is_excluded(category="", section="", text=text)
+            EvidenceChunk(
+                **base,
+                text=item.text,
+                score=0,
+                section=item.section,
+                chunk_index=index,
+                token_count=item.token_count,
+                overlap_token_count=item.overlap_token_count,
+                base_chunk_indices=item.base_chunk_indices,
+                summary=item.summary,
+            )
+            for index, item in enumerate(prepared)
         ]
 
     def _read_markdown(self, paper: dict[str, Any]) -> str:
@@ -224,20 +326,6 @@ class RAGRetriever:
                 return path.read_text(encoding="utf-8", errors="ignore")
         return ""
 
-    def _split_text(self, text: str) -> list[str]:
-        """切分文本。"""
-        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
-        chunks: list[str] = []
-        current = ""
-        for paragraph in paragraphs:
-            if current and len(current) + len(paragraph) + 2 > self.chunk_size:
-                chunks.append(current)
-                current = ""
-            current = f"{current}\n\n{paragraph}".strip()
-        if current:
-            chunks.append(current)
-        return chunks
-
     def _is_excluded(self, *, category: str, section: str, text: str) -> bool:
         """判断片段是否属于参考文献等应排除内容。"""
         normalized_category = category.replace("-", "_").replace(" ", "_")
@@ -251,7 +339,7 @@ class RAGRetriever:
 
     def _searchable_text(self, chunk: EvidenceChunk) -> str:
         """拼接证据片段中参与检索的字段。"""
-        return f"{chunk.title} {chunk.section} {chunk.text}"
+        return f"{chunk.title} {chunk.section} {chunk.summary} {chunk.text}"
 
     def _tokenize(self, text: str) -> list[str]:
         """按中英文规则把文本切分为检索词元。"""

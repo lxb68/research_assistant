@@ -340,21 +340,23 @@ export default function DatasetDownloadPage({
       throw new Error("浏览器无法读取后端流式响应");
     }
 
-    let finalResult: DatasetDownloadResponse | null = null;
+    // 回调中的直接赋值不会参与 TypeScript 的跨函数控制流分析，因此用结果数组显式承接最终事件。
+    const finalResults: DatasetDownloadResponse[] = [];
 
     await readNdjsonStream<StreamEvent>(response.body, (event) => {
       onStreamEvent(event);
       if (event.type === "result") {
-        finalResult = {
+        finalResults.push({
           ...event.result,
           errors: event.result.errors ?? [],
           papers: event.result.papers ?? [],
-        };
+        });
       }
       if (event.type === "error") {
         throw new Error(event.message);
       }
     });
+    const finalResult = finalResults.at(-1);
     if (!finalResult) {
       throw new Error("后端没有返回最终结果");
     }

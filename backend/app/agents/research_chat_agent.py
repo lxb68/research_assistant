@@ -7,11 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-import requests
-
 from app.agents.hunter_agent import HunterAgent
 from app.core.config import settings
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
+from app.services.model_client import chat_completion
 from app.services.embedding_store import EmbeddingClient, SQLiteVectorStore
 from app.services.rag_retriever import RAGRetriever
 
@@ -24,7 +23,9 @@ class ResearchAgentConfig:
     """集中描述研究问答代理的运行参数。"""
     max_papers: int = settings.research_agent_max_papers
     max_sources: int = settings.research_agent_max_sources
-    chunk_size: int = settings.research_agent_chunk_size
+    target_chunk_tokens: int = settings.rag_chunk_target_tokens
+    max_chunk_tokens: int = settings.rag_chunk_max_tokens
+    overlap_tokens: int = settings.rag_chunk_overlap_tokens
     max_context_chars: int = settings.research_agent_max_context_chars
     request_timeout: int = settings.research_agent_request_timeout
 
@@ -42,18 +43,35 @@ class ResearchChatAgent:
         self.config = config or ResearchAgentConfig()
         self.log_callback = log_callback
         self.hunter = HunterAgent(log_callback=self._log)
-        embedding_client = EmbeddingClient(
+        bailian_embedding_client = EmbeddingClient(
             base_url=settings.rag_embedding_base_url,
             api_key=settings.rag_embedding_api_key,
             model=settings.rag_embedding_model,
             timeout=settings.rag_embedding_timeout,
+            provider="bailian",
+            protocol="openai_compatible",
+            batch_size=10,
+            requires_api_key=True,
+        )
+        local_embedding_client = EmbeddingClient(
+            base_url=settings.rag_local_embedding_base_url,
+            api_key=settings.rag_local_embedding_api_key,
+            model=settings.rag_local_embedding_model,
+            timeout=settings.rag_local_embedding_timeout,
+            provider=f"local_{settings.rag_local_embedding_protocol}",
+            protocol=settings.rag_local_embedding_protocol,
+            batch_size=16,
+            requires_api_key=False,
         )
         self.retriever = RAGRetriever(
-            chunk_size=self.config.chunk_size,
+            target_chunk_tokens=self.config.target_chunk_tokens,
+            max_chunk_tokens=self.config.max_chunk_tokens,
+            overlap_tokens=self.config.overlap_tokens,
             max_chunks=self.config.max_sources,
             max_context_chars=self.config.max_context_chars,
             max_chunks_per_paper=settings.rag_max_chunks_per_paper,
-            embedding_client=embedding_client,
+            # 顺序即降级优先级：百炼 → 本地 Embedding → TF-IDF（检索器内部兜底）。
+            embedding_clients=[bailian_embedding_client, local_embedding_client],
             vector_store=SQLiteVectorStore(settings.rag_vector_store_path),
             bm25_weight=settings.rag_bm25_weight,
             vector_weight=settings.rag_vector_weight,
@@ -86,6 +104,12 @@ class ResearchChatAgent:
         retrieval_query = self._expand_retrieval_query("\n".join([*recent_questions, normalized_question]))
         evidence = self.retriever.retrieve(retrieval_query, papers)
         self._log(f"检索模式：{self.retriever.last_retrieval_mode}")
+        embedding_backend = str(self.retriever.last_diagnostics.get("embeddingBackend") or "")
+        if embedding_backend:
+            self._log(f"向量后端：{embedding_backend}")
+        embedding_failures = self.retriever.last_diagnostics.get("embeddingFailures") or []
+        if embedding_failures:
+            self._log(f"Embedding 自动降级：{', '.join(str(item) for item in embedding_failures)}")
         if not evidence:
             raise ValueError("知识库中没有可用于回答的已解析文献")
 
@@ -106,6 +130,8 @@ class ResearchChatAgent:
                 "url": item.get("url", ""),
                 "section": item.get("section", ""),
                 "chunkIndex": item.get("chunk_index", 0),
+                "tokenCount": item.get("token_count", 0),
+                "baseChunkIndices": item.get("base_chunk_indices", []),
                 "excerpt": item["text"][:320],
                 "score": round(float(item["score"]), 4),
             }
@@ -167,7 +193,7 @@ class ResearchChatAgent:
     def _complete(
         self,
         *,
-        model: dict[str, str],
+        model: dict[str, Any],
         question: str,
         history: list[dict[str, str]],
         evidence: list[dict[str, Any]],
@@ -184,21 +210,13 @@ class ResearchChatAgent:
                 messages.append({"role": role, "content": content[:6000]})
         messages.append({"role": "user", "content": question})
 
-        response = requests.post(
-            f"{model['base_url'].rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {model['api_key']}", "Content-Type": "application/json"},
-            json={"model": model["model"], "messages": messages, "temperature": 0.2},
+        # 供应商协议差异统一由适配器处理，Agent 只维护通用消息结构。
+        return chat_completion(
+            model,
+            messages,
+            temperature=0.2,
             timeout=self.config.request_timeout,
         )
-        response.raise_for_status()
-        payload = response.json()
-        choices = payload.get("choices") if isinstance(payload, dict) else None
-        if not choices:
-            raise RuntimeError("模型没有返回有效回答")
-        answer = str(choices[0].get("message", {}).get("content") or "").strip()
-        if not answer:
-            raise RuntimeError("模型返回了空回答")
-        return answer
 
     def _load_prompt(self) -> str:
         """加载提示词。"""

@@ -22,6 +22,8 @@ import time
 from app.core.config import settings
 from app.services.ccf_catalog import CcfCatalog
 from app.services.paper_search import SUPPORTED_SOURCES
+from app.services.model_client import chat_completion
+from app.services.model_config import ModelConfigStore
 from app.services.providers.arxiv import ARXIV_API_URL
 from app.services.providers.ieee import IEEE_API_URL
 from app.services.split import (
@@ -1982,44 +1984,31 @@ class HunterAgent:
     
     def _translate_with_llm(self, text: str) -> str | None:
         """调用大模型翻译检索词。"""
-        if not settings.llm_translation_api_key:
-            self._log("大模型翻译跳过：未配置 LLM_TRANSLATION_API_KEY 或 OPENAI_API_KEY")
+        model = ModelConfigStore().build_model_payload()
+        if not model:
+            self._log("大模型翻译跳过：尚未配置可用模型")
             return None
 
-        payload = {
-            "model": settings.llm_translation_model,
-            "temperature": 0,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Translate Chinese academic search keywords into concise English. "
-                        "Return only the translated query, with no explanation."
-                    ),
-                },
-                {"role": "user", "content": text},
-            ],
-        }
-        request = Request(
-            f"{settings.llm_translation_base_url}/chat/completions",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {settings.llm_translation_api_key}",
-                "Content-Type": "application/json",
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Translate Chinese academic search keywords into concise English. "
+                    "Return only the translated query, with no explanation."
+                ),
             },
-        )
+            {"role": "user", "content": text},
+        ]
 
         try:
-            with urlopen(request, timeout=settings.request_timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            translated = chat_completion(
+                model,
+                messages,
+                temperature=0,
+                timeout=settings.request_timeout,
+            )
         except Exception as error:
             self._log(f"大模型翻译失败: {error}")
-            return None
-
-        try:
-            translated = str(data["choices"][0]["message"]["content"]).strip()
-        except (KeyError, IndexError, TypeError):
-            self._log(f"大模型翻译失败：响应格式异常 {data}")
             return None
 
         translated = translated.strip("\"'` \n\r\t")

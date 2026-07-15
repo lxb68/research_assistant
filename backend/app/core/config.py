@@ -78,13 +78,28 @@ class Settings:
     request_timeout = int(os.getenv("REQUEST_TIMEOUT", "15"))
     research_agent_max_papers = int(os.getenv("RESEARCH_AGENT_MAX_PAPERS", "100"))
     research_agent_max_sources = int(os.getenv("RESEARCH_AGENT_MAX_SOURCES", "6"))
-    research_agent_chunk_size = int(os.getenv("RESEARCH_AGENT_CHUNK_SIZE", "1800"))
+    rag_chunk_target_tokens = int(os.getenv("RAG_CHUNK_TARGET_TOKENS", "500"))
+    rag_chunk_max_tokens = int(os.getenv("RAG_CHUNK_MAX_TOKENS", "700"))
+    rag_chunk_overlap_tokens = int(os.getenv("RAG_CHUNK_OVERLAP_TOKENS", "80"))
     research_agent_max_context_chars = int(os.getenv("RESEARCH_AGENT_MAX_CONTEXT_CHARS", "18000"))
     research_agent_request_timeout = int(os.getenv("RESEARCH_AGENT_REQUEST_TIMEOUT", "90"))
-    rag_embedding_model = os.getenv("RAG_EMBEDDING_MODEL", "")
-    rag_embedding_base_url = (os.getenv("RAG_EMBEDDING_BASE_URL") or "").rstrip("/")
-    rag_embedding_api_key = os.getenv("RAG_EMBEDDING_API_KEY", "")
+    # 百炼使用 OpenAI 兼容 Embedding 协议；没有专用变量时复用官方 DASHSCOPE_API_KEY。
+    rag_embedding_model = os.getenv("RAG_EMBEDDING_MODEL", "text-embedding-v4")
+    rag_embedding_base_url = (
+        os.getenv("RAG_EMBEDDING_BASE_URL")
+        or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    ).rstrip("/")
+    rag_embedding_api_key = os.getenv("RAG_EMBEDDING_API_KEY") or os.getenv("DASHSCOPE_API_KEY", "")
     rag_embedding_timeout = int(os.getenv("RAG_EMBEDDING_TIMEOUT", "60"))
+    # 本地后端默认兼容 Ollama；也可切换为 LM Studio 等 OpenAI 兼容嵌入服务。
+    rag_local_embedding_model = os.getenv("RAG_LOCAL_EMBEDDING_MODEL", "")
+    rag_local_embedding_base_url = (
+        os.getenv("RAG_LOCAL_EMBEDDING_BASE_URL")
+        or "http://127.0.0.1:11434"
+    ).rstrip("/")
+    rag_local_embedding_protocol = os.getenv("RAG_LOCAL_EMBEDDING_PROTOCOL", "ollama").strip().lower()
+    rag_local_embedding_api_key = os.getenv("RAG_LOCAL_EMBEDDING_API_KEY", "")
+    rag_local_embedding_timeout = int(os.getenv("RAG_LOCAL_EMBEDDING_TIMEOUT", "15"))
     rag_vector_store_path = os.getenv("RAG_VECTOR_STORE_PATH") or str(
         BACKEND_DIR / "storage" / "metadata" / "rag_vectors.sqlite3",
     )

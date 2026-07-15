@@ -7,6 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.services.model_client import (
+    MODEL_PROVIDERS,
+    get_provider,
+    infer_provider,
+    normalize_protocol,
+    requires_api_key,
+    validate_base_url,
+)
 
 
 SYSTEM_SECURITY_CONSTRAINT = (
@@ -34,7 +42,7 @@ class ModelConfigStore:
             return {}
         return payload if isinstance(payload, dict) else {}
 
-    def load_runtime(self) -> dict[str, str]:
+    def load_runtime(self) -> dict[str, Any]:
         """合并保存配置与环境变量，得到运行时模型配置。"""
         saved = self.load_saved()
         api_key = str(
@@ -55,34 +63,62 @@ class ModelConfigStore:
             or settings.llm_translation_model
             or "",
         ).strip()
+        provider = str(saved.get("provider") or infer_provider(base_url)).strip().lower()
+        provider_config = get_provider(provider)
+        if not base_url:
+            base_url = str(provider_config["baseUrl"]).rstrip("/")
+        protocol = normalize_protocol(str(saved.get("protocol") or ""), provider)
         return {
             "api_key": api_key,
             "base_url": base_url,
             "model": model_name,
+            "provider": provider,
+            "protocol": protocol,
+            "requires_api_key": requires_api_key(provider, protocol),
             "system_constraint": SYSTEM_SECURITY_CONSTRAINT,
         }
 
     def is_configured(self) -> bool:
         """判断模型调用所需配置是否完整。"""
         runtime = self.load_runtime()
-        return bool(runtime["api_key"] and runtime["base_url"] and runtime["model"])
+        has_required_key = bool(runtime["api_key"]) or not runtime["requires_api_key"]
+        return bool(has_required_key and runtime["base_url"] and runtime["model"])
 
-    def save(self, *, model: str, base_url: str, api_key: str) -> dict[str, Any]:
+    def save(
+        self,
+        *,
+        model: str,
+        base_url: str,
+        api_key: str,
+        provider: str = "",
+        protocol: str = "",
+    ) -> dict[str, Any]:
         """校验并持久化模型配置。"""
         normalized_model = str(model).strip()
         normalized_base_url = str(base_url).strip().rstrip("/")
         normalized_api_key = str(api_key).strip()
         existing = self.load_saved()
-        if not normalized_api_key:
+        normalized_provider = str(provider or infer_provider(normalized_base_url)).strip().lower()
+        provider_config = get_provider(normalized_provider)
+        normalized_protocol = normalize_protocol(protocol, normalized_provider)
+        existing_provider = str(
+            existing.get("provider") or infer_provider(existing.get("baseUrl") or existing.get("base_url") or "")
+        ).strip().lower()
+        if not normalized_base_url:
+            normalized_base_url = str(provider_config["baseUrl"]).strip().rstrip("/")
+        if not normalized_api_key and normalized_provider == existing_provider:
             normalized_api_key = str(existing.get("apiKey") or existing.get("api_key") or "").strip()
         if not normalized_model:
             raise ValueError("请先填写模型名称")
         if not normalized_base_url:
             raise ValueError("请先填写模型 Base URL")
-        if not normalized_api_key:
-            raise ValueError("请先填写模型密钥")
+        normalized_base_url = validate_base_url(normalized_base_url)
+        if requires_api_key(normalized_provider, normalized_protocol) and not normalized_api_key:
+            raise ValueError(f"{provider_config['name']} 需要填写 API Key")
 
         payload = {
+            "provider": normalized_provider,
+            "protocol": normalized_protocol,
             "model": normalized_model,
             "baseUrl": normalized_base_url,
             "apiKey": normalized_api_key,
@@ -103,19 +139,58 @@ class ModelConfigStore:
         return {
             "configured": self.is_configured(),
             "hasSavedConfig": has_saved,
+            "provider": runtime["provider"],
+            "protocol": runtime["protocol"],
             "model": runtime["model"],
             "baseUrl": runtime["base_url"],
+            "requiresApiKey": runtime["requires_api_key"],
             "hasApiKey": bool(runtime["api_key"]),
             "maskedApiKey": self._mask_secret(runtime["api_key"]),
             "systemConstraint": SYSTEM_SECURITY_CONSTRAINT,
         }
 
-    def build_model_payload(self) -> dict[str, str] | None:
+    def build_model_payload(self) -> dict[str, Any] | None:
         """构造模型调用参数，配置不完整时返回空值。"""
         runtime = self.load_runtime()
-        if not (runtime["api_key"] and runtime["base_url"] and runtime["model"]):
+        if not self.is_configured():
             return None
         return runtime
+
+    def build_candidate(
+        self,
+        *,
+        provider: str,
+        protocol: str,
+        base_url: str,
+        api_key: str,
+        model: str = "",
+    ) -> dict[str, Any]:
+        """构造用于模型发现或连通性检查的临时配置，不写入磁盘。"""
+        normalized_provider = str(provider or infer_provider(base_url)).strip().lower()
+        provider_config = get_provider(normalized_provider)
+        normalized_protocol = normalize_protocol(protocol, normalized_provider)
+        normalized_base_url = str(base_url or provider_config["baseUrl"]).strip().rstrip("/")
+        normalized_api_key = str(api_key or "").strip()
+        existing = self.load_runtime()
+        if not normalized_api_key and existing["provider"] == normalized_provider:
+            normalized_api_key = str(existing["api_key"] or "")
+        if not normalized_base_url:
+            raise ValueError("请先填写模型 Base URL")
+        normalized_base_url = validate_base_url(normalized_base_url)
+        if requires_api_key(normalized_provider, normalized_protocol) and not normalized_api_key:
+            raise ValueError(f"{provider_config['name']} 需要填写 API Key")
+        return {
+            "provider": normalized_provider,
+            "protocol": normalized_protocol,
+            "base_url": normalized_base_url,
+            "api_key": normalized_api_key,
+            "model": str(model or "").strip(),
+            "system_constraint": SYSTEM_SECURITY_CONSTRAINT,
+        }
+
+    def get_provider_catalog(self) -> list[dict[str, Any]]:
+        """返回前端可安全展示的供应商、协议和默认地址目录。"""
+        return [dict(item) for item in MODEL_PROVIDERS]
 
     def _mask_secret(self, value: str) -> str:
         """脱敏密钥。"""

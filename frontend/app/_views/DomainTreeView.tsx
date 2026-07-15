@@ -16,12 +16,89 @@ type GraphNode = {
   id: string;
   name: string;
   type: string;
+  entityType?: string;
+  aliases?: string[];
+  attributes?: SemanticAttribute[];
+  evidenceIds?: string[];
 };
 
 type GraphEdge = {
   source: string;
   target: string;
   relation: string;
+  predicate?: string;
+  relationType?: string;
+  confidence?: number;
+  evidenceIds?: string[];
+};
+
+type SemanticAttribute = {
+  name: string;
+  value: string;
+  unit?: string;
+  evidenceId?: string;
+};
+
+type SemanticEntity = {
+  id: string;
+  name: string;
+  type: string;
+  aliases?: string[];
+  attributes?: SemanticAttribute[];
+  evidenceIds?: string[];
+  documentIds?: string[];
+};
+
+type SemanticRelation = {
+  id: string;
+  source: string;
+  target: string;
+  predicate: string;
+  relationType: "general" | "causal" | "comparison" | "experimental" | "property" | string;
+  confidence: number;
+  evidenceIds?: string[];
+  documentIds?: string[];
+};
+
+type SemanticEvidence = {
+  id: string;
+  documentId: string;
+  section?: string;
+  chunkIndex?: number;
+  lineStart?: number;
+  quote: string;
+  kind?: string;
+};
+
+type CitationContext = {
+  section?: string;
+  lineStart?: number;
+  quote: string;
+};
+
+type GraphCitation = {
+  id: string;
+  documentId: string;
+  referenceNumber: number;
+  marker: string;
+  title: string;
+  rawReference: string;
+  year?: number | null;
+  doi?: string;
+  url?: string;
+  matchedDocumentId?: string;
+  contexts?: CitationContext[];
+};
+
+type SemanticExtractionStats = {
+  mode?: string;
+  documentCount?: number;
+  processedChunkCount?: number;
+  failedChunkCount?: number;
+  entityCount?: number;
+  semanticRelationCount?: number;
+  citationCount?: number;
+  evidenceCount?: number;
 };
 
 type DomainTreeManifestDocument = {
@@ -43,6 +120,11 @@ type DomainTreeResult = {
   knowledgeGraph?: {
     nodes?: GraphNode[];
     edges?: GraphEdge[];
+    entities?: SemanticEntity[];
+    semanticRelations?: SemanticRelation[];
+    evidence?: SemanticEvidence[];
+    citations?: GraphCitation[];
+    extraction?: SemanticExtractionStats;
   };
   manifest?: {
     documents?: DomainTreeManifestDocument[];
@@ -91,6 +173,14 @@ type ReadableGraphDocument = {
   domains: string[];
   topics: string[];
   sections: string[];
+};
+
+const RELATION_TYPE_LABELS: Record<string, string> = {
+  general: "一般关系",
+  causal: "因果关系",
+  comparison: "比较关系",
+  experimental: "实验关系",
+  property: "属性关系",
 };
 
 const EXCLUDED_CHUNK_CATEGORIES = new Set(["references", "front_matter", "back_matter"]);
@@ -264,7 +354,11 @@ export default function DomainTreePage({
   const existingDocuments = useMemo(() => result?.manifest?.documents ?? [], [result]);
 
   const currentDocumentMap = useMemo(() => {
-    return new Map(markdownReadyPapers.map((paper) => [paper.id || "", paper]).filter(([id]) => Boolean(id)));
+    // flatMap 显式保留二元组类型，同时过滤没有记录 ID 的论文。
+    const entries = markdownReadyPapers.flatMap((paper): Array<[string, SavedPaper]> =>
+      paper.id ? [[paper.id, paper]] : [],
+    );
+    return new Map<string, SavedPaper>(entries);
   }, [markdownReadyPapers]);
 
   const existingDocumentMap = useMemo(() => {
@@ -408,12 +502,55 @@ export default function DomainTreePage({
       { label: "领域下子方向", count: (edgesByRelation.has_subdomain ?? []).length },
       { label: "文献主题关联", count: (edgesByRelation.mentions_topic ?? []).length },
       { label: "文献章节关联", count: (edgesByRelation.has_section ?? []).length },
+      { label: "全文实体提及", count: (edgesByRelation.mentions_entity ?? []).length },
+      { label: "全文语义关系", count: (edgesByRelation.semantic_relation ?? []).length },
+      { label: "文献引用关系", count: (edgesByRelation.cites ?? []).length },
     ].filter((item) => item.count > 0);
 
     return {
       domains: readableDomains,
       documents: readableDocuments,
       relationSummary,
+    };
+  }, [result]);
+
+  const semanticOverview = useMemo(() => {
+    const graph = result?.knowledgeGraph;
+    const entities = graph?.entities ?? [];
+    const relations = graph?.semanticRelations ?? [];
+    const evidence = graph?.evidence ?? [];
+    const citations = graph?.citations ?? [];
+    const entityMap = new Map(entities.map((entity) => [entity.id, entity]));
+    const evidenceMap = new Map(evidence.map((item) => [item.id, item]));
+    const documentTitleMap = new Map(
+      (graph?.nodes ?? [])
+        .filter((node) => node.type === "document")
+        .map((node) => [node.id.replace(/^doc:/, ""), node.name]),
+    );
+
+    const readableRelations = relations.map((relation) => ({
+      ...relation,
+      sourceName: entityMap.get(relation.source)?.name || relation.source,
+      targetName: entityMap.get(relation.target)?.name || relation.target,
+      evidence: (relation.evidenceIds ?? [])
+        .map((id) => evidenceMap.get(id))
+        .filter((item): item is SemanticEvidence => Boolean(item)),
+    }));
+    const entityTypes = entities.reduce<Record<string, number>>((summary, entity) => {
+      const type = entity.type || "未分类实体";
+      summary[type] = (summary[type] ?? 0) + 1;
+      return summary;
+    }, {});
+
+    return {
+      entities,
+      entityTypes,
+      relations: readableRelations,
+      citations: citations.map((citation) => ({
+        ...citation,
+        documentTitle: documentTitleMap.get(citation.documentId) || citation.documentId,
+      })),
+      extraction: graph?.extraction,
     };
   }, [result]);
 
@@ -1048,6 +1185,136 @@ export default function DomainTreePage({
                     </div>
                   </article>
                 </section>
+              </div>
+
+              <div className="domain-tree-semantic-section">
+                <div className="domain-tree-card-head">
+                  <div>
+                    <p>全文语义层</p>
+                    <h2>实体、关系、原文证据与引用</h2>
+                  </div>
+                  {semanticOverview.extraction ? (
+                    <div className="domain-tree-meta">
+                      <span>{semanticOverview.extraction.processedChunkCount ?? 0} 个成功分块</span>
+                      <span>{semanticOverview.extraction.failedChunkCount ?? 0} 个失败分块</span>
+                      <span>{semanticOverview.extraction.evidenceCount ?? 0} 条证据</span>
+                    </div>
+                  ) : null}
+                </div>
+
+                {semanticOverview.entities.length === 0 && semanticOverview.citations.length === 0 ? (
+                  <div className="domain-tree-empty">
+                    <strong>当前图谱尚未包含全文语义层</strong>
+                    <span>重新构建领域树后，系统会从 Markdown 全文抽取实体关系、原文证据和引用。</span>
+                  </div>
+                ) : (
+                  <div className="domain-tree-readable-grid">
+                    <section className="domain-tree-readable-column">
+                      <article className="domain-tree-readable-card">
+                        <div className="domain-tree-card-head">
+                          <div>
+                            <p>实体清单</p>
+                            <h2>{semanticOverview.entities.length} 个规范化实体</h2>
+                          </div>
+                        </div>
+                        <div className="domain-tree-graph-summary">
+                          {Object.entries(semanticOverview.entityTypes).map(([type, count]) => (
+                            <div key={type} className="domain-tree-chip">
+                              <strong>{count}</strong>
+                              <span>{type}</span>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="domain-tree-readable-stack">
+                          {semanticOverview.entities.slice(0, 80).map((entity) => (
+                            <article key={entity.id} className="domain-tree-readable-item">
+                              <strong>{entity.name}</strong>
+                              <span>{entity.type || "未分类实体"}</span>
+                              {(entity.aliases ?? []).length > 0 ? (
+                                <div className="domain-tree-readable-tags">
+                                  {(entity.aliases ?? []).map((alias) => (
+                                    <span key={`${entity.id}-alias-${alias}`}>{alias}</span>
+                                  ))}
+                                </div>
+                              ) : null}
+                              {(entity.attributes ?? []).length > 0 ? (
+                                <ul className="domain-tree-readable-list">
+                                  {(entity.attributes ?? []).map((attribute, index) => (
+                                    <li key={`${entity.id}-attribute-${index}`}>
+                                      {attribute.name}：{attribute.value}{attribute.unit ? ` ${attribute.unit}` : ""}
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : null}
+                            </article>
+                          ))}
+                        </div>
+                        {semanticOverview.entities.length > 80 ? (
+                          <span className="domain-tree-readable-empty">为保证页面流畅，此处展示前 80 个实体，完整数据保存在图谱结果中。</span>
+                        ) : null}
+                      </article>
+
+                      <article className="domain-tree-readable-card">
+                        <div className="domain-tree-card-head">
+                          <div>
+                            <p>引用解析</p>
+                            <h2>{semanticOverview.citations.length} 条参考文献</h2>
+                          </div>
+                        </div>
+                        <div className="domain-tree-readable-stack">
+                          {semanticOverview.citations.slice(0, 80).map((citation) => (
+                            <article key={citation.id} className="domain-tree-readable-item">
+                              <strong>{citation.marker} {citation.title || "未识别标题"}</strong>
+                              <span>
+                                来源：{citation.documentTitle}
+                                {citation.year ? ` · ${citation.year}` : ""}
+                                {citation.matchedDocumentId ? " · 已链接本地文献" : ""}
+                              </span>
+                              {citation.doi ? <span>DOI：{citation.doi}</span> : null}
+                              {(citation.contexts ?? []).slice(0, 2).map((context, index) => (
+                                <blockquote key={`${citation.id}-context-${index}`} className="domain-tree-evidence-quote">
+                                  <span>{context.section || "正文"} · 第 {context.lineStart ?? "?"} 行</span>
+                                  {context.quote}
+                                </blockquote>
+                              ))}
+                            </article>
+                          ))}
+                        </div>
+                      </article>
+                    </section>
+
+                    <section className="domain-tree-readable-column">
+                      <article className="domain-tree-readable-card">
+                        <div className="domain-tree-card-head">
+                          <div>
+                            <p>语义三元组</p>
+                            <h2>{semanticOverview.relations.length} 条实体关系</h2>
+                          </div>
+                        </div>
+                        <div className="domain-tree-readable-stack">
+                          {semanticOverview.relations.slice(0, 100).map((relation) => (
+                            <article key={relation.id} className="domain-tree-readable-item">
+                              <strong>{relation.sourceName} —{relation.predicate}→ {relation.targetName}</strong>
+                              <span>
+                                {RELATION_TYPE_LABELS[relation.relationType] ?? relation.relationType}
+                                {` · 置信度 ${Math.round((relation.confidence ?? 0) * 100)}%`}
+                              </span>
+                              {relation.evidence.slice(0, 3).map((item) => (
+                                <blockquote key={item.id} className="domain-tree-evidence-quote">
+                                  <span>{item.section || "正文"} · 第 {item.lineStart ?? "?"} 行</span>
+                                  {item.quote}
+                                </blockquote>
+                              ))}
+                            </article>
+                          ))}
+                        </div>
+                        {semanticOverview.relations.length > 100 ? (
+                          <span className="domain-tree-readable-empty">为保证页面流畅，此处展示前 100 条关系，完整数据保存在图谱结果中。</span>
+                        ) : null}
+                      </article>
+                    </section>
+                  </div>
+                )}
               </div>
             </article>
           </div>

@@ -26,11 +26,71 @@ type SettingsState = {
 
 type ModelConfigResponse = {
   configured?: boolean;
+  provider?: string;
+  protocol?: ModelProtocol;
   model?: string;
   baseUrl?: string;
+  requiresApiKey?: boolean;
   hasApiKey?: boolean;
   maskedApiKey?: string;
   systemConstraint?: string;
+};
+
+type ModelProtocol = "openai_compatible" | "ollama" | "anthropic" | "gemini";
+
+type ModelProvider = {
+  id: string;
+  name: string;
+  protocol: ModelProtocol;
+  baseUrl: string;
+  requiresApiKey: boolean;
+  modelPlaceholder: string;
+};
+
+type ModelProvidersResponse = {
+  providers?: ModelProvider[];
+  detail?: string;
+};
+
+type ModelDiscoveryResponse = {
+  models?: string[];
+  count?: number;
+  detail?: string;
+};
+
+// 后端目录加载前使用最小兜底项，确保设置页始终可以编辑自定义服务。
+const fallbackProviders: ModelProvider[] = [
+  {
+    id: "openai",
+    name: "OpenAI",
+    protocol: "openai_compatible",
+    baseUrl: "https://api.openai.com/v1",
+    requiresApiKey: true,
+    modelPlaceholder: "例如 gpt-4o-mini",
+  },
+  {
+    id: "ollama",
+    name: "Ollama（本地）",
+    protocol: "ollama",
+    baseUrl: "http://127.0.0.1:11434",
+    requiresApiKey: false,
+    modelPlaceholder: "例如 qwen3:8b",
+  },
+  {
+    id: "custom",
+    name: "自定义服务",
+    protocol: "openai_compatible",
+    baseUrl: "",
+    requiresApiKey: false,
+    modelPlaceholder: "请输入服务端使用的模型 ID",
+  },
+];
+
+const protocolLabels: Record<ModelProtocol, string> = {
+  openai_compatible: "OpenAI 兼容协议",
+  ollama: "Ollama 原生协议",
+  anthropic: "Anthropic Messages 协议",
+  gemini: "Gemini generateContent 协议",
 };
 
 const defaultSettings: SettingsState = {
@@ -95,6 +155,9 @@ export default function SettingsWorkspace() {
   });
   const [activeTab, setActiveTab] = useState<TabIndex>(0);
   const [saved, setSaved] = useState(false);
+  const [providers, setProviders] = useState<ModelProvider[]>(fallbackProviders);
+  const [providerId, setProviderId] = useState("openai");
+  const [protocol, setProtocol] = useState<ModelProtocol>("openai_compatible");
   const [modelName, setModelName] = useState(defaultSettings.selectedModel);
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKeyInput, setApiKeyInput] = useState("");
@@ -102,9 +165,15 @@ export default function SettingsWorkspace() {
   const [modelConfigured, setModelConfigured] = useState(false);
   const [isLoadingModelConfig, setIsLoadingModelConfig] = useState(true);
   const [isSavingModelConfig, setIsSavingModelConfig] = useState(false);
+  const [isDiscoveringModels, setIsDiscoveringModels] = useState(false);
+  const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
   const [modelMessage, setModelMessage] = useState("");
   const [modelError, setModelError] = useState("");
   const [systemConstraint, setSystemConstraint] = useState("");
+  const selectedProvider = providers.find((item) => item.id === providerId) ?? fallbackProviders[2];
+  const apiKeyRequired = selectedProvider.id === "custom"
+    ? protocol === "anthropic" || protocol === "gemini"
+    : selectedProvider.requiresApiKey;
 
   /** 以类型安全方式更新单个设置字段。 */
   function set<K extends keyof SettingsState>(key: K, value: SettingsState[K]) {
@@ -124,16 +193,27 @@ export default function SettingsWorkspace() {
       setModelError("");
 
       try {
-        const response = await fetch(buildApiUrl("/api/settings/model-config"));
-        const payload = (await response.json().catch(() => ({}))) as ModelConfigResponse & { detail?: string };
-        if (!response.ok) {
+        const [configResponse, providersResponse] = await Promise.all([
+          fetch(buildApiUrl("/api/settings/model-config")),
+          fetch(buildApiUrl("/api/settings/model-providers")),
+        ]);
+        const payload = (await configResponse.json().catch(() => ({}))) as ModelConfigResponse & { detail?: string };
+        const providersPayload = (await providersResponse.json().catch(() => ({}))) as ModelProvidersResponse;
+        if (!configResponse.ok) {
           throw new Error(payload.detail || "加载模型配置失败");
+        }
+        if (!providersResponse.ok) {
+          throw new Error(providersPayload.detail || "加载模型供应商失败");
         }
 
         if (cancelled) {
           return;
         }
 
+        const nextProviders = providersPayload.providers?.length ? providersPayload.providers : fallbackProviders;
+        setProviders(nextProviders);
+        setProviderId(payload.provider || "custom");
+        setProtocol(payload.protocol || "openai_compatible");
         setModelConfigured(Boolean(payload.configured));
         setMaskedApiKey(payload.maskedApiKey || "");
         setBaseUrl(payload.baseUrl || "");
@@ -182,6 +262,8 @@ export default function SettingsWorkspace() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
+          provider: providerId,
+          protocol,
           model: modelName,
           base_url: baseUrl,
           api_key: apiKeyInput,
@@ -193,6 +275,8 @@ export default function SettingsWorkspace() {
       }
 
       setModelConfigured(Boolean(payload.configured));
+      setProviderId(payload.provider || providerId);
+      setProtocol(payload.protocol || protocol);
       setMaskedApiKey(payload.maskedApiKey || "");
       setSystemConstraint(payload.systemConstraint || "");
       setApiKeyInput("");
@@ -206,11 +290,64 @@ export default function SettingsWorkspace() {
     }
   }
 
+  /** 切换供应商，并应用其默认协议、地址和模型提示。 */
+  function selectProvider(nextProviderId: string) {
+    const nextProvider = providers.find((item) => item.id === nextProviderId) ?? fallbackProviders[2];
+    setProviderId(nextProvider.id);
+    setProtocol(nextProvider.protocol);
+    setBaseUrl(nextProvider.baseUrl);
+    setModelName("");
+    setApiKeyInput("");
+    setMaskedApiKey("");
+    setDiscoveredModels([]);
+    setModelConfigured(false);
+    setModelError("");
+    setModelMessage(`${nextProvider.name} 已选中，请发现或填写模型后保存。`);
+  }
+
+  /** 从当前云端账号或本地运行时发现可用模型列表。 */
+  async function discoverAvailableModels() {
+    setIsDiscoveringModels(true);
+    setModelError("");
+    setModelMessage("");
+    try {
+      const response = await fetch(buildApiUrl("/api/settings/model-config/discover"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: providerId,
+          protocol,
+          base_url: baseUrl,
+          api_key: apiKeyInput,
+        }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as ModelDiscoveryResponse;
+      if (!response.ok) {
+        throw new Error(payload.detail || "发现模型失败");
+      }
+      const models = payload.models || [];
+      setDiscoveredModels(models);
+      if (!modelName && models.length > 0) {
+        setModelName(models[0]);
+      }
+      setModelMessage(models.length > 0 ? `已发现 ${models.length} 个可用模型。` : "服务连接成功，但没有返回可用模型。");
+    } catch (error) {
+      setDiscoveredModels([]);
+      setModelError(error instanceof Error ? error.message : "发现模型失败");
+    } finally {
+      setIsDiscoveringModels(false);
+    }
+  }
+
   /** 恢复设置表单的默认值。 */
   function reset() {
     setSettings(defaultSettings);
+    setProviderId("openai");
+    setProtocol("openai_compatible");
     setModelName(defaultSettings.selectedModel);
+    setBaseUrl("https://api.openai.com/v1");
     setApiKeyInput("");
+    setDiscoveredModels([]);
     window.localStorage.removeItem(WORKSPACE_SETTINGS_STORAGE_KEY);
     setSaved(true);
   }
@@ -271,19 +408,80 @@ export default function SettingsWorkspace() {
               <div className="settings-row">
                 <span className="settings-row-label">当前状态</span>
                 <div className={`workspace-status ${modelConfigured ? "workspace-status-active" : ""}`}>
-                  {isLoadingModelConfig ? "正在读取模型配置..." : modelConfigured ? "模型参数已配置" : "尚未配置模型参数"}
+                  {isLoadingModelConfig
+                    ? "正在读取模型配置..."
+                    : modelConfigured
+                      ? `${selectedProvider.name} / ${modelName} 已配置`
+                      : "尚未配置可用模型"}
                 </div>
               </div>
 
               <label className="settings-row">
-                <span className="settings-row-label">模型名称</span>
-                <input
-                  type="text"
+                <span className="settings-row-label">模型供应商</span>
+                <select
                   className="settings-input"
-                  value={modelName}
-                  onChange={(e) => setModelName(e.target.value)}
-                  placeholder="例如 gpt-4o-mini"
-                />
+                  value={providerId}
+                  onChange={(event) => selectProvider(event.target.value)}
+                >
+                  {providers.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.name}
+                    </option>
+                  ))}
+                </select>
+                <span className="settings-hint">
+                  选择供应商会自动填入推荐协议和 Base URL；自定义服务可手工调整协议。
+                </span>
+              </label>
+
+              {providerId === "custom" ? (
+                <label className="settings-row">
+                  <span className="settings-row-label">接口协议</span>
+                  <select
+                    className="settings-input"
+                    value={protocol}
+                    onChange={(event) => setProtocol(event.target.value as ModelProtocol)}
+                  >
+                    {Object.entries(protocolLabels).map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <div className="settings-row">
+                  <span className="settings-row-label">接口协议</span>
+                  <div className="settings-readonly-value">{protocolLabels[protocol]}</div>
+                </div>
+              )}
+
+              <label className="settings-row">
+                <span className="settings-row-label">模型名称</span>
+                <div className="settings-model-picker">
+                  <input
+                    type="text"
+                    className="settings-input settings-input-mono"
+                    value={modelName}
+                    onChange={(e) => setModelName(e.target.value)}
+                    placeholder={selectedProvider.modelPlaceholder}
+                    list="available-model-options"
+                  />
+                  <button
+                    type="button"
+                    className="settings-btn settings-btn-ghost settings-discover-btn"
+                    onClick={() => { void discoverAvailableModels(); }}
+                    disabled={isDiscoveringModels || !baseUrl.trim()}
+                  >
+                    {isDiscoveringModels ? "发现中..." : "发现模型"}
+                  </button>
+                </div>
+                <datalist id="available-model-options">
+                  {discoveredModels.map((model) => <option key={model} value={model} />)}
+                </datalist>
+                <span className="settings-hint">
+                  {providerId === "ollama"
+                    ? "从本机 Ollama 的 /api/tags 读取已安装模型，请先启动 Ollama 服务。"
+                    : "可点击“发现模型”读取账号可用模型，也可以直接填写模型 ID。"}
+                </span>
               </label>
 
               <label className="settings-row">
@@ -293,21 +491,33 @@ export default function SettingsWorkspace() {
                   className="settings-input settings-input-mono"
                   value={baseUrl}
                   onChange={(e) => setBaseUrl(e.target.value)}
-                  placeholder="https://api.openai.com/v1"
+                  placeholder={selectedProvider.baseUrl || "请输入模型服务根地址"}
                 />
+                <span className="settings-hint">填写 API 根地址即可，不要重复添加具体聊天端点。</span>
               </label>
 
               <label className="settings-row">
-                <span className="settings-row-label">模型密钥</span>
+                <span className="settings-row-label">API Key{apiKeyRequired ? "（必填）" : "（可选）"}</span>
                 <input
                   type="password"
                   className="settings-input settings-input-mono"
                   value={apiKeyInput}
                   onChange={(e) => setApiKeyInput(e.target.value)}
-                  placeholder={maskedApiKey ? "留空则继续使用当前密钥" : "请输入新的模型密钥"}
+                  placeholder={
+                    providerId === "ollama"
+                      ? "Ollama 本地服务不需要密钥"
+                      : maskedApiKey
+                        ? "留空则继续使用当前供应商密钥"
+                        : apiKeyRequired
+                          ? "请输入供应商 API Key"
+                          : "本地服务通常可以留空"
+                  }
+                  disabled={providerId === "ollama"}
                   autoComplete="new-password"
                 />
-                <span className="settings-hint">已保存的密钥只会以掩码形式显示，接口不会返回明文。</span>
+                <span className="settings-hint">
+                  密钥只保存在后端并以掩码形式显示；切换供应商时不会复用其他供应商的密钥。
+                </span>
                 {maskedApiKey ? <span className="settings-secret-preview">当前密钥：{maskedApiKey}</span> : null}
               </label>
 

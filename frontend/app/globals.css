@@ -1871,6 +1871,44 @@ textarea.settings-input {
   min-height: 200px;
 }
 
+/* 单行代码输入框仍保持标准表单高度，避免继承多行 Prompt 的高度。 */
+input.settings-input-mono,
+select.settings-input-mono {
+  min-height: 44px;
+}
+
+/* 模型名称输入框与实时发现按钮并排展示。 */
+.settings-model-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.settings-discover-btn {
+  white-space: nowrap;
+}
+
+/* 非自定义供应商的协议只读展示，避免误改导致请求格式不匹配。 */
+.settings-readonly-value {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.34);
+  color: rgba(191, 219, 254, 0.88);
+  font-size: 0.8125rem;
+}
+
+@media (max-width: 640px) {
+  /* 小屏下把模型发现按钮移到输入框下方，避免横向挤压。 */
+  .settings-model-picker {
+    grid-template-columns: 1fr;
+  }
+}
+
 select.settings-input {
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2393c5fd' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
@@ -2596,6 +2634,33 @@ select.settings-input {
 .domain-tree-readable-empty {
   color: #94a3b8;
   font-size: 0.9rem;
+}
+
+.domain-tree-semantic-section {
+  display: grid;
+  gap: 16px;
+  margin-top: 24px;
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
+  padding-top: 22px;
+}
+
+.domain-tree-evidence-quote {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  border-left: 3px solid #38bdf8;
+  border-radius: 0 10px 10px 0;
+  background: rgba(240, 249, 255, 0.86);
+  color: #334155;
+  font-size: 0.86rem;
+  line-height: 1.65;
+  padding: 10px 12px;
+}
+
+.domain-tree-evidence-quote span {
+  color: #0369a1;
+  font-size: 0.76rem;
+  font-weight: 800;
 }
 
 .domain-tree-secondary-button {
