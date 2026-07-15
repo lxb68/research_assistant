@@ -76,6 +76,11 @@ class Settings:
         or "gpt-4o-mini"
     )
     request_timeout = int(os.getenv("REQUEST_TIMEOUT", "15"))
+    domain_tree_retry_attempts = max(1, int(os.getenv("DOMAIN_TREE_RETRY_ATTEMPTS", "3")))
+    domain_tree_retry_base_delay_seconds = max(
+        0.0,
+        float(os.getenv("DOMAIN_TREE_RETRY_BASE_DELAY_SECONDS", "2")),
+    )
     research_agent_max_papers = int(os.getenv("RESEARCH_AGENT_MAX_PAPERS", "100"))
     research_agent_max_sources = int(os.getenv("RESEARCH_AGENT_MAX_SOURCES", "6"))
     rag_chunk_target_tokens = int(os.getenv("RAG_CHUNK_TARGET_TOKENS", "500"))
@@ -124,6 +129,15 @@ class Settings:
         BACKEND_DIR / "storage" / "markdown",
     )
     mineru_api_token = os.getenv("MINERU_API_TOKEN", "")
+    mineru_api_base = os.getenv("MINERU_API_BASE", "https://mineru.net/api/v4").rstrip("/")
+    mineru_model_version = os.getenv("MINERU_MODEL_VERSION", "vlm").strip() or "vlm"
+    mineru_poll_interval_seconds = float(os.getenv("MINERU_POLL_INTERVAL_SECONDS", "3"))
+    mineru_cloud_timeout_seconds = int(os.getenv("MINERU_CLOUD_TIMEOUT_SECONDS", "1800"))
+    mineru_request_timeout_seconds = int(os.getenv("MINERU_REQUEST_TIMEOUT_SECONDS", "120"))
+    mineru_enable_local_cli_fallback = os.getenv(
+        "MINERU_ENABLE_LOCAL_CLI_FALLBACK",
+        "false",
+    ).strip().lower() in {"1", "true", "yes", "on"}
     split_min_length = int(os.getenv("SPLIT_MIN_LENGTH", "1500"))
     split_max_length = int(os.getenv("SPLIT_MAX_LENGTH", "2000"))
     hunter_metadata_db = os.getenv("HUNTER_METADATA_DB") or str(

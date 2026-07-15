@@ -6,12 +6,18 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from app.core.config import settings
 from app.services.model_client import chat_completion
+from app.services.task_control import (
+    DomainTreeGenerationCancelled,
+    call_with_retry,
+    raise_if_cancelled,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -56,15 +62,20 @@ class SemanticGraphExtractor:
         chat_fn: Callable[..., str] = chat_completion,
         chunk_size: int = 6000,
         chunk_overlap: int = 400,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         """初始化模型配置、调用函数与分块参数。"""
         self.runtime = dict(runtime or {})
         self.chat_fn = chat_fn
         self.chunk_size = max(1200, chunk_size)
         self.chunk_overlap = max(0, min(chunk_overlap, self.chunk_size // 3))
+        self.cancel_event = cancel_event
+        self.progress_callback = progress_callback
 
     def extract(self, documents: Iterable[SemanticSourceDocument]) -> dict[str, Any]:
         """抽取所有文献并合并跨分块重复实体。"""
+        raise_if_cancelled(self.cancel_event)
         source_documents = list(documents)
         local_titles = {
             self._normalize_name(document.title): document.record_id
@@ -82,13 +93,34 @@ class SemanticGraphExtractor:
             "documentCount": len(source_documents),
         }
 
+        prepared_documents: list[
+            tuple[SemanticSourceDocument, str, str, int, list[TextChunk]]
+        ] = []
         for document in source_documents:
+            raise_if_cancelled(self.cancel_event)
             markdown = self._read_markdown(document)
             if not markdown:
                 logger.warning("[%s] Markdown 正文为空，跳过全文语义抽取", document.record_id)
                 continue
 
             body, reference_text, reference_start_line = self.split_reference_section(markdown)
+            prepared_documents.append(
+                (document, body, reference_text, reference_start_line, self.split_chunks(body))
+            )
+
+        total_chunks = sum(len(item[4]) for item in prepared_documents)
+        completed_chunks = 0
+        self._report_progress(
+            stage="semantic_extraction",
+            message=f"准备抽取 {total_chunks} 个语义分块",
+            totalChunks=total_chunks,
+            completedChunks=0,
+            processedChunks=0,
+            failedChunks=0,
+        )
+
+        for document, body, reference_text, reference_start_line, chunks in prepared_documents:
+            raise_if_cancelled(self.cancel_event)
             citations = self.parse_citations(
                 document,
                 body,
@@ -98,15 +130,27 @@ class SemanticGraphExtractor:
             )
             state["citations"].extend(citations)
 
-            chunks = self.split_chunks(body)
             logger.info("[%s] 开始抽取全文语义，共 %s 个正文分块", document.record_id, len(chunks))
             for chunk in chunks:
+                raise_if_cancelled(self.cancel_event)
+                self._report_progress(
+                    stage="semantic_extraction",
+                    message=f"正在抽取第 {completed_chunks + 1}/{total_chunks} 个语义分块",
+                    currentChunk=completed_chunks + 1,
+                    currentDocumentId=document.record_id,
+                )
                 payload = self._extract_chunk(document, chunk)
+                completed_chunks += 1
                 if payload is None:
                     state["failedChunkCount"] += 1
-                    continue
-                state["processedChunkCount"] += 1
-                self._merge_chunk_payload(state, document, chunk, payload)
+                else:
+                    state["processedChunkCount"] += 1
+                    self._merge_chunk_payload(state, document, chunk, payload)
+                self._report_progress(
+                    completedChunks=completed_chunks,
+                    processedChunks=state["processedChunkCount"],
+                    failedChunks=state["failedChunkCount"],
+                )
 
         entities = sorted(state["entities"].values(), key=lambda item: (item["type"], item["name"].lower()))
         relations = sorted(
@@ -137,6 +181,11 @@ class SemanticGraphExtractor:
                 "evidenceCount": len(evidence),
             },
         }
+
+    def _report_progress(self, **update: Any) -> None:
+        """把进度增量上报给任务管理器。"""
+        if self.progress_callback:
+            self.progress_callback(update)
 
     def split_reference_section(self, markdown: str) -> tuple[str, str, int]:
         """把正文和文末参考文献分开，并返回参考文献起始行。"""
@@ -256,13 +305,27 @@ class SemanticGraphExtractor:
             {"role": "user", "content": prompt},
         ]
         try:
-            answer = self.chat_fn(
-                self.runtime,
-                messages,
-                temperature=0.0,
-                timeout=settings.request_timeout,
+            answer = call_with_retry(
+                lambda: self.chat_fn(
+                    self.runtime,
+                    messages,
+                    temperature=0.0,
+                    timeout=settings.request_timeout,
+                ),
+                max_attempts=settings.domain_tree_retry_attempts,
+                base_delay_seconds=settings.domain_tree_retry_base_delay_seconds,
+                cancel_event=self.cancel_event,
+                on_retry=lambda attempt, error, delay: self._on_chunk_retry(
+                    document,
+                    chunk,
+                    attempt,
+                    error,
+                    delay,
+                ),
             )
             return self._extract_json_object(answer)
+        except DomainTreeGenerationCancelled:
+            raise
         except Exception as error:
             logger.warning(
                 "[%s] 第 %s 个语义分块抽取失败：%s",
@@ -271,6 +334,31 @@ class SemanticGraphExtractor:
                 error,
             )
             return None
+
+    def _on_chunk_retry(
+        self,
+        document: SemanticSourceDocument,
+        chunk: TextChunk,
+        attempt: int,
+        error: Exception,
+        delay: float,
+    ) -> None:
+        """记录可恢复失败，并把重试状态暴露给前端。"""
+        next_attempt = attempt + 1
+        logger.warning(
+            "[%s] 第 %s 个语义分块第 %s 次调用失败，%.1f 秒后进行第 %s 次：%s",
+            document.record_id,
+            chunk.index,
+            attempt,
+            delay,
+            next_attempt,
+            error,
+        )
+        self._report_progress(
+            message=f"第 {chunk.index} 个分块请求超时，正在进行第 {next_attempt} 次尝试",
+            retryAttempt=next_attempt,
+            retryDelaySeconds=delay,
+        )
 
     def _build_extraction_prompt(self, document: SemanticSourceDocument, chunk: TextChunk) -> str:
         """构造严格、可被多种模型理解的 JSON 抽取提示词。"""

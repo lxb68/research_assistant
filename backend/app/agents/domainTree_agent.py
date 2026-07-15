@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import sqlite3
+import threading
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.core.config import settings
 from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore
 from app.services.semantic_graph import SemanticGraphExtractor, SemanticSourceDocument
+from app.services.task_control import (
+    DomainTreeGenerationCancelled,
+    call_with_retry,
+    raise_if_cancelled,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -224,8 +231,44 @@ class DomainTreeAgent:
         language: str = "中文",
         delete_toc: str | None = None,
         project: dict[str, Any] | None = None,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]] | None:
-        """根据请求动作生成、修订或读取领域树结果。"""
+        """在线程中生成领域树，避免同步模型请求阻塞事件循环。"""
+        return await asyncio.to_thread(
+            self.handle_domain_tree_sync,
+            project_id,
+            action=action,
+            all_toc=all_toc,
+            new_toc=new_toc,
+            model=model,
+            language=language,
+            delete_toc=delete_toc,
+            project=project,
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
+        )
+
+    def handle_domain_tree_sync(
+        self,
+        project_id: str,
+        *,
+        action: str = "rebuild",
+        all_toc: str | None = None,
+        new_toc: str | None = None,
+        model: Any | None = None,
+        language: str = "中文",
+        delete_toc: str | None = None,
+        project: dict[str, Any] | None = None,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[dict[str, Any]] | None:
+        """同步执行领域树主流程，供工作线程和测试直接调用。"""
+        def report(**update: Any) -> None:
+            if progress_callback:
+                progress_callback(update)
+
+        raise_if_cancelled(cancel_event)
         normalized_project_id = self._normalize_project_id(project_id)
         # 直接调用 get_tags 返回当前已存储的标签，不进行任何计算或生成
         if action == "keep":
@@ -236,6 +279,8 @@ class DomainTreeAgent:
         if not documents:
             logger.warning("[%s] 存储目录中未找到 Markdown 来源", normalized_project_id)
             return None
+
+        report(stage="domain_tree", message="正在准备文献目录", documentCount=len(documents))
 
         #
         catalog_text = all_toc or self._build_catalog_text(documents)
@@ -272,12 +317,16 @@ class DomainTreeAgent:
             prompt = self.get_label_prompt(language, {"text": catalog_text[:100000]})
 
         # 生成领域树标签
+        raise_if_cancelled(cancel_event)
+        report(stage="domain_tree", message="正在调用模型生成领域树")
         tags = self._generate_domain_tree(
             prompt=prompt,
             documents=documents,
             catalog_text=catalog_text,
             language=language,
             model=model,
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
         )
         tags = self._refine_tree_specificity(tags, documents)
         if not tags:
@@ -285,6 +334,8 @@ class DomainTreeAgent:
             return None
 
         # 构建知识图谱
+        raise_if_cancelled(cancel_event)
+        report(stage="knowledge_graph", message="正在构建知识图谱并抽取全文语义")
         graph = self._build_knowledge_graph(
             project_id=normalized_project_id,
             documents=documents,
@@ -292,7 +343,11 @@ class DomainTreeAgent:
             catalog_text=catalog_text,
             project=project or {},
             model_runtime=self._resolve_model_runtime(model),
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
         )
+        raise_if_cancelled(cancel_event)
+        report(stage="saving", message="正在保存领域树和知识图谱")
         self.batch_save_tags(
             normalized_project_id,
             tags,
@@ -487,16 +542,32 @@ class DomainTreeAgent:
         catalog_text: str,
         language: str,
         model: Any | None,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
-        """生成领域、树。"""
-        llm_output = self._call_llm(prompt, language=language, model=model)
+        """生成领域树。"""
+        llm_output = self._call_llm(
+            prompt,
+            language=language,
+            model=model,
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
+        )
         tags = self.extract_json_from_llm_output(llm_output) if llm_output else None
         if tags:
             return self.filter_domain_tree(tags)
         logger.info("大模型不可用或返回了无效 JSON，改用启发式规则生成领域树")
         return self._heuristic_domain_tree(documents, catalog_text)
 
-    def _call_llm(self, prompt: str, *, language: str, model: Any | None) -> str | None:
+    def _call_llm(
+        self,
+        prompt: str,
+        *,
+        language: str,
+        model: Any | None,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> str | None:
         """调用大模型生成领域树，并校验返回结构。"""
         runtime = self._resolve_model_runtime(model)
         if not runtime:
@@ -515,15 +586,47 @@ class DomainTreeAgent:
         ]
 
         try:
-            return chat_completion(
-                runtime,
-                messages,
-                temperature=0.2,
-                timeout=settings.request_timeout,
+            return call_with_retry(
+                lambda: chat_completion(
+                    runtime,
+                    messages,
+                    temperature=0.2,
+                    timeout=settings.request_timeout,
+                ),
+                max_attempts=settings.domain_tree_retry_attempts,
+                base_delay_seconds=settings.domain_tree_retry_base_delay_seconds,
+                cancel_event=cancel_event,
+                on_retry=lambda attempt, error, delay: self._report_model_retry(
+                    progress_callback,
+                    attempt,
+                    error,
+                    delay,
+                ),
             )
+        except DomainTreeGenerationCancelled:
+            raise
         except Exception as error:
             logger.warning("领域树大模型调用失败：%s", error)
             return None
+
+    def _report_model_retry(
+        self,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+        attempt: int,
+        error: Exception,
+        delay: float,
+    ) -> None:
+        """记录领域树模型调用的退避重试。"""
+        logger.warning("领域树大模型第 %s 次调用失败，%.1f 秒后重试：%s", attempt, delay, error)
+        if progress_callback:
+            progress_callback(
+                {
+                    "stage": "domain_tree",
+                    "message": f"领域树模型调用超时，正在进行第 {attempt + 1} 次尝试",
+                    "retryAttempt": attempt + 1,
+                    "retryDelaySeconds": delay,
+                }
+            )
 
     def _resolve_model_runtime(self, model: Any | None) -> dict[str, str]:
         """把请求传入的模型设置统一转换为语义抽取可复用的运行时配置。"""
@@ -846,6 +949,8 @@ class DomainTreeAgent:
         catalog_text: str,
         project: dict[str, Any],
         model_runtime: dict[str, str] | None = None,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """构建领域结构图，并合并全文实体、证据和引用关系。"""
         del catalog_text, project
@@ -855,6 +960,7 @@ class DomainTreeAgent:
         node_ids: set[str] = set()
         edge_keys: set[tuple[str, str, str]] = set()
         domain_keywords = self._domain_keywords_from_tree(tags)
+        print("[DEBUG] domain_keywords:", domain_keywords)
 
         def add_node(node_id: str, name: str, node_type: str, **extra: Any) -> None:
             """向知识图谱加入一个去重后的节点。"""
@@ -873,6 +979,7 @@ class DomainTreeAgent:
 
         add_node(f"project:{project_id}", project_id, "project")
 
+        # 将层级化的一二级标签数据转换为图结构
         for top_index, tag in enumerate(tags, start=1):
             label = str(tag.get("label", "")).strip()
             if not label:
@@ -899,6 +1006,7 @@ class DomainTreeAgent:
             )
             add_edge(f"project:{project_id}", doc_node_id, "contains_document")
 
+            # 提取文档主题并创建主题节点
             phrases = self._extract_document_topics(document)
             for phrase in phrases[:12]:
                 topic_id = f"topic:{self._slugify(phrase)}"
@@ -909,6 +1017,7 @@ class DomainTreeAgent:
                 if matched_domain:
                     add_edge(matched_domain, topic_id, "covers_topic")
 
+            # 尝试将主题与领域匹配（桥接主题与已有领域）
             for entry in self._filter_toc_entries(document.toc_entries)[:30]:
                 title = str(entry.get("title", "")).strip()
                 if not title:
@@ -918,7 +1027,11 @@ class DomainTreeAgent:
                 add_edge(doc_node_id, section_id, "has_section")
 
         # 全文语义抽取独立于领域树规则：即使某个实体无法归入领域，也保留其原文证据。
-        semantic_graph = SemanticGraphExtractor(model_runtime).extract(
+        semantic_graph = SemanticGraphExtractor(
+            model_runtime,
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
+        ).extract(
             SemanticSourceDocument(
                 record_id=document.record_id,
                 title=document.title,
@@ -1068,14 +1181,18 @@ class DomainTreeAgent:
     def _extract_document_topics(self, document: SourceDocument) -> list[str]:
         """提取来源文档、主题。"""
         phrases: list[str] = []
-        title_phrases = self._extract_candidate_phrases(document.title)
+        title_phrases = self._extract_candidate_phrases(document.title) #从标题提取候选短语
+        
+        #从目录条目提取主题短语
         heading_phrases = [
             self._normalize_topic_phrase(str(entry.get("title", "")))
             for entry in self._filter_toc_entries(document.toc_entries)[:20]
             if int(entry.get("level", 1)) <= 2
         ]
+        #从摘要中提取候选短语
         abstract_phrases = self._extract_candidate_phrases(document.abstract)[:12]
 
+        #合并、归一化和去重
         for source in (title_phrases, heading_phrases, abstract_phrases):
             for phrase in source:
                 cleaned = self._normalize_topic_phrase(phrase)
@@ -1092,15 +1209,15 @@ class DomainTreeAgent:
         candidates: list[str] = []
         for raw in re.split(r"[,;:()|/]+", text):
             phrase = raw.strip()
-            if len(phrase) < 3:
+            if len(phrase) < 3: #长度小于3的跳过
                 continue
             normalized = re.sub(r"\s+", " ", phrase)
             lowered = normalized.lower()
-            if lowered in _GENERIC_SECTION_TITLES:
+            if lowered in _GENERIC_SECTION_TITLES: # 排除通用章节标题
                 continue
             word_tokens = re.findall(r"[A-Za-z][A-Za-z0-9+.#-]*", normalized)
-            if 1 <= len(word_tokens) <= 8:
-                if all(token.lower() in _STOPWORDS for token in word_tokens):
+            if 1 <= len(word_tokens) <= 8: 
+                if all(token.lower() in _STOPWORDS for token in word_tokens): # 排除停用词
                     continue
                 candidates.append(normalized)
 
@@ -1271,7 +1388,7 @@ class DomainTreeAgent:
         return fallback
 
     def _domain_keywords_from_tree(self, tags: list[dict[str, Any]]) -> dict[str, set[str]]:
-        """从领域树提取用于主题归属判断的关键词。"""
+        """从（两层）领域树提取用于主题归属判断的关键词。"""
         mapping: dict[str, set[str]] = {}
         for index, tag in enumerate(tags, start=1):
             node_id = f"domain:{index}"
@@ -1461,8 +1578,8 @@ class DomainTreeAgent:
 
     def _tokenize_label(self, label: str) -> list[str]:
         """分词标签。"""
-        cleaned = re.sub(r"^\d+(?:\.\d+)*\s*", "", label.strip())
-        return [token for token in re.split(r"[^A-Za-z0-9\u4e00-\u9fff]+", cleaned) if token]
+        cleaned = re.sub(r"^\d+(?:\.\d+)*\s*", "", label.strip()) # 清除前面的数字编号
+        return [token for token in re.split(r"[^A-Za-z0-9\u4e00-\u9fff]+", cleaned) if token] #将中文和英文拆分开
 
     def _keyword_token(self, token: str) -> str:
         """把关键词规范化为便于比较的词元。"""

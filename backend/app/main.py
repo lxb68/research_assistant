@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from app.agents import DomainTreeAgent, HunterAgent, OrchestratorAgent
 from app.core.config import settings
 from app.services.mineru import MinerURequest, mineru_processing
+from app.services.domain_tree_jobs import domain_tree_jobs
 from app.services.model_client import discover_models
 from app.services.model_config import ModelConfigStore
 from app.services.paper_search import SUPPORTED_SOURCES, search_papers
@@ -658,39 +659,77 @@ def re_split_values(value: str) -> list[str]:
 
 
 # --- 领域树与知识图谱生成、读取 ---
+def _run_domain_tree_job(
+    payload: DomainTreeGenerateRequest,
+    model_payload: dict[str, str],
+    progress_callback,
+    cancel_event: threading.Event,
+) -> dict:
+    """在任务工作线程中执行领域树生成并读取最终结果。"""
+    agent = DomainTreeAgent()
+    tags = agent.handle_domain_tree_sync(
+        payload.project_id,
+        action=payload.action,
+        all_toc=payload.all_toc,
+        new_toc=payload.new_toc,
+        model=payload.model or model_payload,
+        language=payload.language,
+        delete_toc=payload.delete_toc,
+        cancel_event=cancel_event,
+        progress_callback=progress_callback,
+    )
+    if not tags:
+        raise ValueError("未找到可用于生成领域树的 Markdown 或目录数据")
+    result = agent.get_result(payload.project_id)
+    if not result:
+        raise RuntimeError("领域树已生成，但读取结果失败")
+    return {"status": "ok", **result}
+
+
 @app.post("/api/domain-tree/generate")
-async def generate_domain_tree(payload: DomainTreeGenerateRequest) -> dict:
-    """根据本地论文生成或修订领域树。"""
-    try:
-        config_store = ModelConfigStore()
-        model_payload = config_store.build_model_payload()
-        if not model_payload:
-            raise HTTPException(status_code=400, detail="请先配置模型参数")
+def generate_domain_tree(payload: DomainTreeGenerateRequest) -> dict:
+    """创建领域树后台任务并立即返回任务 ID。"""
+    model_payload = ModelConfigStore().build_model_payload()
+    if not model_payload:
+        raise HTTPException(status_code=400, detail="请先配置模型参数")
+    job, created = domain_tree_jobs.submit(
+        payload.project_id,
+        payload.action,
+        lambda report, cancel_event: _run_domain_tree_job(
+            payload,
+            model_payload,
+            report,
+            cancel_event,
+        ),
+    )
+    return {"status": "accepted", "created": created, **job}
 
-        agent = DomainTreeAgent()
-        tags = await agent.handle_domain_tree(
-            payload.project_id,
-            action=payload.action,
-            all_toc=payload.all_toc,
-            new_toc=payload.new_toc,
-            model=payload.model or model_payload,
-            language=payload.language,
-            delete_toc=payload.delete_toc,
-        )
-        if not tags:
-            raise HTTPException(status_code=400, detail="未找到可用于生成领域树的 Markdown 或目录数据")
 
-        result = agent.get_result(payload.project_id)
-        if not result:
-            raise HTTPException(status_code=500, detail="领域树已生成，但读取结果失败")
+@app.get("/api/domain-tree/jobs/active/{project_id}")
+def get_active_domain_tree_job(project_id: str) -> dict:
+    """读取项目当前仍在运行或取消中的任务。"""
+    job = domain_tree_jobs.get_active(project_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="当前项目没有活动的领域树任务")
+    return job
 
-        return {"status": "ok", **result}
-    except HTTPException:
-        raise
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except Exception as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+
+@app.get("/api/domain-tree/jobs/{job_id}")
+def get_domain_tree_job(job_id: str) -> dict:
+    """读取领域树任务进度和最终结果。"""
+    job = domain_tree_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="领域树任务不存在")
+    return job
+
+
+@app.post("/api/domain-tree/jobs/{job_id}/cancel")
+def cancel_domain_tree_job(job_id: str) -> dict:
+    """请求协作式取消领域树任务。"""
+    job = domain_tree_jobs.cancel(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="领域树任务不存在")
+    return job
 
 
 @app.get("/api/domain-tree/{project_id}")
@@ -708,62 +747,67 @@ def get_domain_tree(project_id: str) -> dict:
         raise HTTPException(status_code=502, detail=str(error)) from error
 
 
+def _process_mineru_sync(request: MinerURequest) -> dict:
+    """在线程中完成 MinerU 转换及后续数据库处理。"""
+    agent = HunterAgent()
+    pdf_path = request.pdf_path
+
+    if request.record_id:
+        paper = agent.get_saved_paper(request.record_id)
+        if not paper:
+            raise HTTPException(status_code=404, detail="Paper record not found")
+
+        resolved_pdf_path = agent.find_local_pdf_for_paper(paper)
+        if not resolved_pdf_path:
+            raise HTTPException(status_code=400, detail="Local PDF file not found for this paper")
+        pdf_path = str(resolved_pdf_path)
+
+    result = mineru_processing(
+        project_id=request.project_id,
+        file_name=request.file_name,
+        pdf_path=pdf_path,
+        output_name=request.output_name or request.record_id,
+        mineru_token=request.mineru_token,
+    )
+    if not request.record_id:
+        return {"status": "ok", "result": result}
+
+    try:
+        updated_paper = agent.update_saved_paper(
+            request.record_id,
+            {
+                "markdownPath": result.get("markdownPath", ""),
+                "markdownOutputDir": result.get("outputDir", ""),
+                "sourcePdfPath": result.get("sourcePdfPath", ""),
+            },
+        )
+        updated_paper = agent.refresh_paper_metadata_from_markdown(
+            request.record_id,
+            markdown_path=result.get("markdownPath", ""),
+        )
+        updated_paper = agent.split_saved_paper_from_markdown(
+            request.record_id,
+            markdown_path=result.get("markdownPath", ""),
+            min_split_length=request.split_min_length,
+            max_split_length=request.split_max_length,
+        )
+        dedupe_result = agent.deduplicate_saved_papers(record_id=request.record_id)
+        if dedupe_result.get("canonicalPapers"):
+            updated_paper = dedupe_result["canonicalPapers"][0]
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"MinerU conversion succeeded, but failed to update paper metadata: {error}",
+        ) from error
+    return {"status": "ok", "result": result, "paper": updated_paper}
+
+
 # --- 独立 MinerU 转换接口 ---
 @app.post("/api/mineru/process")
 async def process_mineru(request: MinerURequest):
-    """执行一次 MinerU PDF 转换任务。"""
+    """在线程中执行 MinerU，避免阻塞 FastAPI 事件循环。"""
     try:
-        agent = HunterAgent()
-        pdf_path = request.pdf_path
-
-        if request.record_id:
-            paper = agent.get_saved_paper(request.record_id)
-            if not paper:
-                raise HTTPException(status_code=404, detail="Paper record not found")
-
-            resolved_pdf_path = agent.find_local_pdf_for_paper(paper)
-            if not resolved_pdf_path:
-                raise HTTPException(status_code=400, detail="Local PDF file not found for this paper")
-            pdf_path = str(resolved_pdf_path)
-
-        result = mineru_processing(
-            project_id=request.project_id,
-            file_name=request.file_name,
-            pdf_path=pdf_path,
-            output_name=request.output_name or request.record_id,
-            mineru_token=request.mineru_token,
-        )
-        if request.record_id:
-            try:
-                updated_paper = agent.update_saved_paper(
-                    request.record_id,
-                    {
-                        "markdownPath": result.get("markdownPath", ""),
-                        "markdownOutputDir": result.get("outputDir", ""),
-                        "sourcePdfPath": result.get("sourcePdfPath", ""),
-                    },
-                )
-                updated_paper = agent.refresh_paper_metadata_from_markdown(
-                    request.record_id,
-                    markdown_path=result.get("markdownPath", ""),
-                )
-                updated_paper = agent.split_saved_paper_from_markdown(
-                    request.record_id,
-                    markdown_path=result.get("markdownPath", ""),
-                    min_split_length=request.split_min_length,
-                    max_split_length=request.split_max_length,
-                )
-                dedupe_result = agent.deduplicate_saved_papers(record_id=request.record_id)
-                if dedupe_result.get("canonicalPapers"):
-                    updated_paper = dedupe_result["canonicalPapers"][0]
-            except Exception as error:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"MinerU conversion succeeded, but failed to update paper metadata: {error}",
-                ) from error
-            return {"status": "ok", "result": result, "paper": updated_paper}
-
-        return {"status": "ok", "result": result}
+        return await asyncio.to_thread(_process_mineru_sync, request)
     except RuntimeError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except HTTPException:

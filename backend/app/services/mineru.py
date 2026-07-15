@@ -1,49 +1,37 @@
-"""选择 MinerU SDK 或命令行工具，将 PDF 转换为 Markdown 资源。"""
+"""优先调用 MinerU 云 API，并按显式配置回退到本地 CLI。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 import os
 import shutil
 import subprocess
+import tempfile
+import time
+from typing import Optional
+import zipfile
 
 from pydantic import BaseModel, Field
+import requests
 
 from app.core.config import settings
-
-try:
-    from mineru import MinerU
-    from mineru.exceptions import MinerUError, NoAuthClientError, TimeoutError
-except ImportError:  # 可选依赖：只有无法使用命令行降级方案时才必须安装。
-    MinerU = None
-
-    class MinerUError(Exception):
-        """表示 MinerU 通用处理异常。"""
-        pass
-
-    class NoAuthClientError(Exception):
-        """表示 MinerU 客户端缺少有效认证。"""
-        pass
-
-    class TimeoutError(Exception):
-        """表示 MinerU 处理超时。"""
-        pass
 
 
 class MinerURequest(BaseModel):
     """定义 MinerU 转换任务的输入参数。"""
-    record_id: str | None = Field(None, description="已保存的论文记录 ID")
-    project_id: str | None = Field(None, description="兼容旧接口的项目 ID")
-    file_name: str | None = Field(None, description="兼容旧接口的 PDF 文件名")
-    pdf_path: str | None = Field(None, description="PDF 绝对路径或 storage/papers 下的文件名")
-    output_name: str | None = Field(None, description="可选的 MinerU 输出目录名")
-    mineru_token: str | None = Field(None, description="可选的 MinerU API 令牌覆盖值")
-    split_min_length: int | None = Field(None, ge=100, description="可选的最小分块长度")
-    split_max_length: int | None = Field(None, ge=200, description="可选的最大分块长度")
+    record_id: Optional[str] = Field(None, description="已保存的论文记录 ID")
+    project_id: Optional[str] = Field(None, description="兼容旧接口的项目 ID")
+    file_name: Optional[str] = Field(None, description="兼容旧接口的 PDF 文件名")
+    pdf_path: Optional[str] = Field(None, description="PDF 绝对路径或 storage/papers 下的文件名")
+    output_name: Optional[str] = Field(None, description="可选的 MinerU 输出目录名")
+    mineru_token: Optional[str] = Field(None, description="可选的 MinerU API 令牌覆盖值")
+    split_min_length: Optional[int] = Field(None, ge=100, description="可选的最小分块长度")
+    split_max_length: Optional[int] = Field(None, ge=200, description="可选的最大分块长度")
 
 
-@dataclass(slots=True)
+@dataclass
 class MinerUPaths:
     """保存 MinerU 转换过程涉及的输入与输出路径。"""
     pdf_path: Path
@@ -71,18 +59,35 @@ def mineru_processing(
     )
     paths.output_dir.mkdir(parents=True, exist_ok=True)
 
-    cli_error: str | None = None
-    try:
-        _run_local_mineru_cli(paths.pdf_path, paths.output_dir)
-    except Exception as error:
-        cli_error = str(error)
+    token = (mineru_token or settings.mineru_api_token).strip()
+    cloud_error: str | None = None
+    conversion_succeeded = False
 
-    if not _has_markdown_output(paths.output_dir):
-        token = (mineru_token or settings.mineru_api_token).strip()
-        if not token:
-            reason = cli_error or "Local MinerU CLI is unavailable and MINERU_API_TOKEN is not configured"
-            raise RuntimeError(f"MinerU conversion failed: {reason}")
-        _run_mineru_sdk(paths.pdf_path, paths.output_dir, token)
+    if token:
+        try:
+            _run_mineru_cloud_api(paths.pdf_path, paths.output_dir, token)
+            conversion_succeeded = True
+        except Exception as error:
+            cloud_error = str(error)
+    else:
+        cloud_error = "MINERU_API_TOKEN is not configured"
+
+    if not conversion_succeeded and settings.mineru_enable_local_cli_fallback:
+        print("[MinerU] 云端转换未生成 Markdown，已启用本地 CLI 回退", flush=True)
+        try:
+            _run_local_mineru_cli(paths.pdf_path, paths.output_dir)
+            conversion_succeeded = True
+        except Exception as error:
+            raise RuntimeError(
+                f"MinerU cloud conversion failed: {cloud_error}; "
+                f"local CLI fallback failed: {error}",
+            ) from error
+
+    if not conversion_succeeded:
+        fallback_hint = (
+            " Set MINERU_ENABLE_LOCAL_CLI_FALLBACK=true to explicitly enable local CLI fallback."
+        )
+        raise RuntimeError(f"MinerU cloud conversion failed: {cloud_error}.{fallback_hint}")
 
     markdown_path = _select_primary_markdown(paths.output_dir)
     if markdown_path is None:
@@ -185,40 +190,229 @@ def _run_local_mineru_cli(pdf_path: Path, output_dir: Path) -> None:
     raise RuntimeError(last_error)
 
 
-def _run_mineru_sdk(pdf_path: Path, output_dir: Path, token: str) -> None:
-    """调用 MinerU Python SDK 转换 PDF。"""
-    if MinerU is None:
-        raise RuntimeError("MinerU Python package is not installed")
+def _run_mineru_cloud_api(pdf_path: Path, output_dir: Path, token: str) -> None:
+    """通过 MinerU v4 签名上传接口解析本地 PDF 并解压完整结果。"""
+    api_base = settings.mineru_api_base
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    request_timeout = settings.mineru_request_timeout_seconds
 
+    print(f"[MinerU] 正在向云端申请上传地址：{pdf_path.name}", flush=True)
     try:
-        with MinerU(token=token) as client:
-            result = client.extract(
-                str(pdf_path),
-                model="vlm",
-                ocr=True,
-                formula=True,
-                table=True,
-                timeout=1800,
+        apply_response = requests.post(
+            f"{api_base}/file-urls/batch",
+            headers=headers,
+            json={
+                "files": [
+                    {
+                        "name": pdf_path.name,
+                        "is_ocr": True,
+                    },
+                ],
+                "model_version": settings.mineru_model_version,
+                "enable_formula": True,
+                "enable_table": True,
+            },
+            timeout=request_timeout,
+        )
+        apply_payload = _read_cloud_payload(apply_response, "apply upload URL")
+        apply_data = apply_payload.get("data") or {}
+        batch_id = str(apply_data.get("batch_id") or "").strip()
+        file_urls = apply_data.get("file_urls") or []
+        if not batch_id or not file_urls:
+            raise RuntimeError("MinerU cloud response did not contain batch_id and file_urls")
+
+        print(f"[MinerU] 正在上传 PDF：batch_id={batch_id}", flush=True)
+        with pdf_path.open("rb") as pdf_file:
+            upload_response = requests.put(
+                str(file_urls[0]),
+                data=pdf_file,
+                timeout=max(request_timeout, 300),
             )
-    except NoAuthClientError as error:
-        raise RuntimeError(f"MinerU SDK authentication is not configured: {error}") from error
-    except TimeoutError as error:
-        raise RuntimeError(f"MinerU SDK timed out while waiting for conversion: {error}") from error
-    except MinerUError as error:
-        raise RuntimeError(f"MinerU SDK request failed: {error}") from error
-    except Exception as error:
-        raise RuntimeError(f"MinerU SDK crashed: {error}") from error
+        if not 200 <= upload_response.status_code < 300:
+            raise RuntimeError(
+                f"MinerU cloud upload failed with HTTP {upload_response.status_code}: "
+                f"{_response_excerpt(upload_response)}",
+            )
 
-    if result.state != "done":
-        message = result.error or result.err_code or result.state
-        raise RuntimeError(f"MinerU SDK did not finish successfully: {message}")
-    if not result.markdown:
-        raise RuntimeError("MinerU SDK finished but returned no markdown content")
+        result_url = _poll_mineru_cloud_result(batch_id, pdf_path.name, token)
+        print("[MinerU] 云端解析完成，正在下载结果", flush=True)
+        _download_mineru_result(result_url, output_dir, max(request_timeout, 300))
+    except requests.RequestException as error:
+        raise RuntimeError(f"MinerU cloud request failed: {error}") from error
 
+    if not _has_markdown_output(output_dir):
+        raise RuntimeError("MinerU cloud result ZIP did not contain Markdown")
+    print(f"[MinerU] 云端结果已保存：{output_dir}", flush=True)
+
+
+def _poll_mineru_cloud_result(batch_id: str, file_name: str, token: str) -> str:
+    """轮询批量解析状态，成功时返回完整结果 ZIP 地址。"""
+    headers = {"Authorization": f"Bearer {token}"}
+    deadline = time.monotonic() + settings.mineru_cloud_timeout_seconds
+    last_state = "waiting-file"
+
+    while time.monotonic() < deadline:
+        response = requests.get(
+            f"{settings.mineru_api_base}/extract-results/batch/{batch_id}",
+            headers=headers,
+            timeout=settings.mineru_request_timeout_seconds,
+        )
+        payload = _read_cloud_payload(response, "poll extraction result")
+        data = payload.get("data") or {}
+        results = data.get("extract_result") or data.get("extract_results") or []
+        result = next(
+            (item for item in results if item.get("file_name") == file_name),
+            results[0] if results else None,
+        )
+
+        if result:
+            last_state = str(result.get("state") or "unknown").lower()
+            progress = result.get("extract_progress") or {}
+            extracted_pages = progress.get("extracted_pages")
+            total_pages = progress.get("total_pages")
+            progress_text = (
+                f"，页数 {extracted_pages}/{total_pages}"
+                if extracted_pages is not None and total_pages is not None
+                else ""
+            )
+            print(f"[MinerU] 云端状态：{last_state}{progress_text}", flush=True)
+
+            if last_state == "done":
+                result_url = str(result.get("full_zip_url") or "").strip()
+                if not result_url:
+                    raise RuntimeError("MinerU cloud task finished without full_zip_url")
+                return result_url
+            if last_state == "failed":
+                reason = result.get("err_msg") or "unknown cloud parsing error"
+                raise RuntimeError(f"MinerU cloud task failed: {reason}")
+
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(settings.mineru_poll_interval_seconds, remaining))
+
+    raise RuntimeError(
+        f"MinerU cloud task timed out after {settings.mineru_cloud_timeout_seconds}s "
+        f"(last state: {last_state})",
+    )
+
+
+def _read_cloud_payload(response: requests.Response, action: str) -> dict:
+    """校验 MinerU API 的 HTTP 状态与业务状态码。"""
+    if not 200 <= response.status_code < 300:
+        raise RuntimeError(
+            f"MinerU cloud {action} failed with HTTP {response.status_code}: "
+            f"{_response_excerpt(response)}",
+        )
     try:
-        result.save_all(str(output_dir))
-    except Exception as error:
-        raise RuntimeError(f"MinerU SDK succeeded but failed to save output files: {error}") from error
+        payload = response.json()
+    except ValueError as error:
+        raise RuntimeError(f"MinerU cloud {action} returned invalid JSON") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"MinerU cloud {action} returned a non-object JSON response")
+    if payload.get("code") != 0:
+        message = payload.get("msg") or "unknown MinerU API error"
+        trace_id = payload.get("trace_id")
+        trace_hint = f" (trace_id: {trace_id})" if trace_id else ""
+        raise RuntimeError(f"MinerU cloud {action} failed: {message}{trace_hint}")
+    return payload
+
+
+def _response_excerpt(response: requests.Response) -> str:
+    """提取有限长度的响应文本用于诊断。"""
+    return (response.text or "no response body").strip()[:500]
+
+
+def _download_mineru_result(result_url: str, output_dir: Path, timeout: int) -> None:
+    """下载结果 ZIP；Python TLS 不兼容时在 Windows 上回退到系统 curl。"""
+    try:
+        response = requests.get(result_url, timeout=timeout)
+        if not 200 <= response.status_code < 300:
+            raise RuntimeError(
+                f"MinerU result download failed with HTTP {response.status_code}: "
+                f"{_response_excerpt(response)}",
+            )
+        _extract_result_zip(response.content, output_dir)
+        return
+    except requests.exceptions.SSLError as ssl_error:
+        curl_command = shutil.which("curl.exe") or shutil.which("curl")
+        if not curl_command:
+            raise RuntimeError(f"MinerU result download TLS failed: {ssl_error}") from ssl_error
+
+    print("[MinerU] Python TLS 下载失败，正在使用系统 curl 重试", flush=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="mineru-result-",
+            suffix=".zip",
+            dir=output_dir,
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+
+        completed = subprocess.run(
+            [
+                curl_command,
+                "--fail",
+                "--location",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                str(timeout),
+                "--output",
+                str(temporary_path),
+                result_url,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout + 15,
+        )
+        if completed.returncode != 0:
+            diagnostic = (completed.stderr or completed.stdout or "unknown curl error").strip()[:500]
+            raise RuntimeError(f"MinerU result download via curl failed: {diagnostic}")
+        _extract_result_zip_file(temporary_path, output_dir)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"MinerU result download via curl timed out after {timeout}s") from error
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _extract_result_zip(content: bytes, output_dir: Path) -> None:
+    """安全解压 MinerU 结果 ZIP，拒绝越界路径。"""
+    try:
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            _extract_archive_members(archive, output_dir)
+    except zipfile.BadZipFile as error:
+        raise RuntimeError("MinerU result download was not a valid ZIP file") from error
+
+
+def _extract_result_zip_file(zip_path: Path, output_dir: Path) -> None:
+    """从磁盘安全解压 MinerU 结果 ZIP，避免把完整压缩包读入内存。"""
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            _extract_archive_members(archive, output_dir)
+    except zipfile.BadZipFile as error:
+        raise RuntimeError("MinerU result download was not a valid ZIP file") from error
+
+
+def _extract_archive_members(archive: zipfile.ZipFile, output_dir: Path) -> None:
+    """解压 ZIP 成员并拒绝路径穿越。"""
+    for member in archive.infolist():
+        normalized_name = member.filename.replace("\\", "/")
+        relative_path = Path(normalized_name)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise RuntimeError(f"Unsafe path in MinerU result ZIP: {member.filename}")
+        target_path = output_dir / relative_path
+        if member.is_dir():
+            target_path.mkdir(parents=True, exist_ok=True)
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(member) as source, target_path.open("wb") as target:
+            shutil.copyfileobj(source, target)
 
 
 def _has_markdown_output(output_dir: Path) -> bool:

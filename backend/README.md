@@ -86,7 +86,13 @@ NCBI_EMAIL=
 NCBI_API_KEY=
 IEEE_API_KEY=
 SEMANTIC_SCHOLAR_API_KEY=
+MINERU_API_TOKEN=
+# 默认直接调用 MinerU 云 API；仅在明确需要本地引擎回退时设为 true。
+MINERU_ENABLE_LOCAL_CLI_FALLBACK=false
 REQUEST_TIMEOUT=15
+# 领域树模型请求最多尝试 3 次，退避等待依次为 2 秒、4 秒。
+DOMAIN_TREE_RETRY_ATTEMPTS=3
+DOMAIN_TREE_RETRY_BASE_DELAY_SECONDS=2
 ```
 
 说明：
@@ -95,3 +101,5 @@ REQUEST_TIMEOUT=15
 - `pubmed` 可以不填 Key，但建议填写 `NCBI_EMAIL`；高频调用时再申请 `NCBI_API_KEY`。
 - `crossref` 不需要 API Key。
 - `ieee` 需要先申请并配置 `IEEE_API_KEY`。
+- PDF 精细解析默认使用 `MINERU_API_TOKEN` 调用 MinerU 云 API。本地 `mineru`/`magic-pdf`
+  CLI 不会自动运行；只有设置 `MINERU_ENABLE_LOCAL_CLI_FALLBACK=true` 才会在云端失败后回退。

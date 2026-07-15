@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+import requests
 
 # 允许从仓库根目录直接执行 unittest discover。
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -144,6 +147,47 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
         self.assertEqual(len(citations), 1)
         self.assertEqual(citations[0]["year"], 2020)
         self.assertTrue(citations[0]["contexts"])
+
+    def test_retries_timeout_and_reports_chunk_progress(self) -> None:
+        """语义分块超时应有限重试，并持续上报可观察进度。"""
+        calls = 0
+        updates: list[dict] = []
+
+        def flaky_chat(*args: object, **kwargs: object) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise requests.ReadTimeout("temporary timeout")
+            return json.dumps({"entities": [], "relations": []})
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "paper.md"
+            path.write_text("# Method\n\nA short research method description.", encoding="utf-8")
+            extractor = SemanticGraphExtractor(
+                {"model": "test"},
+                chat_fn=flaky_chat,
+                progress_callback=updates.append,
+            )
+            with (
+                patch("app.services.semantic_graph.settings.domain_tree_retry_attempts", 2),
+                patch("app.services.semantic_graph.settings.domain_tree_retry_base_delay_seconds", 0),
+            ):
+                result = extractor.extract([SemanticSourceDocument("p", "Paper", path)])
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(result["extraction"]["processedChunkCount"], 1)
+        self.assertEqual(updates[-1]["completedChunks"], 1)
+
+    def test_cancelled_extraction_stops_before_model_call(self) -> None:
+        """已取消任务不得继续启动新的模型请求。"""
+        cancel_event = threading.Event()
+        cancel_event.set()
+        extractor = SemanticGraphExtractor({"model": "test"}, cancel_event=cancel_event)
+
+        from app.services.task_control import DomainTreeGenerationCancelled
+
+        with self.assertRaises(DomainTreeGenerationCancelled):
+            extractor.extract([])
 
 
 class DomainTreeSemanticIntegrationTest(unittest.TestCase):

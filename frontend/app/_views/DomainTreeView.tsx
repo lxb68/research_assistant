@@ -142,6 +142,26 @@ type ModelConfigStatus = {
 type DomainTreeAction = "revise" | "rebuild" | "keep";
 type DomainTreeViewMode = "tree" | "graph";
 
+type DomainTreeJob = {
+  jobId: string;
+  projectId: string;
+  action: DomainTreeAction;
+  status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled";
+  stage: string;
+  message: string;
+  progress?: {
+    documentCount?: number;
+    totalChunks?: number;
+    currentChunk?: number;
+    completedChunks?: number;
+    processedChunks?: number;
+    failedChunks?: number;
+    retryAttempt?: number;
+  };
+  result?: DomainTreeResult | null;
+  error?: string;
+};
+
 type DomainTreePageProps = {
   embedded?: boolean;
   isActiveView?: boolean;
@@ -333,6 +353,9 @@ export default function DomainTreePage({
   const [result, setResult] = useState<DomainTreeResult | null>(null);
   const [isLoadingPapers, setIsLoadingPapers] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [activeJobId, setActiveJobId] = useState("");
+  const [activeJob, setActiveJob] = useState<DomainTreeJob | null>(null);
+  const [isCancelling, setIsCancelling] = useState(false);
   const [isLoadingExisting, setIsLoadingExisting] = useState(false);
   const [isLoadingChunks, setIsLoadingChunks] = useState(false);
   const [error, setError] = useState("");
@@ -682,6 +705,119 @@ export default function DomainTreePage({
     };
   }, [embedded, isActiveView]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    /** 页面重新打开时恢复同一项目仍在运行的领域树任务。 */
+    async function discoverActiveJob() {
+      try {
+        const response = await fetch(
+          buildApiUrl(
+            `/api/domain-tree/jobs/active/${encodeURIComponent(WORKSPACE_DOMAIN_TREE_PROJECT_ID)}`,
+          ),
+        );
+        if (response.status === 404) {
+          return;
+        }
+        const payload = (await response.json().catch(() => ({}))) as DomainTreeJob & { detail?: string };
+        if (!response.ok) {
+          throw new Error(payload.detail || "读取领域树任务状态失败");
+        }
+        if (!cancelled) {
+          setActiveJob(payload);
+          setActiveJobId(payload.jobId);
+          setIsGenerating(true);
+          setStatus(payload.message || "领域树任务正在后台运行");
+        }
+      } catch (jobError) {
+        if (!cancelled) {
+          setError(jobError instanceof Error ? jobError.message : "读取领域树任务状态失败");
+        }
+      }
+    }
+
+    if (embedded && !isActiveView) {
+      return;
+    }
+    void discoverActiveJob();
+    return () => {
+      cancelled = true;
+    };
+  }, [embedded, isActiveView]);
+
+  useEffect(() => {
+    if (!activeJobId || (embedded && !isActiveView)) {
+      return;
+    }
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    /** 轮询后台任务；终态到达后停止并应用最终结果。 */
+    async function pollJob() {
+      try {
+        const response = await fetch(
+          buildApiUrl(`/api/domain-tree/jobs/${encodeURIComponent(activeJobId)}`),
+        );
+        const payload = (await response.json().catch(() => ({}))) as DomainTreeJob & { detail?: string };
+        if (!response.ok) {
+          throw new Error(payload.detail || "读取领域树任务进度失败");
+        }
+        if (cancelled) {
+          return;
+        }
+
+        setActiveJob(payload);
+        setStatus(payload.message || "领域树任务正在后台运行");
+        if (payload.status === "completed") {
+          if (payload.result) {
+            setResult(payload.result);
+          }
+          setMatchedChunks([]);
+          setSelectedSecondaryKey("");
+          setSelectedSecondaryLabel("");
+          setStatus(`${ACTION_LABELS[payload.action]}完成，领域树和知识图谱已更新。`);
+          setIsGenerating(false);
+          setIsCancelling(false);
+          setActiveJobId("");
+          return;
+        }
+        if (payload.status === "failed") {
+          setError(payload.error || "领域树生成失败");
+          setIsGenerating(false);
+          setIsCancelling(false);
+          setActiveJobId("");
+          return;
+        }
+        if (payload.status === "cancelled") {
+          setStatus("领域树生成已取消。");
+          setIsGenerating(false);
+          setIsCancelling(false);
+          setActiveJobId("");
+          return;
+        }
+        timer = setTimeout(() => {
+          void pollJob();
+        }, 1000);
+      } catch (pollError) {
+        if (!cancelled) {
+          setError(pollError instanceof Error ? pollError.message : "读取领域树任务进度失败");
+          timer = setTimeout(() => {
+            void pollJob();
+          }, 2000);
+        }
+      }
+    }
+
+    void pollJob();
+    return () => {
+      cancelled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [activeJobId, embedded, isActiveView]);
+
   const generationMode = useMemo<DomainTreeAction>(() => {
     if (manualGenerationMode) {
       return manualGenerationMode;
@@ -740,15 +876,37 @@ export default function DomainTreePage({
         throw new Error(payload.detail || "生成领域树失败");
       }
 
-      setResult(payload);
-      setMatchedChunks([]);
-      setSelectedSecondaryKey("");
-      setSelectedSecondaryLabel("");
-      setStatus(`${ACTION_LABELS[generationMode]}完成，领域树和知识图谱已更新。`);
+      const job = payload as DomainTreeJob;
+      setActiveJob(job);
+      setActiveJobId(job.jobId);
+      setStatus(job.message || "领域树任务已进入后台队列");
     } catch (generateError) {
       setError(generateError instanceof Error ? generateError.message : "生成领域树失败");
-    } finally {
       setIsGenerating(false);
+    }
+  }
+
+  /** 请求取消后台任务；正在进行的单次模型请求结束后停止。 */
+  async function handleCancelGeneration() {
+    if (!activeJobId || isCancelling) {
+      return;
+    }
+    setIsCancelling(true);
+    setError("");
+    try {
+      const response = await fetch(
+        buildApiUrl(`/api/domain-tree/jobs/${encodeURIComponent(activeJobId)}/cancel`),
+        { method: "POST" },
+      );
+      const payload = (await response.json().catch(() => ({}))) as DomainTreeJob & { detail?: string };
+      if (!response.ok) {
+        throw new Error(payload.detail || "取消领域树任务失败");
+      }
+      setActiveJob(payload);
+      setStatus(payload.message || "正在取消领域树任务");
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : "取消领域树任务失败");
+      setIsCancelling(false);
     }
   }
 
@@ -953,19 +1111,54 @@ export default function DomainTreePage({
             </div>
           </div>
 
-          <button
-            type="button"
-            className="domain-tree-generate-button"
-            disabled={isGenerating || !modelStatus?.configured || markdownReadyPapers.length === 0}
-            onClick={() => {
-              void handleGenerate();
-            }}
-          >
-            {isGenerating ? "处理中..." : result ? "更新领域树" : "生成领域树"}
-          </button>
+          <div className="domain-tree-action-buttons">
+            <button
+              type="button"
+              className="domain-tree-generate-button"
+              disabled={isGenerating || !modelStatus?.configured || markdownReadyPapers.length === 0}
+              onClick={() => {
+                void handleGenerate();
+              }}
+            >
+              {isGenerating ? "后台处理中..." : result ? "更新领域树" : "生成领域树"}
+            </button>
+            {isGenerating && activeJobId ? (
+              <button
+                type="button"
+                className="domain-tree-secondary-button"
+                disabled={isCancelling || activeJob?.status === "cancelling"}
+                onClick={() => {
+                  void handleCancelGeneration();
+                }}
+              >
+                {isCancelling || activeJob?.status === "cancelling" ? "正在取消..." : "取消任务"}
+              </button>
+            ) : null}
+          </div>
         </section>
 
         {status ? <div className="domain-tree-status">{status}</div> : null}
+        {isGenerating && activeJob ? (
+          <div className="domain-tree-job-progress" aria-live="polite">
+            <div className="domain-tree-job-progress-head">
+              <strong>{activeJob.message || "领域树任务正在运行"}</strong>
+              <span>
+                {activeJob.progress?.completedChunks ?? 0}/{activeJob.progress?.totalChunks ?? "?"} 分块
+              </span>
+            </div>
+            <progress
+              max={Math.max(1, activeJob.progress?.totalChunks ?? 1)}
+              value={activeJob.progress?.completedChunks ?? 0}
+            />
+            <div className="domain-tree-meta">
+              <span>{activeJob.progress?.processedChunks ?? 0} 个成功分块</span>
+              <span>{activeJob.progress?.failedChunks ?? 0} 个失败分块</span>
+              {activeJob.progress?.retryAttempt ? (
+                <span>正在进行第 {activeJob.progress.retryAttempt} 次尝试</span>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         {error && !isModelConfigurationMissing ? (
           <div className="domain-tree-error">
             <span>{error}</span>

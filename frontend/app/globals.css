@@ -3533,6 +3533,13 @@ select.settings-input {
   background: var(--app-surface-strong);
 }
 
+.dataset-browser-toolbar input::placeholder,
+.dataset-import-panel input::placeholder,
+.dataset-import-panel textarea::placeholder {
+  color: var(--app-text-muted);
+  opacity: 1;
+}
+
 .dataset-card-selected {
   border-color: var(--app-border-strong);
   background: var(--app-surface-selected);
@@ -3687,9 +3694,10 @@ select.settings-input {
 .domain-tree-chip,
 .domain-tree-readable-tags span,
 .domain-tree-chunk-tags span {
-  border-color: var(--app-border);
+  border-color: color-mix(in srgb, var(--app-primary) 32%, transparent);
   background: var(--app-primary-soft);
   color: var(--app-primary);
+  box-shadow: none;
 }
 
 .domain-tree-view-switcher,
@@ -3730,6 +3738,62 @@ select.settings-input {
 .domain-tree-status {
   background: var(--app-primary-soft);
   color: var(--app-primary);
+}
+
+.domain-tree-action-buttons {
+  display: grid;
+  flex: 0 0 170px;
+  align-self: flex-start;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+  margin-top: calc(0.86rem * 1.5 + 8px);
+}
+
+.domain-tree-action-buttons > .domain-tree-generate-button,
+.domain-tree-action-buttons > .domain-tree-secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 50px;
+  border-radius: 12px;
+  padding: 0 18px;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.domain-tree-job-progress {
+  display: grid;
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  background: var(--app-surface-strong);
+}
+
+.domain-tree-job-progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--app-text-strong);
+}
+
+.domain-tree-job-progress-head span {
+  color: var(--app-text-muted);
+  white-space: nowrap;
+}
+
+.domain-tree-job-progress progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--app-primary);
+}
+
+@media (max-width: 960px) {
+  .domain-tree-action-buttons {
+    width: 100%;
+    margin-top: 0;
+  }
 }
 
 /* 研究对话与归档页 */
