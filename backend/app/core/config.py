@@ -82,6 +82,7 @@ class Settings:
         0.0,
         float(os.getenv("DOMAIN_TREE_RETRY_BASE_DELAY_SECONDS", "2")),
     )
+    semantic_graph_max_workers = max(1, min(int(os.getenv("SEMANTIC_GRAPH_MAX_WORKERS", "4")), 16))
     research_agent_max_papers = int(os.getenv("RESEARCH_AGENT_MAX_PAPERS", "100"))
     research_agent_max_sources = int(os.getenv("RESEARCH_AGENT_MAX_SOURCES", "6"))
     rag_chunk_target_tokens = int(os.getenv("RAG_CHUNK_TARGET_TOKENS", "500"))

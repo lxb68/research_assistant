@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,7 +18,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.services.semantic_graph import SemanticGraphExtractor, SemanticSourceDocument
+from app.services.semantic_graph import SemanticGraphExtractor, SemanticSourceDocument, TextChunk
 from app.agents.domainTree_agent import DomainTreeAgent, SourceDocument
 
 
@@ -221,6 +222,83 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
         self.assertIn("elapsed_ms=", combined)
         self.assertIn("entity_count=1", combined)
         self.assertIn("<truncated", combined)
+
+    def test_extraction_prompt_requires_source_language(self) -> None:
+        """实体、关系谓词与证据必须明确要求保留原文语言。"""
+        extractor = SemanticGraphExtractor({"model": "test"})
+        prompt = extractor._build_extraction_prompt(
+            SemanticSourceDocument("paper", "English Paper", None),
+            TextChunk(1, "Method", "Method A improves accuracy.", 1),
+        )
+
+        self.assertIn("canonicalName", prompt)
+        self.assertIn("必须使用原文语言", prompt)
+        self.assertIn("predicate 必须使用原文语言", prompt)
+        self.assertIn("evidenceQuote 必须保持原文语言", prompt)
+
+    def test_reuses_persistent_chunk_cache(self) -> None:
+        """相同模型和原文的第二次抽取应直接复用磁盘缓存。"""
+        calls = 0
+
+        def fake_chat(*args: object, **kwargs: object) -> str:
+            nonlocal calls
+            calls += 1
+            return json.dumps({"entities": [], "relations": []})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "paper.md"
+            path.write_text("# Method\n\nA cached research method.", encoding="utf-8")
+            document = SemanticSourceDocument("paper", "Paper", path)
+            first = SemanticGraphExtractor(
+                {"model": "test", "provider": "custom"},
+                chat_fn=fake_chat,
+                cache_dir=root / "cache",
+            ).extract([document])
+            second = SemanticGraphExtractor(
+                {"model": "test", "provider": "custom"},
+                chat_fn=fake_chat,
+                cache_dir=root / "cache",
+            ).extract([document])
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(first["extraction"]["cacheMissCount"], 1)
+        self.assertEqual(second["extraction"]["cacheHitCount"], 1)
+        self.assertEqual(second["extraction"]["cacheMissCount"], 0)
+
+    def test_limits_parallel_chunk_requests_to_four(self) -> None:
+        """缓存未命中的模型请求应并行执行，但同时最多运行四个。"""
+        active_calls = 0
+        maximum_active_calls = 0
+        lock = threading.Lock()
+
+        def fake_chat(*args: object, **kwargs: object) -> str:
+            nonlocal active_calls, maximum_active_calls
+            with lock:
+                active_calls += 1
+                maximum_active_calls = max(maximum_active_calls, active_calls)
+            time.sleep(0.03)
+            with lock:
+                active_calls -= 1
+            return json.dumps({"entities": [], "relations": []})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            documents: list[SemanticSourceDocument] = []
+            for index in range(8):
+                path = root / f"paper-{index}.md"
+                path.write_text(f"# Method\n\nResearch method number {index}.", encoding="utf-8")
+                documents.append(SemanticSourceDocument(f"paper-{index}", f"Paper {index}", path))
+            result = SemanticGraphExtractor(
+                {"model": "test", "provider": "custom"},
+                chat_fn=fake_chat,
+                max_workers=4,
+            ).extract(documents)
+
+        self.assertEqual(result["extraction"]["processedChunkCount"], 8)
+        self.assertEqual(result["extraction"]["maxWorkers"], 4)
+        self.assertGreater(maximum_active_calls, 1)
+        self.assertLessEqual(maximum_active_calls, 4)
 
 
 class DomainTreeSemanticIntegrationTest(unittest.TestCase):

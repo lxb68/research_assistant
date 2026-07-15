@@ -5,6 +5,7 @@ import asyncio
 import queue
 import threading
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -79,7 +80,10 @@ class DomainTreeGenerateRequest(BaseModel):
     """定义领域树生成或修订接口的请求参数。"""
     project_id: str = Field(..., min_length=1, description="领域树对应的项目 ID 或论文记录 ID")
     action: str = Field("rebuild", description="生成动作：rebuild / revise / keep")
-    language: str = Field("中文", description="提示词语言")
+    language: Literal["auto", "中文", "English"] = Field(
+        "auto",
+        description="领域树语言：跟随文献语言 / 中文 / English",
+    )
     all_toc: str | None = Field(None, description="可选：完整目录文本")
     new_toc: str | None = Field(None, description="可选：新增目录内容")
     delete_toc: str | None = Field(None, description="可选：待删除目录内容")

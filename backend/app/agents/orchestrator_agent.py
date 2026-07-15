@@ -120,7 +120,7 @@ class OrchestratorAgent:
                     project_id,
                     action=str(args.get("domain_action") or "rebuild"),
                     model=model,
-                    language=str(args.get("language") or "中文"),
+                    language=str(args.get("language") or "auto"),
                 ),
             )
             result = domain_agent.get_result(project_id)

@@ -8,6 +8,7 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -24,6 +25,7 @@ from app.services.task_control import (
 logger = logging.getLogger(__name__)
 
 _MODEL_OUTPUT_PREVIEW_CHARS = 2000
+_CACHE_SCHEMA_VERSION = "semantic-graph-v2-source-language"
 
 
 def _log_text_preview(value: Any, *, limit: int = _MODEL_OUTPUT_PREVIEW_CHARS) -> str:
@@ -73,6 +75,8 @@ class SemanticGraphExtractor:
         chat_fn: Callable[..., str] = chat_completion,
         chunk_size: int = 6000,
         chunk_overlap: int = 400,
+        cache_dir: str | Path | None = None,
+        max_workers: int = 4,
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
@@ -81,6 +85,8 @@ class SemanticGraphExtractor:
         self.chat_fn = chat_fn
         self.chunk_size = max(1200, chunk_size)
         self.chunk_overlap = max(0, min(chunk_overlap, self.chunk_size // 3))
+        self.cache_dir = Path(cache_dir).resolve() if cache_dir else None
+        self.max_workers = max(1, min(int(max_workers), 16))
         self.cancel_event = cancel_event
         self.progress_callback = progress_callback
 
@@ -91,12 +97,14 @@ class SemanticGraphExtractor:
         source_documents = list(documents)
         logger.info(
             "全文语义抽取开始：document_count=%s chunk_size=%s chunk_overlap=%s "
-            "provider=%s model=%s",
+            "provider=%s model=%s max_workers=%s cache_enabled=%s",
             len(source_documents),
             self.chunk_size,
             self.chunk_overlap,
             self.runtime.get("provider", ""),
             self.runtime.get("model", ""),
+            self.max_workers,
+            self.cache_dir is not None,
         )
         local_titles = {
             self._normalize_name(document.title): document.record_id
@@ -143,6 +151,8 @@ class SemanticGraphExtractor:
 
         total_chunks = sum(len(item[4]) for item in prepared_documents)
         completed_chunks = 0
+        cache_hit_count = 0
+        cache_miss_count = 0
         self._report_progress(
             stage="semantic_extraction",
             message=f"准备抽取 {total_chunks} 个语义分块",
@@ -150,11 +160,14 @@ class SemanticGraphExtractor:
             completedChunks=0,
             processedChunks=0,
             failedChunks=0,
+            cacheHits=0,
+            cacheMisses=0,
+            maxWorkers=self.max_workers,
         )
 
+        work_items: list[tuple[int, SemanticSourceDocument, TextChunk]] = []
         for document, body, reference_text, reference_start_line, chunks in prepared_documents:
             raise_if_cancelled(self.cancel_event)
-            document_started_at = time.perf_counter()
             citations = self.parse_citations(
                 document,
                 body,
@@ -171,31 +184,97 @@ class SemanticGraphExtractor:
                 len(citations),
             )
             for chunk in chunks:
-                raise_if_cancelled(self.cancel_event)
-                self._report_progress(
-                    stage="semantic_extraction",
-                    message=f"正在抽取第 {completed_chunks + 1}/{total_chunks} 个语义分块",
-                    currentChunk=completed_chunks + 1,
-                    currentDocumentId=document.record_id,
-                )
-                payload = self._extract_chunk(document, chunk)
-                completed_chunks += 1
-                if payload is None:
-                    state["failedChunkCount"] += 1
-                else:
-                    state["processedChunkCount"] += 1
-                    self._merge_chunk_payload(state, document, chunk, payload)
-                self._report_progress(
-                    completedChunks=completed_chunks,
-                    processedChunks=state["processedChunkCount"],
-                    failedChunks=state["failedChunkCount"],
-                )
-            logger.info(
-                "[%s] 文档语义抽取完成：chunk_count=%s elapsed_ms=%.1f",
-                document.record_id,
-                len(chunks),
-                (time.perf_counter() - document_started_at) * 1000,
+                work_items.append((len(work_items), document, chunk))
+
+        results: dict[int, dict[str, Any] | None] = {}
+        uncached_items: list[tuple[int, SemanticSourceDocument, TextChunk, str]] = []
+        for order, document, chunk in work_items:
+            raise_if_cancelled(self.cancel_event)
+            cache_key = self._chunk_cache_key(document, chunk)
+            payload = self._load_cached_payload(cache_key)
+            if payload is None:
+                cache_miss_count += 1
+                uncached_items.append((order, document, chunk, cache_key))
+                continue
+            cache_hit_count += 1
+            results[order] = payload
+            completed_chunks += 1
+            state["processedChunkCount"] += 1
+            self._report_progress(
+                stage="semantic_extraction",
+                message=f"已复用 {cache_hit_count} 个语义分块缓存",
+                completedChunks=completed_chunks,
+                processedChunks=state["processedChunkCount"],
+                failedChunks=state["failedChunkCount"],
+                cacheHits=cache_hit_count,
+                cacheMisses=cache_miss_count,
             )
+
+        if uncached_items:
+            logger.info(
+                "语义分块并发抽取开始：cache_hits=%s cache_misses=%s max_workers=%s",
+                cache_hit_count,
+                cache_miss_count,
+                self.max_workers,
+            )
+            executor = ThreadPoolExecutor(
+                max_workers=self.max_workers,
+                thread_name_prefix="semantic-graph",
+            )
+            futures: dict[
+                Future[dict[str, Any] | None],
+                tuple[int, SemanticSourceDocument, TextChunk, str],
+            ] = {
+                executor.submit(self._extract_chunk, document, chunk): (
+                    order,
+                    document,
+                    chunk,
+                    cache_key,
+                )
+                for order, document, chunk, cache_key in uncached_items
+            }
+            try:
+                for future in as_completed(futures):
+                    raise_if_cancelled(self.cancel_event)
+                    order, document, chunk, cache_key = futures[future]
+                    payload = future.result()
+                    results[order] = payload
+                    completed_chunks += 1
+                    if payload is None:
+                        state["failedChunkCount"] += 1
+                    else:
+                        state["processedChunkCount"] += 1
+                        self._save_cached_payload(cache_key, payload)
+                    self._report_progress(
+                        stage="semantic_extraction",
+                        message=f"正在并发抽取语义分块 {completed_chunks}/{total_chunks}",
+                        currentChunk=completed_chunks,
+                        currentDocumentId=document.record_id,
+                        completedChunks=completed_chunks,
+                        processedChunks=state["processedChunkCount"],
+                        failedChunks=state["failedChunkCount"],
+                        cacheHits=cache_hit_count,
+                        cacheMisses=cache_miss_count,
+                    )
+            finally:
+                if self.cancel_event is not None and self.cancel_event.is_set():
+                    for future in futures:
+                        future.cancel()
+                executor.shutdown(wait=True, cancel_futures=True)
+
+        for order, document, chunk in work_items:
+            payload = results.get(order)
+            if payload is not None:
+                self._merge_chunk_payload(state, document, chunk, payload)
+
+        logger.info(
+            "语义分块处理完成：total=%s cache_hits=%s cache_misses=%s processed=%s failed=%s",
+            total_chunks,
+            cache_hit_count,
+            cache_miss_count,
+            state["processedChunkCount"],
+            state["failedChunkCount"],
+        )
 
         entities = sorted(state["entities"].values(), key=lambda item: (item["type"], item["name"].lower()))
         relations = sorted(
@@ -231,6 +310,9 @@ class SemanticGraphExtractor:
                 "documentCount": state["documentCount"],
                 "processedChunkCount": state["processedChunkCount"],
                 "failedChunkCount": state["failedChunkCount"],
+                "cacheHitCount": cache_hit_count,
+                "cacheMissCount": cache_miss_count,
+                "maxWorkers": self.max_workers,
                 "entityCount": len(entities),
                 "semanticRelationCount": len(relations),
                 "citationCount": len(citations),
@@ -242,6 +324,55 @@ class SemanticGraphExtractor:
         """把进度增量上报给任务管理器。"""
         if self.progress_callback:
             self.progress_callback(update)
+
+    def _chunk_cache_key(self, document: SemanticSourceDocument, chunk: TextChunk) -> str:
+        """根据模型、提示词版本和原文内容生成稳定的语义分块缓存键。"""
+        payload = {
+            "schema": _CACHE_SCHEMA_VERSION,
+            "provider": self.runtime.get("provider", ""),
+            "protocol": self.runtime.get("protocol", ""),
+            "model": self.runtime.get("model", ""),
+            "base_url": self.runtime.get("base_url", ""),
+            "title": document.title,
+            "section": chunk.section,
+            "text": chunk.text,
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _cache_path(self, cache_key: str) -> Path | None:
+        """返回分片后的缓存文件路径，避免单目录堆积过多文件。"""
+        if self.cache_dir is None:
+            return None
+        return self.cache_dir / cache_key[:2] / f"{cache_key}.json"
+
+    def _load_cached_payload(self, cache_key: str) -> dict[str, Any] | None:
+        """读取并校验单个语义分块缓存，损坏缓存按未命中处理。"""
+        path = self._cache_path(cache_key)
+        if path is None or not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            logger.warning("读取语义分块缓存失败：path=%s error=%s", path, error)
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _save_cached_payload(self, cache_key: str, payload: dict[str, Any]) -> None:
+        """原子写入单个语义分块缓存，避免中断留下半写文件。"""
+        path = self._cache_path(cache_key)
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = path.with_suffix(f".{threading.get_ident()}.tmp")
+            temporary_path.write_text(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            temporary_path.replace(path)
+        except OSError as error:
+            logger.warning("写入语义分块缓存失败：path=%s error=%s", path, error)
 
     def split_reference_section(self, markdown: str) -> tuple[str, str, int]:
         """把正文和文末参考文献分开，并返回参考文献起始行。"""
@@ -356,6 +487,7 @@ class SemanticGraphExtractor:
                 "content": (
                     "你是科研文献语义抽取器。只能依据给定原文抽取，不得补充常识或猜测。"
                     "必须返回合法 JSON，不要使用 Markdown 代码块。"
+                    "实体名称、实体类型、别名、属性、关系谓词和证据必须保留原文语言，禁止翻译。"
                 ),
             },
             {"role": "user", "content": prompt},
@@ -459,6 +591,9 @@ class SemanticGraphExtractor:
 6. evidenceQuote 必须逐字复制本段中的短句，禁止改写；无法找到直接证据时不要输出该项。
 7. confidence 使用 0 到 1 之间的数字。
 8. 关系的 source 和 target 使用 entities 中的 localId。
+9. name、canonicalName、type、aliases、属性名称与值必须使用原文语言和原文术语，禁止翻译。
+10. predicate 必须使用原文语言描述，禁止把英文关系翻译为中文或把中文关系翻译为英文。
+11. evidenceQuote 必须保持原文语言并逐字引用，禁止翻译、改写或概括。
 
 严格返回以下结构：
 {{

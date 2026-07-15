@@ -33,11 +33,11 @@
 3. There should be at most two classification levels.
 4. The classification must be relevant to the original catalog content.
 5. The output must conform to the specified JSON format.
-6. The names of the labels should not exceed 6 characters.
+6. Label names should be concise and should not exceed 6 words.
 7. Do not output any content other than the JSON.
 8. Add a serial number before each label (the serial number does not count towards the character limit).
 9. CContent selection principle: Only extract the key knowledge, algorithms, solutions, methods, etc. from the table of contents and incorporate them into the classification. Ignore the keywords, symbol explanations, journal or conference descriptions, references, acknowledgments, fund support, conflicts of interest, etc. that are not of primary importance. The primary tags should be determined mainly based on the title, abstract and keywords.
-10. Use English
+10. Use English for every primary and secondary label. Preserve technical names and abbreviations from the source literature instead of translating them.
 
 
 ## OutputFormat:

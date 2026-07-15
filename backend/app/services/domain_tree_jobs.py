@@ -34,6 +34,7 @@ class DomainTreeJob:
     started_at: str | None = None
     finished_at: str | None = None
     progress: dict[str, Any] = field(default_factory=dict)
+    partial_result: dict[str, Any] | None = None
     result: dict[str, Any] | None = None
     error: str = ""
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -51,6 +52,7 @@ class DomainTreeJob:
             "startedAt": self.started_at,
             "finishedAt": self.finished_at,
             "progress": dict(self.progress),
+            "partialResult": self.partial_result,
             "result": self.result,
             "error": self.error,
         }
@@ -118,8 +120,14 @@ class DomainTreeJobManager:
                     current.stage = str(update["stage"])
                 if "message" in update:
                     current.message = str(update["message"])
+                if isinstance(update.get("partialResult"), dict):
+                    current.partial_result = update["partialResult"]
                 current.progress.update(
-                    {key: value for key, value in update.items() if key not in {"stage", "message"}}
+                    {
+                        key: value
+                        for key, value in update.items()
+                        if key not in {"stage", "message", "partialResult"}
+                    }
                 )
 
         try:
@@ -135,12 +143,20 @@ class DomainTreeJobManager:
             with self._lock:
                 job.status = "cancelled"
                 job.stage = "cancelled"
-                job.message = "任务已取消"
+                job.message = (
+                    "知识图谱构建已取消，已生成的领域树仍可使用"
+                    if job.partial_result
+                    else "任务已取消"
+                )
         except Exception as error:
             with self._lock:
                 job.status = "failed"
                 job.stage = "failed"
-                job.message = "领域树生成失败"
+                job.message = (
+                    "知识图谱构建失败，已生成的领域树仍可使用"
+                    if job.partial_result
+                    else "领域树生成失败"
+                )
                 job.error = str(error)
         finally:
             with self._lock:

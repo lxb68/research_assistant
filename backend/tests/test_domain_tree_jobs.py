@@ -79,7 +79,14 @@ class DomainTreeJobManagerTest(unittest.TestCase):
         manager = DomainTreeJobManager(max_workers=1)
 
         def runner(report, cancel_event) -> dict:
-            report({"stage": "semantic_extraction", "completedChunks": 1, "totalChunks": 2})
+            report(
+                {
+                    "stage": "semantic_extraction",
+                    "completedChunks": 1,
+                    "totalChunks": 2,
+                    "partialResult": {"domainTree": [{"label": "部分结果"}]},
+                }
+            )
             return {"domainTree": [{"label": "测试"}]}
 
         job, created = manager.submit("workspace", "rebuild", runner)
@@ -88,6 +95,8 @@ class DomainTreeJobManagerTest(unittest.TestCase):
         self.assertTrue(created)
         self.assertEqual(terminal["status"], "completed")
         self.assertEqual(terminal["progress"]["completedChunks"], 1)
+        self.assertNotIn("partialResult", terminal["progress"])
+        self.assertEqual(terminal["partialResult"]["domainTree"][0]["label"], "部分结果")
         self.assertEqual(terminal["result"]["domainTree"][0]["label"], "测试")
 
     def test_reuses_active_job_and_cancels_it(self) -> None:

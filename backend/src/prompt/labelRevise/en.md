@@ -27,8 +27,9 @@
 
 3. Tag quality requirements:
    - Each tag must correspond to actual content in the catalog; do not create empty tags
-   - Tag names should be concise and clear, maximum 6 characters (excluding serial numbers)
+   - Tag names should be concise and clear, maximum 6 words (excluding serial numbers)
    - Must add serial numbers before tags (serial numbers do not count toward character limit)
+   - Use English for every primary and secondary label, preserving technical names and abbreviations from the source literature
 
 4. Hierarchical structure limitations:
    - Primary domain tag count: 5-10

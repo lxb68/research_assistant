@@ -115,6 +115,8 @@ type DomainTreeResult = {
   generatedAt?: string;
   action?: string;
   language?: string;
+  requestedLanguage?: string;
+  graphStatus?: "building" | "ready" | "failed" | "cancelled" | string;
   documentCount?: number;
   domainTree: DomainTreeNode[];
   knowledgeGraph?: {
@@ -141,6 +143,7 @@ type ModelConfigStatus = {
 
 type DomainTreeAction = "revise" | "rebuild" | "keep";
 type DomainTreeViewMode = "tree" | "graph";
+type DomainTreeLanguage = "auto" | "中文" | "English";
 
 type DomainTreeJob = {
   jobId: string;
@@ -157,7 +160,12 @@ type DomainTreeJob = {
     processedChunks?: number;
     failedChunks?: number;
     retryAttempt?: number;
+    cacheHits?: number;
+    cacheMisses?: number;
+    maxWorkers?: number;
+    domainTreeReady?: boolean;
   };
+  partialResult?: DomainTreeResult | null;
   result?: DomainTreeResult | null;
   error?: string;
 };
@@ -216,6 +224,20 @@ const ACTION_DESCRIPTIONS: Record<DomainTreeAction, string> = {
   rebuild: "基于当前全部文档重新生成一棵全新的领域树。",
   keep: "继续沿用当前领域树结构，不根据本次文献变化做任何修改。",
 };
+
+const LANGUAGE_OPTIONS: Array<{
+  value: DomainTreeLanguage;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "auto",
+    label: "跟随文献语言（推荐）",
+    description: "自动判断当前文献集合的主要语言。",
+  },
+  { value: "中文", label: "中文", description: "领域树标签使用中文。" },
+  { value: "English", label: "English", description: "Domain tree labels use English." },
+];
 
 /** 规范化领域树标签以便匹配。 */
 function cleanLabel(label: string) {
@@ -364,6 +386,7 @@ export default function DomainTreePage({
   const [modelStatus, setModelStatus] = useState<ModelConfigStatus | null>(null);
   const [isLoadingModelStatus, setIsLoadingModelStatus] = useState(true);
   const [manualGenerationMode, setManualGenerationMode] = useState<DomainTreeAction | null>(null);
+  const [generationLanguage, setGenerationLanguage] = useState<DomainTreeLanguage>("auto");
   const [viewMode, setViewMode] = useState<DomainTreeViewMode>("tree");
   const [selectedSecondaryKey, setSelectedSecondaryKey] = useState("");
   const [selectedSecondaryLabel, setSelectedSecondaryLabel] = useState("");
@@ -728,6 +751,9 @@ export default function DomainTreePage({
           setActiveJobId(payload.jobId);
           setIsGenerating(true);
           setStatus(payload.message || "领域树任务正在后台运行");
+          if (payload.partialResult) {
+            setResult(payload.partialResult);
+          }
         }
       } catch (jobError) {
         if (!cancelled) {
@@ -769,6 +795,13 @@ export default function DomainTreePage({
 
         setActiveJob(payload);
         setStatus(payload.message || "领域树任务正在后台运行");
+        if (payload.progress?.domainTreeReady && payload.partialResult) {
+          setResult((current) =>
+            current?.generatedAt === payload.partialResult?.generatedAt
+              ? current
+              : payload.partialResult ?? current,
+          );
+        }
         if (payload.status === "completed") {
           if (payload.result) {
             setResult(payload.result);
@@ -868,7 +901,7 @@ export default function DomainTreePage({
         body: JSON.stringify({
           project_id: WORKSPACE_DOMAIN_TREE_PROJECT_ID,
           action: generationMode,
-          language: "中文",
+          language: generationLanguage,
         }),
       });
       const payload = await response.json().catch(() => ({}));
@@ -1109,6 +1142,25 @@ export default function DomainTreePage({
                 </label>
               ))}
             </div>
+            <label className="domain-tree-language-control">
+              <span>领域树语言</span>
+              <select
+                aria-label="领域树语言"
+                value={generationLanguage}
+                onChange={(event) => setGenerationLanguage(event.target.value as DomainTreeLanguage)}
+                disabled={isGenerating}
+              >
+                {LANGUAGE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <small>
+                {LANGUAGE_OPTIONS.find((option) => option.value === generationLanguage)?.description}
+                {result?.language ? ` 最近一次实际使用：${result.language}。` : ""}
+              </small>
+            </label>
           </div>
 
           <div className="domain-tree-action-buttons">
@@ -1153,6 +1205,9 @@ export default function DomainTreePage({
             <div className="domain-tree-meta">
               <span>{activeJob.progress?.processedChunks ?? 0} 个成功分块</span>
               <span>{activeJob.progress?.failedChunks ?? 0} 个失败分块</span>
+              <span>{activeJob.progress?.cacheHits ?? 0} 个缓存命中</span>
+              <span>{activeJob.progress?.cacheMisses ?? 0} 个待抽取分块</span>
+              <span>{activeJob.progress?.maxWorkers ?? 4} 路并发</span>
               {activeJob.progress?.retryAttempt ? (
                 <span>正在进行第 {activeJob.progress.retryAttempt} 次尝试</span>
               ) : null}

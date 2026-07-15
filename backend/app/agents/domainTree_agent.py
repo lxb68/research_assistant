@@ -29,6 +29,7 @@ from app.services.task_control import (
 logger = logging.getLogger(__name__)
 
 _MODEL_OUTPUT_PREVIEW_CHARS = 2000
+_AUTO_LANGUAGE_VALUES = {"auto", "跟随文献语言", "follow source", "source"}
 
 
 def _log_text_preview(value: Any, *, limit: int = _MODEL_OUTPUT_PREVIEW_CHARS) -> str:
@@ -239,7 +240,7 @@ class DomainTreeAgent:
         all_toc: str | None = None,
         new_toc: str | None = None,
         model: Any | None = None,
-        language: str = "中文",
+        language: str = "auto",
         delete_toc: str | None = None,
         project: dict[str, Any] | None = None,
         cancel_event: threading.Event | None = None,
@@ -268,7 +269,7 @@ class DomainTreeAgent:
         all_toc: str | None = None,
         new_toc: str | None = None,
         model: Any | None = None,
-        language: str = "中文",
+        language: str = "auto",
         delete_toc: str | None = None,
         project: dict[str, Any] | None = None,
         cancel_event: threading.Event | None = None,
@@ -337,6 +338,15 @@ class DomainTreeAgent:
                 for record_id in previous_document_catalog
                 if previous_document_catalog.get(record_id) != next_document_catalog.get(record_id)
             )
+        requested_language = language
+        language = self._resolve_analysis_language(language, catalog_text)
+        logger.info(
+            "[%s] 领域树语言已确定：requested=%s resolved=%s",
+            normalized_project_id,
+            requested_language,
+            language,
+        )
+        report(requestedLanguage=requested_language, resolvedLanguage=language)
         if action == "revise" and existing_tags:
             prompt = self.get_label_revise_prompt(
                 language,
@@ -375,20 +385,43 @@ class DomainTreeAgent:
             logger.error("[%s] 领域树标签生成失败", normalized_project_id)
             return None
 
-        # 构建知识图谱
+        # 先保存领域树，使前端无需等待全文知识图谱即可展示分类结果。
         raise_if_cancelled(cancel_event)
-        report(stage="knowledge_graph", message="正在构建知识图谱并抽取全文语义")
-        stage_started_at = time.perf_counter()
-        graph = self._build_knowledge_graph(
-            project_id=normalized_project_id,
+        generated_at = self.save_domain_tree_snapshot(
+            normalized_project_id,
+            tags,
             documents=documents,
-            tags=tags,
             catalog_text=catalog_text,
-            project=project or {},
-            model_runtime=self._resolve_model_runtime(model),
-            cancel_event=cancel_event,
-            progress_callback=progress_callback,
+            action=action,
+            language=language,
+            requested_language=requested_language,
         )
+        report(
+            stage="knowledge_graph",
+            message="领域树已生成，知识图谱正在后台构建",
+            domainTreeReady=True,
+            partialResult=self.get_result(normalized_project_id),
+        )
+
+        # 在领域树可用后继续构建知识图谱。
+        stage_started_at = time.perf_counter()
+        try:
+            graph = self._build_knowledge_graph(
+                project_id=normalized_project_id,
+                documents=documents,
+                tags=tags,
+                catalog_text=catalog_text,
+                project=project or {},
+                model_runtime=self._resolve_model_runtime(model),
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+            )
+        except DomainTreeGenerationCancelled:
+            self._set_graph_status(normalized_project_id, "cancelled")
+            raise
+        except Exception:
+            self._set_graph_status(normalized_project_id, "failed")
+            raise
         extraction = graph.get("extraction") if isinstance(graph.get("extraction"), dict) else {}
         logger.info(
             "[%s] 知识图谱构建完成：nodes=%s edges=%s entities=%s relations=%s "
@@ -413,6 +446,8 @@ class DomainTreeAgent:
             catalog_text=catalog_text,
             action=action,
             language=language,
+            requested_language=requested_language,
+            generated_at=generated_at,
         )
         logger.info(
             "[%s] 领域树任务完成：save_elapsed_ms=%.1f total_elapsed_ms=%.1f",
@@ -455,9 +490,14 @@ class DomainTreeAgent:
 
         try:
             domain_payload = json.loads(domain_tree_path.read_text(encoding="utf-8"))
+            graph_status = (
+                str(domain_payload.get("graphStatus", "ready"))
+                if isinstance(domain_payload, dict)
+                else "ready"
+            )
             graph_payload = (
                 json.loads(knowledge_graph_path.read_text(encoding="utf-8"))
-                if knowledge_graph_path.exists()
+                if knowledge_graph_path.exists() and graph_status == "ready"
                 else {}
             )
             manifest_payload = (
@@ -476,6 +516,8 @@ class DomainTreeAgent:
             "generatedAt": domain_payload.get("generatedAt", "") if isinstance(domain_payload, dict) else "",
             "action": domain_payload.get("action", "") if isinstance(domain_payload, dict) else "",
             "language": domain_payload.get("language", "") if isinstance(domain_payload, dict) else "",
+            "requestedLanguage": domain_payload.get("requestedLanguage", "") if isinstance(domain_payload, dict) else "",
+            "graphStatus": graph_status,
             "documentCount": domain_payload.get("documentCount", 0) if isinstance(domain_payload, dict) else 0,
             "domainTree": domain_tree if isinstance(domain_tree, list) else [],
             "knowledgeGraph": graph_payload if isinstance(graph_payload, dict) else {},
@@ -534,6 +576,71 @@ class DomainTreeAgent:
             filtered.append(node)
         return filtered
 
+    def save_domain_tree_snapshot(
+        self,
+        project_id: str,
+        tags: list[dict[str, Any]],
+        *,
+        documents: list[SourceDocument],
+        catalog_text: str,
+        action: str,
+        language: str,
+        requested_language: str | None = None,
+    ) -> str:
+        """先保存可展示的领域树快照，并将知识图谱标记为后台构建中。"""
+        output_dir = self._analysis_dir(project_id)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        generated_at = datetime.now(timezone.utc).isoformat()
+        domain_payload = {
+            "projectId": project_id,
+            "generatedAt": generated_at,
+            "action": action,
+            "language": language,
+            "requestedLanguage": requested_language or language,
+            "graphStatus": "building",
+            "documentCount": len(documents),
+            "domainTree": tags,
+        }
+        manifest_payload = {
+            "projectId": project_id,
+            "generatedAt": generated_at,
+            "action": action,
+            "language": language,
+            "requestedLanguage": requested_language or language,
+            "graphStatus": "building",
+            "documents": [
+                {
+                    "recordId": document.record_id,
+                    "title": document.title,
+                    "markdownPath": str(document.markdown_path) if document.markdown_path else "",
+                    "markdownDir": str(document.markdown_dir) if document.markdown_dir else "",
+                    "tocEntryCount": len(document.toc_entries),
+                    "catalogText": self._build_document_catalog_text(document, index + 1),
+                }
+                for index, document in enumerate(documents)
+            ],
+        }
+        self._write_text_atomic(output_dir / "catalog.txt", catalog_text)
+        self._write_json_atomic(output_dir / "manifest.json", manifest_payload)
+        # 最后提交 domain_tree.json，使 building 状态只在其他快照文件完整后可见。
+        self._write_json_atomic(output_dir / "domain_tree.json", domain_payload)
+        logger.info("[%s] 领域树快照已保存，知识图谱转入后台构建", project_id)
+        return generated_at
+
+    def _set_graph_status(self, project_id: str, status: str) -> None:
+        """在图谱任务取消或失败时更新领域树快照状态。"""
+        domain_tree_path = self._analysis_dir(project_id) / "domain_tree.json"
+        if not domain_tree_path.exists():
+            return
+        try:
+            payload = json.loads(domain_tree_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return
+            payload["graphStatus"] = status
+            self._write_json_atomic(domain_tree_path, payload)
+        except (OSError, json.JSONDecodeError) as error:
+            logger.warning("[%s] 更新知识图谱状态失败：%s", project_id, error)
+
     def batch_save_tags(
         self,
         project_id: str,
@@ -544,17 +651,21 @@ class DomainTreeAgent:
         catalog_text: str,
         action: str,
         language: str,
+        requested_language: str | None = None,
+        generated_at: str | None = None,
     ) -> None:
         """批量保存领域树标签及相关分析产物。"""
         output_dir = self._analysis_dir(project_id)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        generated_at = datetime.now(timezone.utc).isoformat()
+        generated_at = generated_at or datetime.now(timezone.utc).isoformat()
         domain_payload = {
             "projectId": project_id,
             "generatedAt": generated_at,
             "action": action,
             "language": language,
+            "requestedLanguage": requested_language or language,
+            "graphStatus": "ready",
             "documentCount": len(documents),
             "domainTree": tags,
         }
@@ -563,12 +674,15 @@ class DomainTreeAgent:
             "projectId": project_id,
             "generatedAt": generated_at,
             "documentCount": len(documents),
+            "graphStatus": "ready",
         }
         manifest_payload = {
             "projectId": project_id,
             "generatedAt": generated_at,
             "action": action,
             "language": language,
+            "requestedLanguage": requested_language or language,
+            "graphStatus": "ready",
             "documents": [
                 {
                     "recordId": document.record_id,
@@ -582,19 +696,11 @@ class DomainTreeAgent:
             ],
         }
 
-        (output_dir / "domain_tree.json").write_text(
-            json.dumps(domain_payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        (output_dir / "knowledge_graph.json").write_text(
-            json.dumps(graph_payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        (output_dir / "catalog.txt").write_text(catalog_text, encoding="utf-8")
-        (output_dir / "manifest.json").write_text(
-            json.dumps(manifest_payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        self._write_json_atomic(output_dir / "knowledge_graph.json", graph_payload)
+        self._write_text_atomic(output_dir / "catalog.txt", catalog_text)
+        self._write_json_atomic(output_dir / "manifest.json", manifest_payload)
+        # domain_tree.json 是就绪状态的提交点，必须最后写入。
+        self._write_json_atomic(output_dir / "domain_tree.json", domain_payload)
         logger.info(
             "[%s] 已保存领域树和知识图谱：directory=%s domain_tree_bytes=%s "
             "knowledge_graph_bytes=%s catalog_bytes=%s manifest_bytes=%s",
@@ -605,6 +711,16 @@ class DomainTreeAgent:
             (output_dir / "catalog.txt").stat().st_size,
             (output_dir / "manifest.json").stat().st_size,
         )
+
+    def _write_json_atomic(self, path: Path, payload: Any) -> None:
+        """在同目录写临时文件后原子替换 JSON 结果。"""
+        self._write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def _write_text_atomic(self, path: Path, content: str) -> None:
+        """原子写入文本，避免读取端观察到半写文件。"""
+        temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+        temporary_path.write_text(content, encoding="utf-8")
+        temporary_path.replace(path)
 
     def _generate_domain_tree(
         self,
@@ -629,7 +745,7 @@ class DomainTreeAgent:
         if tags:
             return self.filter_domain_tree(tags)
         logger.info("大模型不可用或返回了无效 JSON，改用启发式规则生成领域树")
-        return self._heuristic_domain_tree(documents, catalog_text)
+        return self._heuristic_domain_tree(documents, catalog_text, language=language)
 
     def _call_llm(
         self,
@@ -645,12 +761,18 @@ class DomainTreeAgent:
         if not runtime:
             return None
         system_constraint = str(runtime.get("system_constraint") or "").strip()
+        output_language_constraint = (
+            "Return all domain and subdomain labels in Chinese."
+            if self._is_chinese_language(language)
+            else "Return all domain and subdomain labels in English."
+        )
         messages = [
             {
                 "role": "system",
                 "content": (
                     "You are a precise knowledge classification assistant. "
                     "Return only valid JSON and do not include markdown fences. "
+                    f"{output_language_constraint} "
                     f"{system_constraint}"
                 ),
             },
@@ -1120,6 +1242,8 @@ class DomainTreeAgent:
         # 全文语义抽取独立于领域树规则：即使某个实体无法归入领域，也保留其原文证据。
         semantic_graph = SemanticGraphExtractor(
             model_runtime,
+            cache_dir=self._analysis_dir(project_id) / "semantic_cache",
+            max_workers=settings.semantic_graph_max_workers,
             cancel_event=cancel_event,
             progress_callback=progress_callback,
         ).extract(
@@ -1204,16 +1328,26 @@ class DomainTreeAgent:
         self,
         documents: list[SourceDocument],
         catalog_text: str,
+        *,
+        language: str = "auto",
     ) -> list[dict[str, Any]]:
         """在大模型不可用时按启发式规则生成领域树。"""
         del catalog_text
         topic_scores, topic_documents = self._collect_topic_candidates(documents)
         if not topic_scores:
-            fallback_labels = [
-                {"label": "1 核心主题", "child": [{"label": "1.1 文献主题"}]},
-                {"label": "2 方法机制", "child": [{"label": "2.1 关键方法"}]},
-                {"label": "3 实验应用", "child": [{"label": "3.1 应用场景"}]},
-            ]
+            fallback_labels = (
+                [
+                    {"label": "1 核心主题", "child": [{"label": "1.1 文献主题"}]},
+                    {"label": "2 方法机制", "child": [{"label": "2.1 关键方法"}]},
+                    {"label": "3 实验应用", "child": [{"label": "3.1 应用场景"}]},
+                ]
+                if self._is_chinese_language(language)
+                else [
+                    {"label": "1 Core Topics", "child": [{"label": "1.1 Research Topics"}]},
+                    {"label": "2 Methods", "child": [{"label": "2.1 Key Methods"}]},
+                    {"label": "3 Applications", "child": [{"label": "3.1 Use Cases"}]},
+                ]
+            )
             return fallback_labels
 
         ranked_topics = sorted(
@@ -1694,6 +1828,20 @@ class DomainTreeAgent:
         normalized = str(language).strip().lower()
         return normalized in {"zh", "中文", "cn", "chinese"}
 
+    def _resolve_analysis_language(self, language: str, source_text: str) -> str:
+        """解析显式语言设置，或根据文献目录中的字符分布自动判断主要语言。"""
+        normalized = str(language or "auto").strip().lower()
+        if normalized not in _AUTO_LANGUAGE_VALUES:
+            return "中文" if self._is_chinese_language(language) else "English"
+
+        chinese_char_count = len(re.findall(r"[\u3400-\u9fff]", source_text))
+        latin_char_count = len(re.findall(r"[A-Za-z]", source_text))
+        total_language_chars = chinese_char_count + latin_char_count
+        if total_language_chars == 0:
+            return "English"
+        chinese_ratio = chinese_char_count / total_language_chars
+        return "中文" if chinese_char_count >= 20 and chinese_ratio >= 0.2 else "English"
+
 
 async def handle_domain_tree(
     project_id: str,
@@ -1701,7 +1849,7 @@ async def handle_domain_tree(
     all_toc: str | None = None,
     new_toc: str | None = None,
     model: Any | None = None,
-    language: str = "中文",
+    language: str = "auto",
     delete_toc: str | None = None,
     project: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]] | None:
