@@ -38,13 +38,19 @@ class OrchestratorRoutingTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """普通寒暄应直接回答，不能触发论文检索或下载流程。"""
         build_model_payload.return_value = self.model
-        completion.return_value = '{"action":"direct","answer":"你好！有什么我可以帮你的吗？"}'
+        completion.side_effect = [
+            '{"action":"direct"}',
+            "你好！有什么我可以帮你的吗？",
+        ]
 
         result = await OrchestratorAgent().run("你好", action="auto")
 
         self.assertEqual(result["action"], "direct")
         self.assertEqual(result["result"]["answer"], "你好！有什么我可以帮你的吗？")
         self.assertEqual(result["result"]["sources"], [])
+        self.assertEqual(completion.call_count, 2)
+        self.assertEqual(completion.call_args_list[0].kwargs["response_format"], {"type": "json_object"})
+        self.assertNotIn("response_format", completion.call_args_list[1].kwargs)
         research_agent.assert_not_called()
 
     @patch("app.agents.orchestrator_agent.chat_completion")
@@ -64,6 +70,168 @@ class OrchestratorRoutingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["action"], "chat")
         agent._run_research_pipeline.assert_awaited_once()
+
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_router_repairs_natural_language_answer_for_research_followup(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """路由器越权回答研究追问时应只修复一次，并继续进入 chat 流程。"""
+        build_model_payload.return_value = self.model
+        completion.side_effect = [
+            "根据现有知识库片段，Squirrel 使用安全两方计算，MPlookup 使用多方查找论证。",
+            '{"action":"chat"}',
+        ]
+        history = [
+            {
+                "role": "assistant",
+                "content": "Squirrel 与 MPlookup 都属于安全计算领域，但技术路线不同。",
+                "sources": [
+                    {"index": 1, "record_id": "paper-squirrel", "chunk_index": 23},
+                    {"index": 2, "record_id": "paper-mplookup", "chunk_index": 41},
+                ],
+            }
+        ]
+        agent = OrchestratorAgent()
+        agent.run_logger = Mock()
+
+        decision = await agent._route_task("两者分别是什么技术路线", {"history": history})
+
+        self.assertEqual(decision["action"], "chat")
+        self.assertEqual(completion.call_count, 2)
+        self.assertEqual(completion.call_args_list[0].kwargs["response_format"], {"type": "json_object"})
+        self.assertEqual(completion.call_args_list[1].kwargs["response_format"], {"type": "json_object"})
+        repair_payload = completion.call_args_list[1].args[1][1]["content"]
+        self.assertIn("两者分别是什么技术路线", repair_payload)
+        events = [call.kwargs.get("event") for call in agent.run_logger.log.call_args_list]
+        self.assertIn("intent_routing_parse_error", events)
+        self.assertIn("intent_routing_repair_raw_response", events)
+        self.assertIn("intent_routing", events)
+
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_router_prompt_only_classifies_and_never_answers(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """路由 prompt 必须保持单一分类职责。"""
+        build_model_payload.return_value = self.model
+        completion.return_value = '{"action":"chat"}'
+
+        await OrchestratorAgent()._route_task("研究问题", {})
+
+        system_prompt = completion.call_args.args[1][0]["content"]
+        self.assertIn("只负责选择动作", system_prompt)
+        self.assertIn("不负责回答用户问题", system_prompt)
+        self.assertNotIn("请直接给出自然", system_prompt)
+
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_router_repairs_empty_json_mode_response_once(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """JSON Output 返回空内容时应进入同一次修复路径。"""
+        build_model_payload.return_value = self.model
+        completion.side_effect = [RuntimeError("模型返回了空回答"), '{"action":"chat"}']
+        agent = OrchestratorAgent()
+        agent.run_logger = Mock()
+
+        decision = await agent._route_task("研究问题", {})
+
+        self.assertEqual(decision["action"], "chat")
+        self.assertEqual(completion.call_count, 2)
+        events = [call.kwargs.get("event") for call in agent.run_logger.log.call_args_list]
+        self.assertIn("intent_routing_empty_response", events)
+        self.assertIn("intent_routing_repair_raw_response", events)
+
+    @patch("app.agents.orchestrator_agent.ResearchChatAgent")
+    async def test_pipeline_uses_context_plan_for_targeted_retrieval(self, research_agent_class: Mock) -> None:
+        """编排器应把独立问题、目标论文和目标片段交给检索器并复用证据。"""
+        research_agent = research_agent_class.return_value
+        plan = {
+            "standaloneQuestion": "Squirrel 实验部分的通信开销如何？",
+            "targetPaperIds": ["paper-3"],
+            "targetChunks": [{"record_id": "paper-3", "chunk_index": 7}],
+            "needsClarification": False,
+            "clarificationQuestion": "",
+        }
+        evidence = [
+            {"record_id": "paper-3", "chunk_index": 7, "title": "Squirrel", "text": "target", "score": 1.0},
+            {"record_id": "paper-3", "chunk_index": 8, "title": "Squirrel", "text": "context", "score": 0.8},
+        ]
+        diagnostics = {
+            "paperCount": 1,
+            "evidenceCount": 2,
+            "distinctPaperCount": 1,
+            "selectedPaperIds": ["paper-3"],
+            "requestedChunkRefs": [{"recordId": "paper-3", "chunkIndex": 7}],
+            "resolvedChunkRefs": [{"recordId": "paper-3", "chunkIndex": 7}],
+            "queryCoverage": 0.8,
+        }
+        research_agent.plan_retrieval.return_value = (plan, '{"standalone_question":"..."}')
+        research_agent.retrieve_evidence.return_value = (evidence, diagnostics)
+        research_agent.run.return_value = {"answer": "回答 [1]", "sources": []}
+        agent = OrchestratorAgent()
+        agent.run_logger = Mock()
+
+        result = await agent._run_research_pipeline(
+            "这个片段的开销呢？",
+            {
+                "history": [
+                    {
+                        "role": "assistant",
+                        "content": "实验结果 [1]",
+                        "sources": [{"index": 1, "record_id": "paper-3", "chunk_index": 7}],
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(result["action"], "chat")
+        research_agent.retrieve_evidence.assert_called_once_with(
+            "这个片段的开销呢？",
+            history=agent._clean_history(
+                [
+                    {
+                        "role": "assistant",
+                        "content": "实验结果 [1]",
+                        "sources": [{"index": 1, "record_id": "paper-3", "chunk_index": 7}],
+                    }
+                ]
+            ),
+            paper_ids=["paper-3"],
+            retrieval_query="Squirrel 实验部分的通信开销如何？",
+            target_chunks=[{"record_id": "paper-3", "chunk_index": 7}],
+        )
+        self.assertEqual(research_agent.run.call_args.kwargs["evidence"], evidence)
+
+    @patch("app.agents.orchestrator_agent.ResearchChatAgent")
+    async def test_pipeline_stops_when_context_plan_needs_clarification(self, research_agent_class: Mock) -> None:
+        """指代不唯一时应请求澄清，不能退化为全库盲检索。"""
+        research_agent = research_agent_class.return_value
+        research_agent.plan_retrieval.return_value = (
+            {
+                "standaloneQuestion": "它的方法有什么局限？",
+                "targetPaperIds": [],
+                "targetChunks": [],
+                "needsClarification": True,
+                "clarificationQuestion": "你指的是 MPlookup 还是 Squirrel？",
+            },
+            "{}",
+        )
+        agent = OrchestratorAgent()
+        agent.run_logger = Mock()
+
+        result = await agent._run_research_pipeline("它的方法有什么局限？", {"history": []})
+
+        self.assertEqual(result["action"], "request_user_action")
+        self.assertEqual(result["result"]["message"], "你指的是 MPlookup 还是 Squirrel？")
+        research_agent.retrieve_evidence.assert_not_called()
 
     @patch("app.agents.orchestrator_agent.chat_completion")
     @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
@@ -89,6 +257,8 @@ class OrchestratorRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(raw_log.kwargs["data"]["rawResponsePreview"]), agent.ROUTER_RAW_LOG_LIMIT)
         self.assertEqual(raw_log.kwargs["data"]["responseLength"], len(raw_response))
         self.assertTrue(raw_log.kwargs["data"]["truncated"])
+        events = [call.kwargs.get("event") for call in agent.run_logger.log.call_args_list]
+        self.assertLess(events.index("intent_routing_raw_response"), events.index("intent_routing"))
 
     @patch("app.agents.orchestrator_agent.chat_completion")
     @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
@@ -113,6 +283,26 @@ class OrchestratorRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error_log.kwargs["data"]["errorType"], "ValueError")
         self.assertEqual(error_log.kwargs["data"]["rawResponsePreview"], "这不是 JSON")
         self.assertFalse(error_log.kwargs["data"]["truncated"])
+        self.assertEqual(completion.call_count, 2)
+        events = [call.kwargs.get("event") for call in agent.run_logger.log.call_args_list]
+        self.assertIn("intent_routing_repair_error", events)
+
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_explicit_direct_action_only_calls_answer_model(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """显式 direct 不需要路由调用，只执行独立回答阶段。"""
+        build_model_payload.return_value = self.model
+        completion.return_value = "直接回答"
+
+        result = await OrchestratorAgent().run("你好", action="direct")
+
+        self.assertEqual(result["result"]["answer"], "直接回答")
+        self.assertEqual(completion.call_count, 1)
+        self.assertNotIn("response_format", completion.call_args.kwargs)
 
     @patch("app.agents.orchestrator_agent.chat_completion")
     @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
@@ -140,6 +330,69 @@ class OrchestratorRoutingTest(unittest.IsolatedAsyncioTestCase):
         """模型不能借由路由结果调用未注册工具。"""
         with self.assertRaisesRegex(ValueError, "未注册"):
             OrchestratorAgent()._parse_route_decision('{"action":"shell","answer":""}')
+
+    def test_evidence_assessment_requires_every_selected_paper(self) -> None:
+        """指定文献缺少任意一篇证据时不得判定为充分。"""
+        diagnostics = {
+            "evidenceCount": 3,
+            "distinctPaperCount": 2,
+            "queryCoverage": 0.8,
+            "selectedPaperIds": ["paper-1", "paper-2"],
+        }
+
+        sufficient, reasons = OrchestratorAgent()._assess_evidence(
+            diagnostics,
+            required_paper_ids=["paper-1", "paper-3"],
+        )
+
+        self.assertFalse(sufficient)
+        self.assertTrue(any("1 篇未检索到有效证据" in reason for reason in reasons))
+
+    def test_clean_history_removes_transient_frontend_errors(self) -> None:
+        """前端失败占位消息不得进入后续 Agent 上下文。"""
+        history = [
+            {"role": "user", "content": "第一次提问"},
+            {"role": "assistant", "content": "请求失败：模型未返回有效结果"},
+            {"role": "user", "content": "第二次提问"},
+            {
+                "role": "assistant",
+                "content": "正常回答",
+                "sources": [{"index": 1, "record_id": "paper-1", "chunk_index": 2}],
+            },
+        ]
+
+        cleaned = OrchestratorAgent()._clean_history(history)
+
+        self.assertEqual(
+            cleaned,
+            [
+                {"role": "user", "content": "第二次提问"},
+                {
+                    "role": "assistant",
+                    "content": "正常回答",
+                    "sources": [{"index": 1, "record_id": "paper-1", "chunk_index": 2}],
+                },
+            ],
+        )
+
+    def test_run_logger_preserves_non_secret_token_metrics(self) -> None:
+        """Token 统计和检索关键词不应被当作凭据字段脱敏。"""
+        logger = RunLogger.__new__(RunLogger)
+        redacted = logger._redact_value(
+            {
+                "averageChunkTokens": 512,
+                "maxChunkTokens": 700,
+                "tokenCount": 128,
+                "searchKeyword": "secure computation",
+                "accessToken": "sensitive",
+            }
+        )
+
+        self.assertEqual(redacted["averageChunkTokens"], 512)
+        self.assertEqual(redacted["maxChunkTokens"], 700)
+        self.assertEqual(redacted["tokenCount"], 128)
+        self.assertEqual(redacted["searchKeyword"], "secure computation")
+        self.assertEqual(redacted["accessToken"], "***")
 
 
 if __name__ == "__main__":

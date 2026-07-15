@@ -25,10 +25,36 @@ import { buildApiUrl } from "@/lib/api";
 import { readNdjsonStream } from "@/lib/stream";
 
 type Props = { onOpenDownload: () => void; onOpenBrowse: () => void; onOpenDomainTree: () => void; onOpenSettings: () => void };
-type Source = { index: number; title: string; year?: string; source?: string };
-type Message = { id: number; role: "user" | "agent"; content: string; sources?: Source[]; responseMode?: "direct" | "research" };
+type Source = {
+  index: number;
+  recordId?: string;
+  title: string;
+  year?: string;
+  source?: string;
+  section?: string;
+  chunkIndex?: number;
+  excerpt?: string;
+};
+type Message = {
+  id: number;
+  role: "user" | "agent";
+  content: string;
+  sources?: Source[];
+  contextSources?: Source[];
+  responseMode?: "direct" | "research";
+};
 type StreamEvent = { type: "log"; message: string } | { type: "result"; result: OrchestratorResult } | { type: "error"; message: string } | { type: "done" };
-type OrchestratorResult = { action: string; result: { answer?: string; sources?: Source[]; status?: string; message?: string; requiredMaterials?: Array<{ description: string }> } };
+type OrchestratorResult = {
+  action: string;
+  result: {
+    answer?: string;
+    sources?: Source[];
+    retrievedSources?: Source[];
+    status?: string;
+    message?: string;
+    requiredMaterials?: Array<{ description: string }>;
+  };
+};
 
 type Conversation = { id: string; title: string; date: string; messages: Message[] };
 type ResearchRecord = {
@@ -46,6 +72,21 @@ const CONVERSATIONS_KEY = "research-agent.conversations";
 // 三组键分别保存会话列表、当前会话和归档研究记录。
 const ACTIVE_CONVERSATION_KEY = "research-agent.active-conversation";
 const RESEARCH_RECORDS_KEY = "research-agent.research-records";
+
+/** 排除失败占位消息及其对应问题，避免不完整轮次污染后续模型上下文。 */
+function usableHistory(messages: Message[]) {
+  const cleaned: Message[] = [];
+  const errorPrefixes = ["请求失败：", "研究对话请求失败", "研究任务已完成，但没有返回"];
+  for (const message of messages) {
+    const isTransientError = message.role === "agent" && errorPrefixes.some((prefix) => message.content.startsWith(prefix));
+    if (isTransientError) {
+      if (cleaned.at(-1)?.role === "user") cleaned.pop();
+      continue;
+    }
+    cleaned.push(message);
+  }
+  return cleaned;
+}
 
 /** 管理研究对话、流式响应和本地会话记录。 */
 export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomainTree, onOpenSettings }: Props) {
@@ -145,9 +186,20 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question: prompt,
-          history: messages.slice(-8).map((message) => ({
+          history: usableHistory(messages).slice(-8).map((message) => ({
             role: message.role === "agent" ? "assistant" : "user",
             content: message.content,
+            sources: message.role === "agent"
+              ? (message.contextSources ?? message.sources ?? []).map((source) => ({
+                  index: source.index,
+                  record_id: source.recordId ?? "",
+                  title: source.title,
+                  year: source.year ?? "",
+                  section: source.section ?? "",
+                  chunk_index: source.chunkIndex ?? 0,
+                  excerpt: source.excerpt ?? "",
+                }))
+              : [],
           })),
         }),
       });
@@ -167,6 +219,7 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
             role: "agent",
             content,
             sources: payload.sources,
+            contextSources: payload.retrievedSources ?? payload.sources,
             responseMode: event.result.action === "direct" ? "direct" : "research",
           };
           setMessages((items) => [...items, agentMessage]);

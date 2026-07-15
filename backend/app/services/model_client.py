@@ -169,16 +169,41 @@ def chat_completion(
     *,
     temperature: float = 0.2,
     timeout: int = 60,
+    response_format: dict[str, Any] | None = None,
 ) -> str:
     """按运行时协议发送聊天请求，并统一返回纯文本回答。"""
     protocol = normalize_protocol(model.get("protocol", ""), model.get("provider", "custom"))
     if protocol == "ollama":
-        return _chat_ollama(model, messages, temperature=temperature, timeout=timeout)
+        return _chat_ollama(
+            model,
+            messages,
+            temperature=temperature,
+            timeout=timeout,
+            response_format=response_format,
+        )
     if protocol == "anthropic":
-        return _chat_anthropic(model, messages, temperature=temperature, timeout=timeout)
+        return _chat_anthropic(
+            model,
+            messages,
+            temperature=temperature,
+            timeout=timeout,
+            response_format=response_format,
+        )
     if protocol == "gemini":
-        return _chat_gemini(model, messages, temperature=temperature, timeout=timeout)
-    return _chat_openai_compatible(model, messages, temperature=temperature, timeout=timeout)
+        return _chat_gemini(
+            model,
+            messages,
+            temperature=temperature,
+            timeout=timeout,
+            response_format=response_format,
+        )
+    return _chat_openai_compatible(
+        model,
+        messages,
+        temperature=temperature,
+        timeout=timeout,
+        response_format=response_format,
+    )
 
 
 def discover_models(model: dict[str, str], *, timeout: int = 15) -> list[str]:
@@ -230,14 +255,35 @@ def _chat_openai_compatible(
     *,
     temperature: float,
     timeout: int,
+    response_format: dict[str, Any] | None,
 ) -> str:
     """调用 OpenAI Chat Completions 兼容接口。"""
+    request_body: dict[str, Any] = {
+        "model": _require_model_name(model),
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if response_format:
+        request_body["response_format"] = response_format
+        request_body["max_tokens"] = 4096
     response = requests.post(
         _join_endpoint(_require_base_url(model), "chat/completions"),
         headers=_bearer_headers(model.get("api_key", "")),
-        json={"model": _require_model_name(model), "messages": messages, "temperature": temperature},
+        json=request_body,
         timeout=timeout,
     )
+    if response_format and _response_format_is_unsupported(response):
+        fallback_body = {
+            key: value
+            for key, value in request_body.items()
+            if key not in {"response_format", "max_tokens"}
+        }
+        response = requests.post(
+            _join_endpoint(_require_base_url(model), "chat/completions"),
+            headers=_bearer_headers(model.get("api_key", "")),
+            json=fallback_body,
+            timeout=timeout,
+        )
     payload = _response_json(response)
     choices = payload.get("choices") if isinstance(payload, dict) else None
     if not choices:
@@ -252,16 +298,20 @@ def _chat_ollama(
     *,
     temperature: float,
     timeout: int,
+    response_format: dict[str, Any] | None,
 ) -> str:
     """调用 Ollama 原生聊天接口，并关闭流式响应以统一上层处理。"""
+    request_body: dict[str, Any] = {
+        "model": _require_model_name(model),
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": temperature},
+    }
+    if response_format and response_format.get("type") == "json_object":
+        request_body["format"] = "json"
     response = requests.post(
         _ollama_endpoint(_require_base_url(model), "chat"),
-        json={
-            "model": _require_model_name(model),
-            "messages": messages,
-            "stream": False,
-            "options": {"temperature": temperature},
-        },
+        json=request_body,
         timeout=timeout,
     )
     payload = _response_json(response)
@@ -275,6 +325,7 @@ def _chat_anthropic(
     *,
     temperature: float,
     timeout: int,
+    response_format: dict[str, Any] | None,
 ) -> str:
     """把通用消息转换为 Anthropic Messages API 请求。"""
     system_messages = [item["content"] for item in messages if item.get("role") == "system" and item.get("content")]
@@ -311,6 +362,7 @@ def _chat_gemini(
     *,
     temperature: float,
     timeout: int,
+    response_format: dict[str, Any] | None,
 ) -> str:
     """把通用消息转换为 Gemini generateContent 请求。"""
     system_messages = [item["content"] for item in messages if item.get("role") == "system" and item.get("content")]
@@ -323,13 +375,16 @@ def _chat_gemini(
         if item.get("role") in {"user", "assistant"} and item.get("content")
     ]
     model_name = _require_model_name(model).removeprefix("models/")
+    generation_config: dict[str, Any] = {"temperature": temperature}
+    if response_format and response_format.get("type") == "json_object":
+        generation_config["responseMimeType"] = "application/json"
     response = requests.post(
         f"{_require_base_url(model)}/models/{quote(model_name, safe='')}:generateContent",
         headers={"Content-Type": "application/json", "x-goog-api-key": str(model.get("api_key") or "")},
         json={
             "systemInstruction": {"parts": [{"text": "\n\n".join(system_messages)}]},
             "contents": contents,
-            "generationConfig": {"temperature": temperature},
+            "generationConfig": generation_config,
         },
         timeout=timeout,
     )
@@ -338,6 +393,23 @@ def _chat_gemini(
     parts = candidates[0].get("content", {}).get("parts", []) if candidates and isinstance(candidates[0], dict) else []
     content = "\n".join(str(item.get("text") or "") for item in parts if isinstance(item, dict))
     return _require_answer(content)
+
+
+def _response_format_is_unsupported(response: requests.Response) -> bool:
+    """仅在上游明确拒绝 response_format 时降级为普通文本调用。"""
+    if int(getattr(response, "status_code", 0) or 0) not in {400, 404, 422}:
+        return False
+    try:
+        payload = response.json()
+    except (ValueError, TypeError):
+        return False
+    detail = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or detail.get("type") or "")
+    else:
+        message = str(detail or "")
+    lowered = message.lower()
+    return any(token in lowered for token in ("response_format", "json_object", "json mode", "unsupported format"))
 
 
 def _response_json(response: requests.Response) -> dict[str, Any]:

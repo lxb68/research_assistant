@@ -66,7 +66,7 @@ class RunLogger:
         """对单个字符串值执行凭据模式脱敏。"""
         if isinstance(value, dict):
             return {
-                str(key): "***" if any(token in str(key).lower() for token in ("key", "token", "secret", "authorization")) else self._redact_value(item)
+                str(key): "***" if self._is_sensitive_key(str(key)) else self._redact_value(item)
                 for key, item in value.items()
             }
         if isinstance(value, list):
@@ -74,6 +74,16 @@ class RunLogger:
         if isinstance(value, str):
             return self._redact(value)
         return value
+
+    def _is_sensitive_key(self, key: str) -> bool:
+        """只匹配凭据字段，避免误伤 tokenCount、searchKeyword 等诊断字段。"""
+        normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+        return (
+            "authorization" in normalized
+            or "apikey" in normalized
+            or "secret" in normalized
+            or normalized.endswith("token")
+        )
 
 
 __all__ = ["RunLogger"]

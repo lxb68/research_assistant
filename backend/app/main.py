@@ -107,10 +107,26 @@ class ModelDiscoveryRequest(BaseModel):
     api_key: str = Field("", description="模型服务 API Key；留空时尝试使用同供应商已保存密钥")
 
 
+class ChatSource(BaseModel):
+    """描述一条助手消息关联的论文或证据片段。"""
+    index: int = Field(..., ge=1, le=1000)
+    record_id: str = Field("", max_length=200)
+    title: str = Field("", max_length=2000)
+    year: str = Field("", max_length=20)
+    section: str = Field("", max_length=2000)
+    chunk_index: int = Field(0, ge=0)
+    excerpt: str = Field("", max_length=4000)
+
+
 class ChatMessage(BaseModel):
     """描述研究对话中的单条消息。"""
     role: str = Field(..., pattern="^(user|assistant)$", description="消息角色")
     content: str = Field(..., min_length=1, max_length=20000, description="消息内容")
+    sources: list[ChatSource] = Field(
+        default_factory=list,
+        max_length=20,
+        description="助手消息关联的论文与证据片段元数据",
+    )
 
 
 class ResearchChatRequest(BaseModel):

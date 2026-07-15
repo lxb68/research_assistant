@@ -12,7 +12,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.services.rag_chunking import BaseMarkdownBlock, MarkdownRAGChunker
-from app.services.rag_retriever import RAGRetriever
+from app.services.rag_retriever import EvidenceChunk, RAGRetriever
 
 
 class MarkdownRAGChunkerTest(unittest.TestCase):
@@ -120,6 +120,62 @@ class RAGRetrieverChunkIntegrationTest(unittest.TestCase):
         self.assertEqual(chunks[0].base_chunk_indices, [0])
         self.assertIn("训练过程", retriever._searchable_text(chunks[0]))
         self.assertLessEqual(chunks[0].token_count, 20)
+
+    def test_resolves_exact_chunk_reference_from_conversation_source(self) -> None:
+        """结构化对话来源应能恢复到同一论文片段。"""
+        retriever = RAGRetriever(target_chunk_tokens=12, max_chunk_tokens=20, overlap_tokens=0)
+        paper = {
+            "id": "paper-1",
+            "title": "测试论文",
+            "splitChunks": [
+                {"content": "第一段证据。", "summary": "第一段", "semanticCategory": "body"},
+                {"content": "第二段证据。", "summary": "第二段", "semanticCategory": "body"},
+            ],
+        }
+        chunks = retriever._paper_chunks(paper)
+        target_index = chunks[-1].chunk_index
+
+        evidence = retriever.resolve_chunk_references(
+            [paper],
+            [{"record_id": "paper-1", "chunk_index": target_index}],
+        )
+
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]["record_id"], "paper-1")
+        self.assertEqual(evidence[0]["chunk_index"], target_index)
+
+    def test_single_paper_can_reach_minimum_evidence_despite_configured_cap(self) -> None:
+        """单篇论文上限为 1 时，应按最低证据要求动态扩大有效上限。"""
+        retriever = RAGRetriever(max_chunks=6, max_chunks_per_paper=1)
+        ranked = [
+            EvidenceChunk(
+                record_id="paper-1",
+                title="测试论文",
+                text=text,
+                score=score,
+                chunk_index=index,
+            )
+            for index, (text, score) in enumerate(
+                [
+                    ("安全训练协议使用秘密共享计算梯度。", 0.9),
+                    ("树节点分裂通过安全比较协议完成。", 0.8),
+                    ("预测阶段组合所有弱学习器。", 0.7),
+                ]
+            )
+        ]
+
+        effective_limit = retriever._effective_max_chunks_per_paper(
+            ranked,
+            minimum_evidence_count=2,
+        )
+        selected = retriever._select_diverse(
+            ranked,
+            max_chunks_per_paper=effective_limit,
+        )
+
+        self.assertEqual(effective_limit, 2)
+        self.assertEqual(len(selected), 2)
+        self.assertEqual({item.record_id for item in selected}, {"paper-1"})
 
 
 if __name__ == "__main__":

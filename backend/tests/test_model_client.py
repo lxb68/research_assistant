@@ -53,6 +53,57 @@ class ModelClientTest(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Bearer test-key")
 
     @patch("app.services.model_client.requests.post")
+    def test_openai_compatible_json_output(self, post: Mock) -> None:
+        """OpenAI 兼容协议应把 JSON Output 参数传给上游。"""
+        post.return_value = response({"choices": [{"message": {"content": '{"action":"chat"}'}}]})
+
+        answer = chat_completion(
+            {
+                "provider": "deepseek",
+                "protocol": "openai_compatible",
+                "base_url": "https://api.deepseek.com",
+                "api_key": "test-key",
+                "model": "deepseek-chat",
+            },
+            self.messages,
+            response_format={"type": "json_object"},
+        )
+
+        self.assertEqual(answer, '{"action":"chat"}')
+        self.assertEqual(post.call_args.kwargs["json"]["response_format"], {"type": "json_object"})
+        self.assertEqual(post.call_args.kwargs["json"]["max_tokens"], 4096)
+
+    @patch("app.services.model_client.requests.post")
+    def test_openai_compatible_retries_without_unsupported_response_format(self, post: Mock) -> None:
+        """兼容服务明确拒绝 response_format 时应降级一次。"""
+        unsupported = response(
+            {"error": {"message": "response_format is unsupported"}},
+            status_code=400,
+        )
+        unsupported.raise_for_status.side_effect = RuntimeError("should not be reached")
+        post.side_effect = [
+            unsupported,
+            response({"choices": [{"message": {"content": '{"action":"chat"}'}}]}),
+        ]
+
+        answer = chat_completion(
+            {
+                "provider": "custom",
+                "protocol": "openai_compatible",
+                "base_url": "http://model.test/v1",
+                "api_key": "",
+                "model": "test-model",
+            },
+            self.messages,
+            response_format={"type": "json_object"},
+        )
+
+        self.assertEqual(answer, '{"action":"chat"}')
+        self.assertEqual(post.call_count, 2)
+        self.assertIn("response_format", post.call_args_list[0].kwargs["json"])
+        self.assertNotIn("response_format", post.call_args_list[1].kwargs["json"])
+
+    @patch("app.services.model_client.requests.post")
     def test_ollama_chat_without_api_key(self, post: Mock) -> None:
         """Ollama 应调用原生接口、关闭流式输出且不要求密钥。"""
         post.return_value = response({"message": {"role": "assistant", "content": "本地回答"}})
@@ -69,6 +120,25 @@ class ModelClientTest(unittest.TestCase):
         self.assertEqual(answer, "本地回答")
         self.assertEqual(post.call_args.args[0], "http://127.0.0.1:11434/api/chat")
         self.assertFalse(post.call_args.kwargs["json"]["stream"])
+
+    @patch("app.services.model_client.requests.post")
+    def test_ollama_json_output(self, post: Mock) -> None:
+        """Ollama JSON 模式应映射为 format=json。"""
+        post.return_value = response({"message": {"role": "assistant", "content": '{"action":"chat"}'}})
+
+        chat_completion(
+            {
+                "provider": "ollama",
+                "protocol": "ollama",
+                "base_url": "http://127.0.0.1:11434",
+                "api_key": "",
+                "model": "qwen3:8b",
+            },
+            self.messages,
+            response_format={"type": "json_object"},
+        )
+
+        self.assertEqual(post.call_args.kwargs["json"]["format"], "json")
 
     @patch("app.services.model_client.requests.post")
     def test_anthropic_message_conversion(self, post: Mock) -> None:
@@ -107,6 +177,28 @@ class ModelClientTest(unittest.TestCase):
         )
         self.assertEqual(answer, "Gemini 回答")
         self.assertTrue(post.call_args.args[0].endswith("/models/gemini-test:generateContent"))
+
+    @patch("app.services.model_client.requests.post")
+    def test_gemini_json_output(self, post: Mock) -> None:
+        """Gemini JSON 模式应设置 application/json MIME。"""
+        post.return_value = response(
+            {"candidates": [{"content": {"parts": [{"text": '{"action":"chat"}'}]}}]},
+        )
+
+        chat_completion(
+            {
+                "provider": "gemini",
+                "protocol": "gemini",
+                "base_url": "https://generativelanguage.googleapis.com/v1beta",
+                "api_key": "test-key",
+                "model": "gemini-test",
+            },
+            self.messages,
+            response_format={"type": "json_object"},
+        )
+
+        generation_config = post.call_args.kwargs["json"]["generationConfig"]
+        self.assertEqual(generation_config["responseMimeType"], "application/json")
 
     @patch("app.services.model_client.requests.get")
     def test_discover_ollama_models(self, get: Mock) -> None:

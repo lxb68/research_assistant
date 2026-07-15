@@ -29,10 +29,9 @@ class OrchestratorAgent:
 - search：用户明确要求搜索、查找或下载论文。
 - domain_tree：用户明确要求生成、重建或更新领域树/知识图谱。
 
-如果选择 direct，请直接给出自然、简洁且有帮助的中文回答；不要提及路由、Agent 或内部流程。
-如果选择其他动作，answer 必须为空字符串。
+你只负责选择动作，不负责回答用户问题，也不要复述、解释或执行用户请求。
 只输出一个 JSON 对象，不要输出 Markdown 或额外文字：
-{"action":"direct|chat|search|domain_tree","answer":"..."}
+{"action":"direct|chat|search|domain_tree"}
 """
 
     def __init__(self, *, log_callback: Callable[[str], None] | None = None) -> None:
@@ -65,18 +64,17 @@ class OrchestratorAgent:
             route = await self._route_task(normalized_task, args)
             selected = route["action"]
         else:
-            route = {"action": normalized_action, "answer": "", "source": "explicit"}
-            if normalized_action == "direct":
-                route["answer"] = await self._answer_direct(normalized_task, args)
+            route = {"action": normalized_action, "source": "explicit"}
             selected = normalized_action
         self._log(f"编排器已选择处理方式：{selected}")
 
         if selected == "direct":
+            answer = await self._answer_direct(normalized_task, args)
             return {
                 "agent": "orchestrator",
                 "action": "direct",
                 "result": {
-                    "answer": route["answer"],
+                    "answer": answer,
                     "sources": [],
                     "trace": [
                         {
@@ -147,20 +145,32 @@ class OrchestratorAgent:
                 "content": f"{self.ROUTER_SYSTEM_PROMPT}\n\n{SYSTEM_SECURITY_CONSTRAINT}",
             }
         ]
-        for message in list(args.get("history") or [])[-8:]:
+        for message in self._clean_history(list(args.get("history") or []))[-8:]:
             role = str(message.get("role") or "").strip()
             content = str(message.get("content") or "").strip()
             if role in {"user", "assistant"} and content:
                 messages.append({"role": role, "content": content[:6000]})
         messages.append({"role": "user", "content": task})
 
-        raw_decision = await asyncio.to_thread(
-            chat_completion,
-            model,
-            messages,
-            temperature=0,
-            timeout=settings.research_agent_request_timeout,
-        )
+        try:
+            raw_decision = await asyncio.to_thread(
+                chat_completion,
+                model,
+                messages,
+                temperature=0,
+                timeout=settings.research_agent_request_timeout,
+                response_format={"type": "json_object"},
+            )
+        except RuntimeError as call_error:
+            if "模型返回了空回答" not in str(call_error):
+                raise
+            raw_decision = ""
+            self.run_logger.log(
+                "OrchestratorAgent",
+                "意图路由模型返回空内容，将执行一次格式修复",
+                event="intent_routing_empty_response",
+                data={"errorType": type(call_error).__name__, "errorMessage": str(call_error)},
+            )
         raw_text = str(raw_decision or "")
         self.run_logger.log(
             "OrchestratorAgent",
@@ -187,7 +197,72 @@ class OrchestratorAgent:
                     "truncated": len(raw_text) > self.ROUTER_RAW_LOG_LIMIT,
                 },
             )
-            raise
+            repair_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是意图路由 JSON 修复器。根据原始用户问题和路由器的错误输出，"
+                        "只返回一个合法 JSON 对象。只能选择 direct、chat、search、domain_tree；"
+                        "不要回答用户问题，不要输出 Markdown 或解释。\n"
+                        '{"action":"direct|chat|search|domain_tree"}'
+                        f"\n\n{SYSTEM_SECURITY_CONSTRAINT}"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"userQuestion": task, "invalidRouterOutput": raw_text[:12000]},
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+            try:
+                repaired_raw = await asyncio.to_thread(
+                    chat_completion,
+                    model,
+                    repair_messages,
+                    temperature=0,
+                    timeout=settings.research_agent_request_timeout,
+                    response_format={"type": "json_object"},
+                )
+            except Exception as repair_call_error:
+                self.run_logger.log(
+                    "OrchestratorAgent",
+                    "意图路由格式修复调用失败",
+                    event="intent_routing_repair_error",
+                    data={
+                        "errorType": type(repair_call_error).__name__,
+                        "errorMessage": str(repair_call_error),
+                    },
+                )
+                raise
+            repaired_text = str(repaired_raw or "")
+            self.run_logger.log(
+                "OrchestratorAgent",
+                "意图路由格式修复响应已接收",
+                event="intent_routing_repair_raw_response",
+                data={
+                    "rawResponsePreview": repaired_text[: self.ROUTER_RAW_LOG_LIMIT],
+                    "responseLength": len(repaired_text),
+                    "truncated": len(repaired_text) > self.ROUTER_RAW_LOG_LIMIT,
+                },
+            )
+            try:
+                decision = self._parse_route_decision(repaired_raw)
+            except Exception as repair_error:
+                self.run_logger.log(
+                    "OrchestratorAgent",
+                    "意图路由格式修复失败",
+                    event="intent_routing_repair_error",
+                    data={
+                        "errorType": type(repair_error).__name__,
+                        "errorMessage": str(repair_error),
+                        "rawResponsePreview": repaired_text[: self.ROUTER_RAW_LOG_LIMIT],
+                        "responseLength": len(repaired_text),
+                        "truncated": len(repaired_text) > self.ROUTER_RAW_LOG_LIMIT,
+                    },
+                )
+                raise
         self.run_logger.log(
             "OrchestratorAgent",
             "意图路由完成",
@@ -210,7 +285,7 @@ class OrchestratorAgent:
                 ),
             }
         ]
-        for message in list(args.get("history") or [])[-8:]:
+        for message in self._clean_history(list(args.get("history") or []))[-8:]:
             role = str(message.get("role") or "").strip()
             content = str(message.get("content") or "").strip()
             if role in {"user", "assistant"} and content:
@@ -245,18 +320,118 @@ class OrchestratorAgent:
         action = str(payload.get("action") or "").strip().lower()
         if action not in self.ALLOWED_ACTIONS - {"auto"}:
             raise ValueError(f"模型选择了未注册的编排动作：{action or '空'}")
-        answer = str(payload.get("answer") or "").strip()
-        if action == "direct" and not answer:
-            raise ValueError("模型选择直接回答，但没有返回回答内容")
-        return {"action": action, "answer": answer, "source": "model"}
+        return {"action": action, "source": "model"}
+
+    def _clean_history(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """过滤前端生成的失败占位消息，避免其污染后续路由和回答。"""
+        cleaned: list[dict[str, Any]] = []
+        transient_error_prefixes = ("请求失败：", "研究对话请求失败", "研究任务已完成，但没有返回")
+        for message in history:
+            role = str(message.get("role") or "").strip()
+            content = str(message.get("content") or "").strip()
+            if role not in {"user", "assistant"} or not content:
+                continue
+            if role == "assistant" and content.startswith(transient_error_prefixes):
+                if cleaned and cleaned[-1]["role"] == "user":
+                    cleaned.pop()
+                continue
+            cleaned_message: dict[str, Any] = {"role": role, "content": content}
+            if role == "assistant":
+                sources = [
+                    dict(source)
+                    for source in list(message.get("sources") or [])[:20]
+                    if isinstance(source, dict)
+                ]
+                if sources:
+                    cleaned_message["sources"] = sources
+            cleaned.append(cleaned_message)
+        return cleaned
 
     async def _run_research_pipeline(self, task: str, args: dict[str, Any]) -> dict[str, Any]:
         """依次评估本地证据、补充论文并生成研究回答。"""
-        history = list(args.get("history") or [])
+        history = self._clean_history(list(args.get("history") or []))
         paper_ids = list(args.get("paper_ids") or []) or None
-        allow_search = bool(args.get("allow_external_search", True)) and not paper_ids
         trace: list[dict[str, Any]] = []
         research_agent = ResearchChatAgent(log_callback=self.log_callback)
+
+        try:
+            plan, raw_plan = await asyncio.to_thread(
+                research_agent.plan_retrieval,
+                task,
+                history,
+                explicit_paper_ids=paper_ids,
+            )
+            self.run_logger.log(
+                "OrchestratorAgent",
+                "上下文查询规划模型原始响应已接收",
+                event="query_planning_raw_response",
+                data={
+                    "rawResponsePreview": raw_plan[: self.ROUTER_RAW_LOG_LIMIT],
+                    "responseLength": len(raw_plan),
+                    "truncated": len(raw_plan) > self.ROUTER_RAW_LOG_LIMIT,
+                },
+            )
+        except Exception as error:
+            raw_plan = str(getattr(error, "raw_response", "") or "")
+            self.run_logger.log(
+                "OrchestratorAgent",
+                "上下文查询规划失败",
+                event="query_planning_error",
+                data={
+                    "errorType": type(error).__name__,
+                    "errorMessage": str(error),
+                    "rawResponsePreview": raw_plan[: self.ROUTER_RAW_LOG_LIMIT],
+                    "responseLength": len(raw_plan),
+                    "truncated": len(raw_plan) > self.ROUTER_RAW_LOG_LIMIT,
+                },
+            )
+            has_grounded_history = any(message.get("sources") for message in history if message.get("role") == "assistant")
+            if has_grounded_history:
+                return {
+                    "agent": "orchestrator",
+                    "action": "request_user_action",
+                    "result": {
+                        "status": "needs_user_action",
+                        "message": "暂时无法可靠解析这条追问所指的论文或片段，请补充论文标题、章节或引用内容后重试。",
+                        "requiredAction": "clarify_research_reference",
+                        "trace": [{"step": "query_planning", "status": "failed", "error": str(error)}],
+                        "runLog": self.run_logger.public_info(),
+                    },
+                }
+            plan = {
+                "standaloneQuestion": task,
+                "targetPaperIds": list(paper_ids or []),
+                "targetChunks": [],
+                "needsClarification": False,
+                "clarificationQuestion": "",
+                "planningFallback": True,
+            }
+
+        self.run_logger.log(
+            "OrchestratorAgent",
+            "上下文查询规划完成",
+            event="query_planning",
+            data=plan,
+        )
+        trace.append({"step": "query_planning", "agent": "research_chat", "status": "completed", **plan})
+        if plan.get("needsClarification"):
+            self._log("当前研究追问存在无法唯一确定的指代，需要用户澄清")
+            return {
+                "agent": "orchestrator",
+                "action": "request_user_action",
+                "result": {
+                    "status": "needs_user_action",
+                    "message": str(plan.get("clarificationQuestion") or "请明确你指的是哪篇文献或哪个片段。"),
+                    "requiredAction": "clarify_research_reference",
+                    "trace": trace,
+                    "runLog": self.run_logger.public_info(),
+                },
+            }
+
+        paper_ids = list(plan.get("targetPaperIds") or paper_ids or []) or None
+        target_chunks = list(plan.get("targetChunks") or [])
+        allow_search = bool(args.get("allow_external_search", True)) and not paper_ids and not target_chunks
+        retrieval_query = str(plan.get("standaloneQuestion") or task).strip()
 
         self._log("正在判断本地知识库证据是否充分")
         evidence, diagnostics = await asyncio.to_thread(
@@ -264,8 +439,14 @@ class OrchestratorAgent:
             task,
             history=history,
             paper_ids=paper_ids,
+            retrieval_query=retrieval_query,
+            target_chunks=target_chunks,
         )
-        sufficient, reasons = self._assess_evidence(diagnostics)
+        sufficient, reasons = self._assess_evidence(
+            diagnostics,
+            required_paper_ids=paper_ids,
+            required_chunk_refs=target_chunks,
+        )
         self.run_logger.log(
             "RAGRetriever",
             "本地证据充分度评估完成",
@@ -287,7 +468,7 @@ class OrchestratorAgent:
         if not sufficient and allow_search:
             self._log("本地证据不足，正在调用 HunterAgent 搜索补充论文")
             hunter_agent = HunterAgent(log_callback=self.log_callback)
-            requested_search_keyword = str(args.get("search_keyword") or task)
+            requested_search_keyword = str(args.get("search_keyword") or retrieval_query)
             search_keyword = await asyncio.to_thread(hunter_agent.translate_search_query, requested_search_keyword)
             self.run_logger.log(
                 "OrchestratorAgent",
@@ -351,6 +532,7 @@ class OrchestratorAgent:
                 research_agent.retrieve_evidence,
                 task,
                 history=history,
+                retrieval_query=retrieval_query,
             )
             sufficient, reasons = self._assess_evidence(diagnostics)
             self.run_logger.log(
@@ -395,6 +577,8 @@ class OrchestratorAgent:
                     task,
                     history=history,
                     paper_ids=paper_ids,
+                    retrieval_query=retrieval_query,
+                    evidence=evidence,
                 ),
             )
         except RecoveryExhaustedError as error:
@@ -428,18 +612,43 @@ class OrchestratorAgent:
             "result": {**result, "trace": trace, "runLog": self.run_logger.public_info()},
         }
 
-    def _assess_evidence(self, diagnostics: dict[str, Any]) -> tuple[bool, list[str]]:
+    def _assess_evidence(
+        self,
+        diagnostics: dict[str, Any],
+        *,
+        required_paper_ids: list[str] | None = None,
+        required_chunk_refs: list[dict[str, Any]] | None = None,
+    ) -> tuple[bool, list[str]]:
         """根据检索诊断信息判断当前证据是否充分。"""
         reasons: list[str] = []
         evidence_count = int(diagnostics.get("evidenceCount") or 0)
         distinct_papers = int(diagnostics.get("distinctPaperCount") or 0)
         coverage = float(diagnostics.get("queryCoverage") or 0)
+        required_ids = {str(record_id) for record_id in required_paper_ids or [] if str(record_id)}
         if evidence_count < settings.orchestrator_min_evidence:
             reasons.append(f"相关证据片段仅 {evidence_count} 条")
-        if distinct_papers < min(2, settings.orchestrator_min_evidence):
+        minimum_distinct_papers = min(2, settings.orchestrator_min_evidence)
+        if required_ids:
+            minimum_distinct_papers = min(minimum_distinct_papers, len(required_ids))
+        if distinct_papers < minimum_distinct_papers:
             reasons.append(f"相关证据仅覆盖 {distinct_papers} 篇文献")
         if coverage < settings.orchestrator_min_query_coverage:
             reasons.append(f"问题关键词覆盖率仅 {coverage:.0%}")
+        selected_ids = {str(record_id) for record_id in diagnostics.get("selectedPaperIds") or [] if str(record_id)}
+        missing_ids = sorted(required_ids - selected_ids)
+        if missing_ids:
+            reasons.append(f"指定文献中有 {len(missing_ids)} 篇未检索到有效证据")
+        required_chunks = {
+            (str(item.get("record_id") or item.get("recordId") or ""), int(item.get("chunk_index") or item.get("chunkIndex") or 0))
+            for item in required_chunk_refs or []
+        }
+        resolved_chunks = {
+            (str(item.get("recordId") or item.get("record_id") or ""), int(item.get("chunkIndex") or item.get("chunk_index") or 0))
+            for item in diagnostics.get("resolvedChunkRefs") or []
+        }
+        missing_chunks = required_chunks - resolved_chunks
+        if missing_chunks:
+            reasons.append(f"指定片段中有 {len(missing_chunks)} 条无法从本地文献恢复")
         return not reasons, reasons
 
     def _required_materials(
