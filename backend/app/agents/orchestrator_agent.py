@@ -20,6 +20,7 @@ class OrchestratorAgent:
     """受限编排器：只允许调用已注册的研究工具。"""
 
     ALLOWED_ACTIONS = {"auto", "direct", "chat", "search", "domain_tree"}
+    ROUTER_RAW_LOG_LIMIT = 2000
     ROUTER_SYSTEM_PROMPT = """你是研究助手的意图路由器。判断当前用户消息是否需要调用研究 Agent，或可直接回答。
 
 只能选择以下动作：
@@ -160,7 +161,33 @@ class OrchestratorAgent:
             temperature=0,
             timeout=settings.research_agent_request_timeout,
         )
-        decision = self._parse_route_decision(raw_decision)
+        raw_text = str(raw_decision or "")
+        self.run_logger.log(
+            "OrchestratorAgent",
+            "意图路由模型原始响应已接收",
+            event="intent_routing_raw_response",
+            data={
+                "rawResponsePreview": raw_text[: self.ROUTER_RAW_LOG_LIMIT],
+                "responseLength": len(raw_text),
+                "truncated": len(raw_text) > self.ROUTER_RAW_LOG_LIMIT,
+            },
+        )
+        try:
+            decision = self._parse_route_decision(raw_decision)
+        except Exception as error:
+            self.run_logger.log(
+                "OrchestratorAgent",
+                "意图路由结果解析失败",
+                event="intent_routing_parse_error",
+                data={
+                    "errorType": type(error).__name__,
+                    "errorMessage": str(error),
+                    "rawResponsePreview": raw_text[: self.ROUTER_RAW_LOG_LIMIT],
+                    "responseLength": len(raw_text),
+                    "truncated": len(raw_text) > self.ROUTER_RAW_LOG_LIMIT,
+                },
+            )
+            raise
         self.run_logger.log(
             "OrchestratorAgent",
             "意图路由完成",
