@@ -8,6 +8,7 @@ import logging
 import re
 import sqlite3
 import threading
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,6 +27,16 @@ from app.services.task_control import (
 
 
 logger = logging.getLogger(__name__)
+
+_MODEL_OUTPUT_PREVIEW_CHARS = 2000
+
+
+def _log_text_preview(value: Any, *, limit: int = _MODEL_OUTPUT_PREVIEW_CHARS) -> str:
+    """把模型输出压缩为适合单行日志的有限长度预览。"""
+    compact = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit]}...<truncated {len(compact) - limit} chars>"
 
 _GENERIC_SECTION_TITLES = {
     "additional ablation studies",
@@ -264,18 +275,33 @@ class DomainTreeAgent:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]] | None:
         """同步执行领域树主流程，供工作线程和测试直接调用。"""
+        started_at = time.perf_counter()
+
         def report(**update: Any) -> None:
             if progress_callback:
                 progress_callback(update)
 
         raise_if_cancelled(cancel_event)
         normalized_project_id = self._normalize_project_id(project_id)
+        logger.info(
+            "[%s] 领域树任务开始：action=%s language=%s",
+            normalized_project_id,
+            action,
+            language,
+        )
         # 直接调用 get_tags 返回当前已存储的标签，不进行任何计算或生成
         if action == "keep":
             logger.info("[%s] 使用已有领域树", normalized_project_id)
             return self.get_tags(normalized_project_id)
 
+        stage_started_at = time.perf_counter()
         documents = self._load_documents(normalized_project_id)
+        logger.info(
+            "[%s] 文档加载完成：document_count=%s elapsed_ms=%.1f",
+            normalized_project_id,
+            len(documents),
+            (time.perf_counter() - stage_started_at) * 1000,
+        )
         if not documents:
             logger.warning("[%s] 存储目录中未找到 Markdown 来源", normalized_project_id)
             return None
@@ -283,7 +309,15 @@ class DomainTreeAgent:
         report(stage="domain_tree", message="正在准备文献目录", documentCount=len(documents))
 
         #
+        stage_started_at = time.perf_counter()
         catalog_text = all_toc or self._build_catalog_text(documents)
+        logger.info(
+            "[%s] 文献目录准备完成：catalog_chars=%s supplied=%s elapsed_ms=%.1f",
+            normalized_project_id,
+            len(catalog_text),
+            bool(all_toc),
+            (time.perf_counter() - stage_started_at) * 1000,
+        )
         if not catalog_text.strip():
             logger.warning("[%s] 目录文本为空，跳过领域树生成", normalized_project_id)
             return None
@@ -319,6 +353,7 @@ class DomainTreeAgent:
         # 生成领域树标签
         raise_if_cancelled(cancel_event)
         report(stage="domain_tree", message="正在调用模型生成领域树")
+        stage_started_at = time.perf_counter()
         tags = self._generate_domain_tree(
             prompt=prompt,
             documents=documents,
@@ -329,6 +364,13 @@ class DomainTreeAgent:
             progress_callback=progress_callback,
         )
         tags = self._refine_tree_specificity(tags, documents)
+        logger.info(
+            "[%s] 领域树标签生成完成：top_level_count=%s elapsed_ms=%.1f output=%s",
+            normalized_project_id,
+            len(tags),
+            (time.perf_counter() - stage_started_at) * 1000,
+            _log_text_preview(json.dumps(tags, ensure_ascii=False)),
+        )
         if not tags:
             logger.error("[%s] 领域树标签生成失败", normalized_project_id)
             return None
@@ -336,6 +378,7 @@ class DomainTreeAgent:
         # 构建知识图谱
         raise_if_cancelled(cancel_event)
         report(stage="knowledge_graph", message="正在构建知识图谱并抽取全文语义")
+        stage_started_at = time.perf_counter()
         graph = self._build_knowledge_graph(
             project_id=normalized_project_id,
             documents=documents,
@@ -346,8 +389,22 @@ class DomainTreeAgent:
             cancel_event=cancel_event,
             progress_callback=progress_callback,
         )
+        extraction = graph.get("extraction") if isinstance(graph.get("extraction"), dict) else {}
+        logger.info(
+            "[%s] 知识图谱构建完成：nodes=%s edges=%s entities=%s relations=%s "
+            "processed_chunks=%s failed_chunks=%s elapsed_ms=%.1f",
+            normalized_project_id,
+            len(graph.get("nodes") or []),
+            len(graph.get("edges") or []),
+            len(graph.get("entities") or []),
+            len(graph.get("semanticRelations") or []),
+            extraction.get("processedChunkCount", 0),
+            extraction.get("failedChunkCount", 0),
+            (time.perf_counter() - stage_started_at) * 1000,
+        )
         raise_if_cancelled(cancel_event)
         report(stage="saving", message="正在保存领域树和知识图谱")
+        stage_started_at = time.perf_counter()
         self.batch_save_tags(
             normalized_project_id,
             tags,
@@ -356,6 +413,12 @@ class DomainTreeAgent:
             catalog_text=catalog_text,
             action=action,
             language=language,
+        )
+        logger.info(
+            "[%s] 领域树任务完成：save_elapsed_ms=%.1f total_elapsed_ms=%.1f",
+            normalized_project_id,
+            (time.perf_counter() - stage_started_at) * 1000,
+            (time.perf_counter() - started_at) * 1000,
         )
         return tags
 
@@ -532,7 +595,16 @@ class DomainTreeAgent:
             json.dumps(manifest_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        logger.info("[%s] 已将领域树和知识图谱保存到 %s", project_id, output_dir)
+        logger.info(
+            "[%s] 已保存领域树和知识图谱：directory=%s domain_tree_bytes=%s "
+            "knowledge_graph_bytes=%s catalog_bytes=%s manifest_bytes=%s",
+            project_id,
+            output_dir,
+            (output_dir / "domain_tree.json").stat().st_size,
+            (output_dir / "knowledge_graph.json").stat().st_size,
+            (output_dir / "catalog.txt").stat().st_size,
+            (output_dir / "manifest.json").stat().st_size,
+        )
 
     def _generate_domain_tree(
         self,
@@ -585,8 +657,16 @@ class DomainTreeAgent:
             {"role": "user", "content": prompt},
         ]
 
+        started_at = time.perf_counter()
+        logger.info(
+            "领域树模型请求开始：provider=%s model=%s prompt_chars=%s timeout_seconds=%s",
+            runtime.get("provider", ""),
+            runtime.get("model", ""),
+            len(prompt),
+            settings.request_timeout,
+        )
         try:
-            return call_with_retry(
+            answer = call_with_retry(
                 lambda: chat_completion(
                     runtime,
                     messages,
@@ -603,10 +683,21 @@ class DomainTreeAgent:
                     delay,
                 ),
             )
+            logger.info(
+                "领域树模型请求完成：elapsed_ms=%.1f output_chars=%s output_preview=%s",
+                (time.perf_counter() - started_at) * 1000,
+                len(answer),
+                _log_text_preview(answer),
+            )
+            return answer
         except DomainTreeGenerationCancelled:
             raise
         except Exception as error:
-            logger.warning("领域树大模型调用失败：%s", error)
+            logger.warning(
+                "领域树大模型调用失败：elapsed_ms=%.1f error=%s",
+                (time.perf_counter() - started_at) * 1000,
+                error,
+            )
             return None
 
     def _report_model_retry(
@@ -960,7 +1051,7 @@ class DomainTreeAgent:
         node_ids: set[str] = set()
         edge_keys: set[tuple[str, str, str]] = set()
         domain_keywords = self._domain_keywords_from_tree(tags)
-        print("[DEBUG] domain_keywords:", domain_keywords)
+        logger.debug("领域关键词映射：%s", domain_keywords)
 
         def add_node(node_id: str, name: str, node_type: str, **extra: Any) -> None:
             """向知识图谱加入一个去重后的节点。"""
@@ -1018,7 +1109,7 @@ class DomainTreeAgent:
                     add_edge(matched_domain, topic_id, "covers_topic")
 
             # 尝试将主题与领域匹配（桥接主题与已有领域）
-            for entry in self._filter_toc_entries(document.toc_entries)[:30]:
+            for entry in self._filter_toc_entries(document.toc_entries)[:30]: #筛出来的合格条目
                 title = str(entry.get("title", "")).strip()
                 if not title:
                     continue
@@ -1412,6 +1503,12 @@ class DomainTreeAgent:
             if score > best_score:
                 best_score = score
                 best_node_id = node_id
+        logger.debug(
+            "主题领域匹配：topic=%s best_node_id=%s best_score=%s",
+            phrase,
+            best_node_id,
+            best_score,
+        )
         return best_node_id or None
 
     def _read_prompt_file(self, category: str, language: str) -> str:
@@ -1514,7 +1611,7 @@ class DomainTreeAgent:
             return ""
         if lowered.startswith("appendix") or lowered.startswith("additional "):
             return ""
-        if self._is_non_core_section(cleaned):
+        if self._is_non_core_section(cleaned): # 非重点内容
             return ""
         if re.fullmatch(r"[a-z]", lowered):
             return ""
@@ -1538,7 +1635,7 @@ class DomainTreeAgent:
         return False
 
     def _filter_toc_entries(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """筛选目录条目、条目。"""
+        """筛选目录条目、条目,返回合格的条目。"""
         filtered: list[dict[str, Any]] = []
         for entry in entries:
             if not isinstance(entry, dict):

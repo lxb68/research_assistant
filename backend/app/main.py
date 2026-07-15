@@ -13,12 +13,15 @@ from pydantic import BaseModel, Field
 
 from app.agents import DomainTreeAgent, HunterAgent, OrchestratorAgent
 from app.core.config import settings
+from app.core.logging_config import configure_app_logging
 from app.services.mineru import MinerURequest, mineru_processing
 from app.services.domain_tree_jobs import domain_tree_jobs
 from app.services.model_client import discover_models
 from app.services.model_config import ModelConfigStore
 from app.services.paper_search import SUPPORTED_SOURCES, search_papers
 
+
+configure_app_logging(settings.log_level)
 
 MULTIPART_AVAILABLE = importlib.util.find_spec("multipart") is not None
 
@@ -116,7 +119,7 @@ class ResearchChatRequest(BaseModel):
 class OrchestratorRequest(BaseModel):
     """定义代理编排接口的请求参数。"""
     task: str = Field(..., min_length=1, max_length=20000, description="需要编排执行的研究任务")
-    action: str = Field("auto", pattern="^(auto|chat|search|domain_tree)$", description="指定动作或自动路由")
+    action: str = Field("auto", pattern="^(auto|direct|chat|search|domain_tree)$", description="指定动作或自动路由")
     arguments: dict = Field(default_factory=dict, description="传递给目标 Agent 的受限参数")
 
 
@@ -159,7 +162,7 @@ async def research_chat(payload: ResearchChatRequest) -> dict:
     try:
         result = await OrchestratorAgent().run(
             payload.question,
-            action="chat",
+            action="auto",
             arguments={
                 "history": [message.model_dump() for message in payload.history],
                 "paper_ids": payload.paper_ids,
@@ -194,7 +197,7 @@ def research_chat_stream(payload: ResearchChatRequest) -> StreamingResponse:
                 result = asyncio.run(
                     OrchestratorAgent(log_callback=push_log).run(
                         payload.question,
-                        action="chat",
+                        action="auto",
                         arguments={
                             "history": [message.model_dump() for message in payload.history],
                             "paper_ids": payload.paper_ids,

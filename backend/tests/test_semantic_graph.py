@@ -189,6 +189,39 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
         with self.assertRaises(DomainTreeGenerationCancelled):
             extractor.extract([])
 
+    def test_logs_chunk_performance_and_limited_model_output(self) -> None:
+        """每个分块应记录耗时、结果计数和受限长度的模型输出预览。"""
+        long_name = "A" * 2500
+        model_payload = {
+            "entities": [
+                {
+                    "localId": "e1",
+                    "name": long_name,
+                    "canonicalName": long_name,
+                    "type": "方法",
+                    "evidenceQuote": "Method A is evaluated.",
+                }
+            ],
+            "relations": [],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "paper.md"
+            path.write_text("# Method\n\nMethod A is evaluated.", encoding="utf-8")
+            extractor = SemanticGraphExtractor(
+                {"model": "test", "provider": "custom"},
+                chat_fn=lambda *args, **kwargs: json.dumps(model_payload),
+            )
+            with self.assertLogs("app.services.semantic_graph", level="INFO") as captured:
+                extractor.extract([SemanticSourceDocument("paper", "Paper", path)])
+
+        combined = "\n".join(captured.output)
+        self.assertIn("语义分块模型请求开始", combined)
+        self.assertIn("语义分块模型请求完成", combined)
+        self.assertIn("elapsed_ms=", combined)
+        self.assertIn("entity_count=1", combined)
+        self.assertIn("<truncated", combined)
+
 
 class DomainTreeSemanticIntegrationTest(unittest.TestCase):
     """验证全文语义结果会被并入原有领域知识图谱。"""

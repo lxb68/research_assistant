@@ -26,7 +26,7 @@ import { readNdjsonStream } from "@/lib/stream";
 
 type Props = { onOpenDownload: () => void; onOpenBrowse: () => void; onOpenDomainTree: () => void; onOpenSettings: () => void };
 type Source = { index: number; title: string; year?: string; source?: string };
-type Message = { id: number; role: "user" | "agent"; content: string; sources?: Source[] };
+type Message = { id: number; role: "user" | "agent"; content: string; sources?: Source[]; responseMode?: "direct" | "research" };
 type StreamEvent = { type: "log"; message: string } | { type: "result"; result: OrchestratorResult } | { type: "error"; message: string } | { type: "done" };
 type OrchestratorResult = { action: string; result: { answer?: string; sources?: Source[]; status?: string; message?: string; requiredMaterials?: Array<{ description: string }> } };
 
@@ -62,7 +62,9 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
   const [sidebar, setSidebar] = useState(true);
   const [copied, setCopied] = useState<number | null>(null);
   const nextMessageId = useRef(1);
-  const activeSources = [...messages].reverse().find((message) => message.role === "agent" && message.sources?.length)?.sources ?? [];
+  const activeAgentMessage = [...messages].reverse().find((message) => message.role === "agent");
+  const activeSources = activeAgentMessage?.sources ?? [];
+  const isDirectAnswer = activeAgentMessage?.responseMode === "direct";
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -136,7 +138,7 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
     }
     setInput("");
     setThinking(true);
-    setThinkingText("正在判断知识库证据是否充分…");
+    setThinkingText("正在判断如何处理你的问题…");
     try {
       const response = await fetch(buildApiUrl("/api/research/chat/stream"), {
         method: "POST",
@@ -160,7 +162,13 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
           const content = needsUserHelp
             ? `${payload.message || "当前流程需要你的协助。"}${materialText ? `\n\n建议补充：\n${materialText}` : ""}`
             : payload.answer || "研究任务已完成，但没有返回可展示的回答。";
-          const agentMessage: Message = { id: id + 1, role: "agent", content, sources: payload.sources };
+          const agentMessage: Message = {
+            id: id + 1,
+            role: "agent",
+            content,
+            sources: payload.sources,
+            responseMode: event.result.action === "direct" ? "direct" : "research",
+          };
           setMessages((items) => [...items, agentMessage]);
           setConversations((items) => items.map((conversation) =>
             conversation.id === conversationId
@@ -331,27 +339,31 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
           <div className="research-compose-wrap">
             <div className="research-prompts">{["生成一份文献综述大纲", "对比 RAG 与微调路线", "找出近两年的研究趋势"].map((text) => <button onClick={() => send(text)} key={text}><BoltRounded />{text}</button>)}</div>
             <form className="research-compose" onSubmit={submit}><textarea rows={2} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={keyDown} placeholder="继续追问，或给 Research Agent 一个任务…" /><div><button type="button"><AddRounded /></button><button type="button" className="library-pill"><FolderOpenRounded />医疗大模型研究 <span>42 篇</span></button><button className="research-send" disabled={!input.trim() || thinking}><SendRounded /></button></div></form>
-            <small className="research-note">内容由 AI 基于所选知识库生成，请核验关键结论与原始文献。</small>
+            <small className="research-note">{isDirectAnswer ? "本次为普通对话，未调用研究 Agent 或知识库。" : "研究内容由 AI 基于所选知识库生成，请核验关键结论与原始文献。"}</small>
           </div>
         </div>}
       </main>
 
       {workspaceView === "chat" ? <aside className="research-context">
-        <header><div><small>本次研究</small><strong>上下文与来源</strong></div><MoreHorizRounded /></header>
-        <section className="research-progress-card"><div><span><SearchRounded /></span><p><strong>深度研究</strong><small>已分析 {activeSources.length} 个相关来源</small></p><CheckRounded /></div><progress value="100" max="100" /><ul><li><CheckRounded />理解问题与规划</li><li><CheckRounded />检索知识库</li><li><CheckRounded />交叉验证证据</li><li><CheckRounded />生成综合结论</li></ul></section>
-        <div className="research-section-title"><strong>引用来源</strong><button onClick={onOpenBrowse}>查看全部</button></div>
-        <div className="research-sources">
-          {activeSources.length ? activeSources.map((source) => (
-            <button key={`context-source-${source.index}`}>
-              <span><ArticleOutlined /></span>
-              <p><strong>{source.title}</strong><small>{[source.source, source.year].filter(Boolean).join(" · ") || "本地知识库"}</small></p>
-              <em>{source.index}</em>
-            </button>
-          )) : <div className="research-source-empty">发送问题后，此处将显示本次回答引用的真实来源。</div>}
-        </div>
-        <div className="research-section-title"><strong>知识库范围</strong><button onClick={onOpenBrowse}>管理</button></div>
-        <div className="research-library"><span><FolderOpenRounded /></span><p><strong>医疗大模型研究</strong><small>42 篇文献 · 更新于今天</small></p><CheckRounded /></div>
-        <button className="research-add-source" onClick={onOpenBrowse}><AddRounded />添加知识来源</button>
+        <header><div><small>{isDirectAnswer ? "本次对话" : "本次研究"}</small><strong>{isDirectAnswer ? "回答方式" : "上下文与来源"}</strong></div><MoreHorizRounded /></header>
+        {isDirectAnswer ? (
+          <section className="research-progress-card"><div><span><AutoAwesomeRounded /></span><p><strong>直接回答</strong><small>无需调用研究 Agent 或检索论文</small></p><CheckRounded /></div></section>
+        ) : <>
+          <section className="research-progress-card"><div><span><SearchRounded /></span><p><strong>深度研究</strong><small>已分析 {activeSources.length} 个相关来源</small></p><CheckRounded /></div><progress value="100" max="100" /><ul><li><CheckRounded />理解问题与规划</li><li><CheckRounded />检索知识库</li><li><CheckRounded />交叉验证证据</li><li><CheckRounded />生成综合结论</li></ul></section>
+          <div className="research-section-title"><strong>引用来源</strong><button onClick={onOpenBrowse}>查看全部</button></div>
+          <div className="research-sources">
+            {activeSources.length ? activeSources.map((source) => (
+              <button key={`context-source-${source.index}`}>
+                <span><ArticleOutlined /></span>
+                <p><strong>{source.title}</strong><small>{[source.source, source.year].filter(Boolean).join(" · ") || "本地知识库"}</small></p>
+                <em>{source.index}</em>
+              </button>
+            )) : <div className="research-source-empty">发送研究问题后，此处将显示回答引用的真实来源。</div>}
+          </div>
+          <div className="research-section-title"><strong>知识库范围</strong><button onClick={onOpenBrowse}>管理</button></div>
+          <div className="research-library"><span><FolderOpenRounded /></span><p><strong>医疗大模型研究</strong><small>42 篇文献 · 更新于今天</small></p><CheckRounded /></div>
+          <button className="research-add-source" onClick={onOpenBrowse}><AddRounded />添加知识来源</button>
+        </>}
       </aside> : null}
     </div>
   );

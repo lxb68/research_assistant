@@ -76,6 +76,7 @@ class Settings:
         or "gpt-4o-mini"
     )
     request_timeout = int(os.getenv("REQUEST_TIMEOUT", "15"))
+    log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper()
     domain_tree_retry_attempts = max(1, int(os.getenv("DOMAIN_TREE_RETRY_ATTEMPTS", "3")))
     domain_tree_retry_base_delay_seconds = max(
         0.0,

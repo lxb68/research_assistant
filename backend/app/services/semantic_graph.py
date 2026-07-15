@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -21,6 +22,16 @@ from app.services.task_control import (
 
 
 logger = logging.getLogger(__name__)
+
+_MODEL_OUTPUT_PREVIEW_CHARS = 2000
+
+
+def _log_text_preview(value: Any, *, limit: int = _MODEL_OUTPUT_PREVIEW_CHARS) -> str:
+    """把模型输出压缩为适合单行日志的有限长度预览。"""
+    compact = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit]}...<truncated {len(compact) - limit} chars>"
 
 _REFERENCE_HEADING_PATTERN = re.compile(
     r"(?im)^#{1,6}\s*(references|bibliography|参考文献|参考资料)\s*$"
@@ -75,8 +86,18 @@ class SemanticGraphExtractor:
 
     def extract(self, documents: Iterable[SemanticSourceDocument]) -> dict[str, Any]:
         """抽取所有文献并合并跨分块重复实体。"""
+        extraction_started_at = time.perf_counter()
         raise_if_cancelled(self.cancel_event)
         source_documents = list(documents)
+        logger.info(
+            "全文语义抽取开始：document_count=%s chunk_size=%s chunk_overlap=%s "
+            "provider=%s model=%s",
+            len(source_documents),
+            self.chunk_size,
+            self.chunk_overlap,
+            self.runtime.get("provider", ""),
+            self.runtime.get("model", ""),
+        )
         local_titles = {
             self._normalize_name(document.title): document.record_id
             for document in source_documents
@@ -98,14 +119,26 @@ class SemanticGraphExtractor:
         ] = []
         for document in source_documents:
             raise_if_cancelled(self.cancel_event)
+            prepare_started_at = time.perf_counter()
             markdown = self._read_markdown(document)
             if not markdown:
                 logger.warning("[%s] Markdown 正文为空，跳过全文语义抽取", document.record_id)
                 continue
 
             body, reference_text, reference_start_line = self.split_reference_section(markdown)
+            chunks = self.split_chunks(body)
             prepared_documents.append(
-                (document, body, reference_text, reference_start_line, self.split_chunks(body))
+                (document, body, reference_text, reference_start_line, chunks)
+            )
+            logger.info(
+                "[%s] 语义文档准备完成：markdown_chars=%s body_chars=%s reference_chars=%s "
+                "chunk_count=%s elapsed_ms=%.1f",
+                document.record_id,
+                len(markdown),
+                len(body),
+                len(reference_text),
+                len(chunks),
+                (time.perf_counter() - prepare_started_at) * 1000,
             )
 
         total_chunks = sum(len(item[4]) for item in prepared_documents)
@@ -121,6 +154,7 @@ class SemanticGraphExtractor:
 
         for document, body, reference_text, reference_start_line, chunks in prepared_documents:
             raise_if_cancelled(self.cancel_event)
+            document_started_at = time.perf_counter()
             citations = self.parse_citations(
                 document,
                 body,
@@ -130,7 +164,12 @@ class SemanticGraphExtractor:
             )
             state["citations"].extend(citations)
 
-            logger.info("[%s] 开始抽取全文语义，共 %s 个正文分块", document.record_id, len(chunks))
+            logger.info(
+                "[%s] 开始抽取全文语义：chunk_count=%s citation_count=%s",
+                document.record_id,
+                len(chunks),
+                len(citations),
+            )
             for chunk in chunks:
                 raise_if_cancelled(self.cancel_event)
                 self._report_progress(
@@ -151,6 +190,12 @@ class SemanticGraphExtractor:
                     processedChunks=state["processedChunkCount"],
                     failedChunks=state["failedChunkCount"],
                 )
+            logger.info(
+                "[%s] 文档语义抽取完成：chunk_count=%s elapsed_ms=%.1f",
+                document.record_id,
+                len(chunks),
+                (time.perf_counter() - document_started_at) * 1000,
+            )
 
         entities = sorted(state["entities"].values(), key=lambda item: (item["type"], item["name"].lower()))
         relations = sorted(
@@ -164,6 +209,17 @@ class SemanticGraphExtractor:
         citations = sorted(
             state["citations"],
             key=lambda item: (item["documentId"], item.get("referenceNumber", 0)),
+        )
+        logger.info(
+            "全文语义抽取完成：processed_chunks=%s failed_chunks=%s entities=%s relations=%s "
+            "evidence=%s citations=%s elapsed_ms=%.1f",
+            state["processedChunkCount"],
+            state["failedChunkCount"],
+            len(entities),
+            len(relations),
+            len(evidence),
+            len(citations),
+            (time.perf_counter() - extraction_started_at) * 1000,
         )
         return {
             "entities": entities,
@@ -304,6 +360,17 @@ class SemanticGraphExtractor:
             },
             {"role": "user", "content": prompt},
         ]
+        started_at = time.perf_counter()
+        logger.info(
+            "[%s] 语义分块模型请求开始：chunk=%s section=%s chunk_chars=%s prompt_chars=%s "
+            "timeout_seconds=%s",
+            document.record_id,
+            chunk.index,
+            _log_text_preview(chunk.section, limit=120),
+            len(chunk.text),
+            len(prompt),
+            settings.request_timeout,
+        )
         try:
             answer = call_with_retry(
                 lambda: self.chat_fn(
@@ -323,14 +390,29 @@ class SemanticGraphExtractor:
                     delay,
                 ),
             )
-            return self._extract_json_object(answer)
+            payload = self._extract_json_object(answer)
+            entities = payload.get("entities") if isinstance(payload.get("entities"), list) else []
+            relations = payload.get("relations") if isinstance(payload.get("relations"), list) else []
+            logger.info(
+                "[%s] 语义分块模型请求完成：chunk=%s elapsed_ms=%.1f output_chars=%s "
+                "entity_count=%s relation_count=%s output_preview=%s",
+                document.record_id,
+                chunk.index,
+                (time.perf_counter() - started_at) * 1000,
+                len(answer),
+                len(entities),
+                len(relations),
+                _log_text_preview(answer),
+            )
+            return payload
         except DomainTreeGenerationCancelled:
             raise
         except Exception as error:
             logger.warning(
-                "[%s] 第 %s 个语义分块抽取失败：%s",
+                "[%s] 第 %s 个语义分块抽取失败：elapsed_ms=%.1f error=%s",
                 document.record_id,
                 chunk.index,
+                (time.perf_counter() - started_at) * 1000,
                 error,
             )
             return None
