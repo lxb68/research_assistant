@@ -2,6 +2,7 @@
 
 import type { Metadata } from "next";
 import ThemeRegistry from "../components/ThemeRegistry";
+import { APP_THEME_STORAGE_KEY } from "@/lib/theme";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -18,7 +19,14 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN" suppressHydrationWarning>
+    <html lang="zh-CN" data-theme="light" suppressHydrationWarning>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=localStorage.getItem(${JSON.stringify(APP_THEME_STORAGE_KEY)});if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}})()`,
+          }}
+        />
+      </head>
       {/* 所有页面都会渲染到 body 中，这里保留最轻量的全局布局。 */}
       <body>
         <ThemeRegistry>{children}</ThemeRegistry>

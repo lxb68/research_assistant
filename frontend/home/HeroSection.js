@@ -2,6 +2,24 @@
 
 "use client";
 
+import { useSyncExternalStore } from "react";
+import { APP_THEME_STORAGE_KEY } from "@/lib/theme";
+
+const THEME_CHANGE_EVENT = "research-assistant-theme-change";
+
+function subscribeToTheme(onStoreChange) {
+  window.addEventListener(THEME_CHANGE_EVENT, onStoreChange);
+  return () => window.removeEventListener(THEME_CHANGE_EVENT, onStoreChange);
+}
+
+function getBrowserTheme() {
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
+function getServerTheme() {
+  return "light";
+}
+
 /** 渲染首页介绍和工作流快捷入口。 */
 export default function HeroSection({
   onCreateProject,
@@ -11,12 +29,44 @@ export default function HeroSection({
   onOpenDomainTree,
   onOpenSettings,
 }) {
+  const activeTheme = useSyncExternalStore(subscribeToTheme, getBrowserTheme, getServerTheme);
+
+  function selectTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    try {
+      window.localStorage.setItem(APP_THEME_STORAGE_KEY, theme);
+    } catch {
+      // 存储不可用时仍保留当前页面的即时主题切换效果。
+    }
+    window.dispatchEvent(new Event(THEME_CHANGE_EVENT));
+  }
+
   return (
     <section className="hero-section">
       <div className="hero-decoration hero-decoration-primary" />
       <div className="hero-decoration hero-decoration-secondary" />
 
       <div className="hero-content">
+        <div className="hero-theme-switcher" role="group" aria-label="页面主题">
+          <button
+            type="button"
+            className="hero-theme-option hero-theme-option-light"
+            aria-pressed={activeTheme === "light"}
+            onClick={() => selectTheme("light")}
+          >
+            <span className="hero-theme-icon hero-theme-icon-light" aria-hidden="true" />
+            亮色
+          </button>
+          <button
+            type="button"
+            className="hero-theme-option hero-theme-option-dark"
+            aria-pressed={activeTheme === "dark"}
+            onClick={() => selectTheme("dark")}
+          >
+            <span className="hero-theme-icon hero-theme-icon-dark" aria-hidden="true" />
+            暗色
+          </button>
+        </div>
         <p className="hero-eyebrow">Research Assistant</p>
         <h1 className="hero-title gradient-text">让研究资料整理更高效</h1>
         <p className="hero-subtitle">

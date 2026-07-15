@@ -1,9 +1,36 @@
 @import "tailwindcss";
 
-/* 全局颜色变量：供 Tailwind 主题别名和 body 基础颜色使用。 */
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/*
+ * 全局主题令牌：主页与所有功能页只消费这些语义变量。
+ * 后续调整品牌配色时修改这里即可，不需要逐页同步十六进制颜色。
+ */
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+  --background: #f8fbff;
+  --foreground: #172033;
+  --app-page-background:
+    radial-gradient(circle at 18% 18%, rgba(42, 92, 170, 0.12), transparent 32%),
+    radial-gradient(circle at 82% 10%, rgba(139, 92, 246, 0.12), transparent 30%),
+    linear-gradient(180deg, #f8fbff 0%, #ffffff 44%, #f5f8fd 100%);
+  --app-surface: rgba(255, 255, 255, 0.86);
+  --app-surface-strong: #ffffff;
+  --app-surface-soft: rgba(42, 92, 170, 0.07);
+  --app-surface-selected: rgba(42, 92, 170, 0.12);
+  --app-text-strong: #172033;
+  --app-text: #3f4a5f;
+  --app-text-muted: #687386;
+  --app-border: rgba(42, 92, 170, 0.16);
+  --app-border-strong: rgba(42, 92, 170, 0.3);
+  --app-primary: #2a5caa;
+  --app-primary-hover: #214b8d;
+  --app-primary-soft: rgba(42, 92, 170, 0.1);
+  --app-accent: #8b5cf6;
+  --app-accent-gradient: linear-gradient(90deg, #2a5caa 0%, #6d5df6 100%);
+  --app-warning: #9a5800;
+  --app-warning-soft: rgba(180, 83, 9, 0.1);
+  --app-focus-ring: rgba(42, 92, 170, 0.14);
+  --app-shadow: 0 22px 56px rgba(42, 60, 92, 0.14);
 }
 
 /* 将 CSS 变量暴露为 Tailwind 可使用的主题值。 */
@@ -14,12 +41,33 @@
   --font-mono: var(--font-geist-mono);
 }
 
-/* 默认跟随用户系统的暗色模式偏好。 */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* 显式暗色主题：保留调整前的黑紫色视觉。 */
+[data-theme="dark"] {
+    color-scheme: dark;
+    --background: #05070c;
+    --foreground: #f8fafc;
+    --app-page-background:
+      radial-gradient(circle at 18% 24%, rgba(42, 92, 170, 0.22), transparent 34%),
+      radial-gradient(circle at 82% 12%, rgba(139, 92, 246, 0.18), transparent 30%),
+      linear-gradient(135deg, #05070c 0%, #09111d 46%, #10081c 100%);
+    --app-surface: rgba(8, 13, 24, 0.76);
+    --app-surface-strong: #0f172a;
+    --app-surface-soft: rgba(15, 23, 42, 0.58);
+    --app-surface-selected: rgba(37, 99, 235, 0.16);
+    --app-text-strong: #f8fafc;
+    --app-text: rgba(226, 232, 240, 0.86);
+    --app-text-muted: rgba(203, 213, 225, 0.66);
+    --app-border: rgba(148, 163, 184, 0.18);
+    --app-border-strong: rgba(96, 165, 250, 0.34);
+    --app-primary: #60a5fa;
+    --app-primary-hover: #93c5fd;
+    --app-primary-soft: rgba(37, 99, 235, 0.16);
+    --app-accent: #a78bfa;
+    --app-accent-gradient: linear-gradient(90deg, #2563eb 0%, #7c3aed 100%);
+    --app-warning: #fbbf24;
+    --app-warning-soft: rgba(120, 53, 15, 0.24);
+    --app-focus-ring: rgba(96, 165, 250, 0.14);
+    --app-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
 }
 
 /* 全局使用 border-box 盒模型，并清除浏览器默认内外边距。 */
@@ -84,11 +132,11 @@ body {
   align-items: center;
   gap: 28px;
   min-height: 64px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(8, 13, 24, 0.94);
-  color: #ffffff;
+  border-bottom: 1px solid var(--app-border);
+  background: color-mix(in srgb, var(--app-surface-strong) 92%, transparent);
+  color: var(--app-text-strong);
   padding: 0 24px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+  box-shadow: var(--app-shadow);
   backdrop-filter: blur(16px);
 }
 
@@ -99,7 +147,7 @@ body {
   min-height: 40px;
   border: 0;
   background: transparent;
-  color: #ffffff;
+  color: var(--app-text-strong);
   cursor: pointer;
   font: inherit;
   font-size: 1rem;
@@ -114,8 +162,8 @@ body {
   width: 28px;
   height: 28px;
   border-radius: 8px;
-  background: #fff7ed;
-  color: #f97316;
+  background: var(--app-primary-soft);
+  color: var(--app-primary);
   font-weight: 900;
 }
 
@@ -131,7 +179,7 @@ body {
   min-height: 64px;
   border: 0;
   background: transparent;
-  color: rgba(226, 232, 240, 0.72);
+  color: var(--app-text-muted);
   cursor: pointer;
   font: inherit;
   font-weight: 800;
@@ -150,16 +198,48 @@ body {
 }
 
 .workspace-tab-active {
-  color: #ffffff;
+  color: var(--app-text-strong);
+}
+
+/* 所有按钮共享清晰的焦点层；状态层不再通过额外白色蒙层表达。 */
+button,
+[role="button"] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.hero-button,
+.hero-theme-option,
+.dataset-browser-toolbar button,
+.dataset-import-actions button,
+.settings-btn,
+.domain-tree-view-button,
+.domain-tree-generate-button,
+.domain-tree-inline-button,
+.domain-tree-secondary-button,
+.standalone-back-button {
+  position: relative;
+  isolation: isolate;
+  background-clip: padding-box;
+}
+
+button:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid var(--app-primary);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  box-shadow: none !important;
+  filter: none !important;
 }
 
 .workspace-tab-active::after {
-  background: #60a5fa;
+  background: var(--app-primary);
 }
 
 /* 渐变文字工具类：让文字呈现蓝紫渐变效果。 */
 .gradient-text {
-  background: linear-gradient(90deg, #2a5caa 0%, #8b5cf6 100%);
+  background: var(--app-accent-gradient);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -682,10 +762,7 @@ main {
   align-items: center;
   justify-content: center;
   padding: 96px 24px;
-  background:
-    radial-gradient(circle at 20% 20%, rgba(42, 92, 170, 0.12), transparent 32%),
-    radial-gradient(circle at 80% 10%, rgba(139, 92, 246, 0.14), transparent 30%),
-    var(--background);
+  background: var(--app-page-background);
 }
 
 /* 首页装饰圆：只作为背景视觉元素。 */
@@ -702,7 +779,7 @@ main {
   height: 180px;
   left: 8%;
   top: 18%;
-  background: rgba(42, 92, 170, 0.08);
+  background: var(--app-primary-soft);
 }
 
 /* 右下方装饰圆。 */
@@ -711,7 +788,7 @@ main {
   height: 240px;
   right: 10%;
   bottom: 12%;
-  background: rgba(139, 92, 246, 0.08);
+  background: color-mix(in srgb, var(--app-accent) 10%, transparent);
 }
 
 /* 首页内容区：限制文本宽度，保证大屏和小屏都易读。 */
@@ -725,7 +802,7 @@ main {
 /* 首页眉标文字。 */
 .hero-eyebrow {
   margin-bottom: 16px;
-  color: #2a5caa;
+  color: var(--app-primary);
   font-size: 0.875rem;
   font-weight: 700;
   letter-spacing: 0;
@@ -743,7 +820,7 @@ main {
 .hero-subtitle {
   max-width: 680px;
   margin: 24px auto 0;
-  color: #5f6673;
+  color: var(--app-text-muted);
   font-size: 1.125rem;
   line-height: 1.8;
 }
@@ -780,20 +857,75 @@ main {
 /* 主要按钮：用于最高优先级操作。 */
 .hero-button-primary {
   color: #ffffff;
-  background: #2a5caa;
-  box-shadow: 0 12px 24px rgba(42, 92, 170, 0.22);
+  background: var(--app-primary);
+  box-shadow: 0 12px 24px var(--app-focus-ring);
 }
 
 /* 次要按钮：用于辅助入口。 */
 .hero-button-secondary {
-  color: #2a5caa;
-  background: rgba(42, 92, 170, 0.1);
+  color: var(--app-primary);
+  background: var(--app-primary-soft);
 }
 
 /* 按钮悬停反馈。 */
 .hero-button:hover {
   transform: translateY(-2px);
-  box-shadow: 0 14px 26px rgba(42, 92, 170, 0.18);
+  box-shadow: 0 14px 26px var(--app-focus-ring);
+}
+
+/* 首页主题选择器：用户的选择会持久化并作用于所有功能页。 */
+.hero-theme-switcher {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  margin-bottom: 22px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-surface);
+  box-shadow: var(--app-shadow);
+  padding: 4px;
+}
+
+.hero-theme-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 86px;
+  min-height: 36px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 800;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.hero-theme-icon {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+}
+
+.hero-theme-icon-light {
+  background: #ffffff;
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.12);
+}
+
+.hero-theme-icon-dark {
+  background: #10081c;
+  box-shadow: inset -3px -2px 0 rgba(139, 92, 246, 0.72);
+}
+
+[data-theme="light"] .hero-theme-option-light,
+[data-theme="dark"] .hero-theme-option-dark {
+  background: var(--app-accent-gradient);
+  color: #ffffff;
+  box-shadow: 0 6px 16px var(--app-focus-ring);
 }
 
 /* 创建项目占位提示。 */
@@ -803,15 +935,15 @@ main {
   justify-content: center;
   gap: 12px;
   padding: 16px 24px 40px;
-  color: #5f6673;
+  color: var(--app-text-muted);
 }
 
 /* 占位提示里的关闭按钮。 */
 .home-notice button {
-  border: 1px solid rgba(42, 92, 170, 0.3);
+  border: 1px solid var(--app-border-strong);
   border-radius: 6px;
   background: transparent;
-  color: #2a5caa;
+  color: var(--app-primary);
   padding: 6px 12px;
   cursor: pointer;
 }
@@ -1883,6 +2015,74 @@ select.settings-input-mono {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
+}
+
+/* 自定义组合框完全在页面内渲染，避免 WebView 原生 datalist 弹层坐标错位。 */
+.settings-model-combobox {
+  position: relative;
+  min-width: 0;
+}
+
+.settings-model-input {
+  padding-right: 42px;
+}
+
+.settings-model-toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 1.15rem;
+}
+
+.settings-model-menu {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  display: grid;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 10px;
+  background: var(--app-surface-strong);
+  box-shadow: var(--app-shadow);
+  padding: 6px;
+}
+
+.settings-model-option {
+  min-height: 38px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-text);
+  cursor: pointer;
+  font-family: "Cascadia Code", "Fira Code", "Courier New", Consolas, monospace;
+  font-size: 0.8125rem;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.settings-model-option:hover,
+.settings-model-option.is-selected {
+  background: var(--app-primary-soft);
+  color: var(--app-primary);
+}
+
+.settings-model-empty {
+  color: var(--app-text-muted);
+  font-size: 0.78rem;
+  line-height: 1.6;
+  padding: 10px;
 }
 
 .settings-discover-btn {
@@ -3288,4 +3488,330 @@ select.settings-input {
   .research-chat.is-records .research-records-page { height: calc(100vh - 134px); padding: 26px 18px 36px; }
   .research-chat.is-records .research-records-page>header { align-items: flex-start; flex-direction: column; gap: 16px; }
   .research-chat.is-records .research-record-empty { min-height: 270px; margin-top: 26px; }
+}
+
+/* ================================================================
+   统一主题映射：功能页跟随首页的全局主题令牌
+   ================================================================ */
+.dataset-browser-page,
+.domain-tree-page,
+.research-chat,
+.standalone-page-shell,
+.research-chat.is-records .research-records-page {
+  background: var(--app-page-background);
+  color: var(--app-text);
+}
+
+.dataset-browser-panel,
+.domain-tree-panel,
+.research-sidebar,
+.research-context,
+.research-main,
+.research-topbar {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+  box-shadow: var(--app-shadow);
+}
+
+/* 数据集浏览页 */
+.dataset-browser-toolbar input,
+.dataset-import-panel input,
+.dataset-import-panel textarea,
+.dataset-import-panel,
+.dataset-import-log,
+.dataset-browser-empty,
+.dataset-card {
+  border-color: var(--app-border);
+  background: var(--app-surface-soft);
+  color: var(--app-text);
+}
+
+.dataset-browser-toolbar input,
+.dataset-import-panel input,
+.dataset-import-panel textarea {
+  background: var(--app-surface-strong);
+}
+
+.dataset-card-selected {
+  border-color: var(--app-border-strong);
+  background: var(--app-surface-selected);
+  box-shadow: 0 0 0 1px var(--app-focus-ring);
+}
+
+.dataset-card h2,
+.dataset-browser-empty strong {
+  color: var(--app-text-strong);
+}
+
+.dataset-card-authors,
+.dataset-card-abstract,
+.dataset-import-panel label span,
+.dataset-import-actions span,
+.dataset-import-log p {
+  color: var(--app-text-muted);
+}
+
+.dataset-browser-toolbar button,
+.dataset-import-actions button,
+.dataset-card-meta span,
+.dataset-card-meta .dataset-card-select,
+.dataset-card-actions a {
+  border-color: var(--app-border-strong);
+  background: var(--app-primary-soft);
+  color: var(--app-primary);
+}
+
+/* 设置页 */
+.settings-tabs,
+.settings-divider {
+  border-color: var(--app-border);
+}
+
+.settings-divider {
+  background: var(--app-border);
+}
+
+.settings-tab-btn,
+.settings-row-label,
+.settings-hint,
+.settings-slider-meta span {
+  color: var(--app-text-muted);
+}
+
+.settings-tab-btn:hover,
+.settings-tab-btn.is-active,
+.settings-radio strong,
+.settings-slider-meta strong {
+  color: var(--app-text-strong);
+}
+
+.settings-tab-btn.is-active {
+  border-bottom-color: var(--app-primary);
+}
+
+.settings-input,
+.settings-readonly-value,
+.settings-radio,
+.settings-slider-block,
+.settings-secret-preview {
+  border-color: var(--app-border);
+  background-color: var(--app-surface-soft);
+  color: var(--app-text);
+}
+
+.settings-input:focus {
+  border-color: var(--app-primary);
+  box-shadow: 0 0 0 3px var(--app-focus-ring);
+}
+
+.settings-input::placeholder,
+.settings-radio small {
+  color: var(--app-text-muted);
+}
+
+.settings-radio.is-checked {
+  border-color: var(--app-border-strong);
+  background: var(--app-primary-soft);
+}
+
+.settings-btn-primary,
+.settings-slider {
+  background: var(--app-accent-gradient);
+}
+
+.settings-btn-ghost {
+  border-color: var(--app-border);
+  background: var(--app-surface-soft);
+  color: var(--app-text);
+}
+
+.settings-btn-ghost:hover {
+  background: var(--app-primary-soft);
+  color: var(--app-primary);
+}
+
+/* 领域树页 */
+.domain-tree-header h1,
+.domain-tree-card-head h2,
+.domain-tree-mode-card strong,
+.domain-tree-control-summary strong,
+.domain-tree-empty strong,
+.domain-tree-readable-item strong,
+.domain-tree-chunk-head strong {
+  color: var(--app-text-strong);
+}
+
+.domain-tree-subtitle,
+.domain-tree-selected-paper p,
+.domain-tree-empty span,
+.domain-tree-edge-item span,
+.domain-tree-mode-card span,
+.domain-tree-readable-item>span,
+.domain-tree-readable-list,
+.domain-tree-chunk-summary {
+  color: var(--app-text-muted);
+}
+
+.domain-tree-card,
+.domain-tree-selected-paper,
+.domain-tree-empty,
+.domain-tree-mode-card,
+.domain-tree-change-panel,
+.domain-tree-readable-intro,
+.domain-tree-readable-card,
+.domain-tree-readable-item,
+.domain-tree-edge-item,
+.domain-tree-node-card,
+.domain-tree-secondary-button,
+.domain-tree-chunk-card,
+.domain-tree-catalog-preview,
+.domain-tree-chunk-content,
+.domain-tree-select-wrap select,
+.domain-tree-view-button,
+.domain-tree-inline-button {
+  border-color: var(--app-border);
+  background: var(--app-surface-strong);
+  color: var(--app-text);
+}
+
+.domain-tree-node-card .domain-tree-node-card,
+.domain-tree-secondary-button.is-active {
+  border-color: var(--app-border-strong);
+  background: var(--app-surface-selected);
+}
+
+.domain-tree-stats span,
+.domain-tree-meta span,
+.domain-tree-selected-paper span,
+.domain-tree-chip,
+.domain-tree-readable-tags span,
+.domain-tree-chunk-tags span {
+  border-color: var(--app-border);
+  background: var(--app-primary-soft);
+  color: var(--app-primary);
+}
+
+.domain-tree-view-switcher,
+.domain-tree-change-inline {
+  border-color: var(--app-border);
+  background: var(--app-surface-soft);
+}
+
+.domain-tree-view-button.is-active,
+.domain-tree-generate-button {
+  background: var(--app-accent-gradient);
+  color: #ffffff;
+}
+
+.domain-tree-kicker,
+.domain-tree-card-head p {
+  color: var(--app-primary);
+}
+
+.domain-tree-node-label,
+.domain-tree-selected-paper strong,
+.domain-tree-edge-item strong,
+.domain-tree-chip strong,
+.domain-tree-readable-intro strong {
+  color: var(--app-text-strong);
+}
+
+.domain-tree-select-wrap span,
+.domain-tree-control-summary p,
+.domain-tree-change-head p,
+.domain-tree-readable-intro span,
+.domain-tree-readable-meta label,
+.domain-tree-readable-list li,
+.domain-tree-chunk-head span {
+  color: var(--app-text-muted);
+}
+
+.domain-tree-status {
+  background: var(--app-primary-soft);
+  color: var(--app-primary);
+}
+
+/* 研究对话与归档页 */
+.research-chat {
+  --ink: var(--app-text-strong);
+  --muted: var(--app-text-muted);
+  --line: var(--app-border);
+  --green: var(--app-primary);
+}
+
+.research-brand>span,
+.research-new,
+.research-message.agent .research-avatar,
+.research-compose .research-send {
+  background: var(--app-accent-gradient);
+}
+
+.research-nav button,
+.research-recents button,
+.research-side-bottom>button,
+.research-brand>button,
+.research-icon,
+.research-side-bottom>div>svg,
+.research-context>header svg,
+.research-message p {
+  color: var(--app-text-muted);
+}
+
+.research-nav button:hover,
+.research-nav button.active,
+.research-recents button.active,
+.research-sources button:hover {
+  background: var(--app-primary-soft);
+  color: var(--app-primary);
+}
+
+.research-export,
+.research-compose,
+.research-progress-card,
+.research-library,
+.research-record-card,
+.research-chat.is-records .research-record-card,
+.research-chat.is-records .research-record-empty {
+  border-color: var(--app-border);
+  background: var(--app-surface-strong);
+  color: var(--app-text);
+  box-shadow: var(--app-shadow);
+}
+
+.research-compose textarea,
+.research-sources strong,
+.research-library strong,
+.research-record-empty h3,
+.research-chat.is-records .research-record-card h3 {
+  color: var(--app-text-strong);
+}
+
+.research-citations button,
+.research-prompts button,
+.research-progress-card>div>span,
+.research-library>span,
+.research-sources em {
+  border-color: var(--app-border);
+  background: var(--app-primary-soft);
+  color: var(--app-primary);
+}
+
+.standalone-back-button,
+.research-chat.is-records .research-records-page>header>button,
+.research-chat.is-records .research-record-empty button,
+.research-record-card>footer>button {
+  border-color: var(--app-border-strong);
+  background: var(--app-primary-soft);
+  color: var(--app-primary);
+  box-shadow: none;
+}
+
+.standalone-back-button:hover,
+.research-chat.is-records .research-records-page>header>button:hover,
+.research-chat.is-records .research-record-empty button:hover,
+.research-record-card>footer>button:hover {
+  border-color: var(--app-primary);
+  background: var(--app-surface-selected);
+  color: var(--app-primary-hover);
 }

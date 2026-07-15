@@ -164,9 +164,9 @@ function getProgressVisual(state: SourceState) {
     default:
       return {
         icon: <RadioButtonUncheckedIcon fontSize="small" />,
-        bg: "rgba(15, 23, 42, 0.54)",
-        border: "rgba(148, 163, 184, 0.24)",
-        color: "#cbd5e1",
+        bg: "var(--app-surface-soft)",
+        border: "var(--app-border)",
+        color: "var(--app-text-muted)",
       };
   }
 }
@@ -203,33 +203,33 @@ export default function DatasetDownloadPage({
   const [completionNoticeMessage, setCompletionNoticeMessage] = useState("");
   const activeViewRef = useRef(isActiveView);
   const glassPanel = {
-    border: "1px solid rgba(148, 163, 184, 0.22)",
-    background: "rgba(8, 13, 24, 0.68)",
+    border: "1px solid var(--app-border)",
+    background: "var(--app-surface)",
     backdropFilter: "blur(18px)",
-    boxShadow: "0 28px 70px rgba(0, 0, 0, 0.34)",
+    boxShadow: "var(--app-shadow)",
   };
   const darkTextFieldSx = {
     "& .MuiInputLabel-root": {
-      color: "rgba(226, 232, 240, 0.72)",
+      color: "var(--app-text-muted)",
     },
     "& .MuiInputLabel-root.Mui-focused": {
-      color: "#93c5fd",
+      color: "var(--app-primary)",
     },
     "& .MuiOutlinedInput-root": {
-      color: "#f8fafc",
-      background: "rgba(15, 23, 42, 0.44)",
+      color: "var(--app-text-strong)",
+      background: "var(--app-surface-strong)",
       "& fieldset": {
-        borderColor: "rgba(148, 163, 184, 0.3)",
+        borderColor: "var(--app-border)",
       },
       "&:hover fieldset": {
-        borderColor: "rgba(147, 197, 253, 0.55)",
+        borderColor: "var(--app-border-strong)",
       },
       "&.Mui-focused fieldset": {
-        borderColor: "#60a5fa",
+        borderColor: "var(--app-primary)",
       },
     },
     "& .MuiInputBase-input::placeholder": {
-      color: "rgba(203, 213, 225, 0.62)",
+      color: "var(--app-text-muted)",
       opacity: 1,
     },
   };
@@ -632,16 +632,12 @@ export default function DatasetDownloadPage({
   return (
     <Box
       component="main"
+      className="dataset-download-workspace"
       sx={{
         minHeight: embedded ? "calc(100vh - 64px)" : "100vh",
         position: "relative",
         overflow: "hidden",
-        background: `
-          radial-gradient(circle at 18% 24%, rgba(42, 92, 170, 0.24), transparent 34%),
-          radial-gradient(circle at 82% 8%, rgba(139, 92, 246, 0.2), transparent 30%),
-          radial-gradient(circle at 50% 95%, rgba(14, 165, 233, 0.1), transparent 34%),
-          linear-gradient(135deg, #05070c 0%, #09111d 46%, #10081c 100%)
-        `,
+        background: "var(--app-page-background)",
       }}
     >
       <Box
@@ -653,7 +649,7 @@ export default function DatasetDownloadPage({
           left: "8%",
           top: "18%",
           borderRadius: 999,
-          background: "rgba(42, 92, 170, 0.1)",
+          background: "var(--app-primary-soft)",
           filter: "blur(2px)",
           pointerEvents: "none",
         }}
@@ -667,7 +663,7 @@ export default function DatasetDownloadPage({
           right: "10%",
           top: "34%",
           borderRadius: 999,
-          background: "rgba(139, 92, 246, 0.1)",
+          background: "color-mix(in srgb, var(--app-accent) 10%, transparent)",
           filter: "blur(2px)",
           pointerEvents: "none",
         }}
@@ -685,7 +681,7 @@ export default function DatasetDownloadPage({
               p: { xs: 2.25, md: 3 },
             }}
           >
-            <Typography sx={{ color: "#f8fafc", fontSize: "1.25rem", fontWeight: 900, mb: 2 }}>
+            <Typography sx={{ color: "var(--app-text-strong)", fontSize: "1.25rem", fontWeight: 900, mb: 2 }}>
               论文搜索
             </Typography>
 
@@ -699,7 +695,7 @@ export default function DatasetDownloadPage({
               slotProps={{
                 input: {
                   startAdornment: (
-                    <SearchIcon sx={{ mr: 1, color: "rgba(226, 232, 240, 0.72)" }} />
+                    <SearchIcon sx={{ mr: 1, color: "var(--app-text-muted)" }} />
                   ),
                 },
               }}
@@ -758,7 +754,7 @@ export default function DatasetDownloadPage({
                 alignItems: "center",
               }}
             >
-              <Typography sx={{ color: "rgba(226, 232, 240, 0.72)", fontWeight: 800 }}>
+              <Typography sx={{ color: "var(--app-text-muted)", fontWeight: 800 }}>
                 数据源
               </Typography>
               <Stack direction="row" sx={{ flexWrap: "wrap", gap: 1.25 }}>
@@ -779,11 +775,11 @@ export default function DatasetDownloadPage({
                         minWidth: 116,
                         fontWeight: 800,
                         px: 0.75,
-                        color: active ? "#ffffff" : "#dbeafe",
-                        borderColor: active ? "transparent" : "rgba(147, 197, 253, 0.28)",
-                        background: active ? undefined : "rgba(15, 23, 42, 0.5)",
+                        color: active ? "#ffffff" : "var(--app-primary)",
+                        borderColor: active ? "transparent" : "var(--app-border-strong)",
+                        background: active ? undefined : "var(--app-primary-soft)",
                         ...(active && {
-                          background: "linear-gradient(90deg, #2a5caa 0%, #6d5df6 100%)",
+                          background: "var(--app-accent-gradient)",
                           boxShadow: "0 10px 28px rgba(37, 99, 235, 0.22)",
                         }),
                       }}
@@ -802,7 +798,7 @@ export default function DatasetDownloadPage({
                 alignItems: "center",
               }}
             >
-              <Typography sx={{ color: "rgba(226, 232, 240, 0.72)", fontWeight: 800 }}>
+              <Typography sx={{ color: "var(--app-text-muted)", fontWeight: 800 }}>
                 CCF 等级
               </Typography>
               <Stack direction="row" sx={{ flexWrap: "wrap", gap: 1 }}>
@@ -826,11 +822,11 @@ export default function DatasetDownloadPage({
                         height: 40,
                         minWidth: 78,
                         borderRadius: 2,
-                        color: active ? "#ffffff" : "#dbeafe",
-                        borderColor: active ? "transparent" : "rgba(147, 197, 253, 0.28)",
+                        color: active ? "#ffffff" : "var(--app-primary)",
+                        borderColor: active ? "transparent" : "var(--app-border-strong)",
                         background: active
-                          ? "linear-gradient(90deg, #2a5caa 0%, #6d5df6 100%)"
-                          : "rgba(15, 23, 42, 0.5)",
+                          ? "var(--app-accent-gradient)"
+                          : "var(--app-primary-soft)",
                         fontWeight: 800,
                       }}
                     />
@@ -848,7 +844,7 @@ export default function DatasetDownloadPage({
                 alignItems: "center",
               }}
             >
-              <Typography sx={{ color: "rgba(226, 232, 240, 0.72)", fontWeight: 800 }}>
+              <Typography sx={{ color: "var(--app-text-muted)", fontWeight: 800 }}>
                 最低影响因子
               </Typography>
               <Slider
@@ -863,7 +859,7 @@ export default function DatasetDownloadPage({
                   "& .MuiSlider-rail": { color: "rgba(148, 163, 184, 0.36)" },
                 }}
               />
-              <Typography sx={{ color: "#f8fafc", fontWeight: 900, minWidth: 48 }}>
+              <Typography sx={{ color: "var(--app-text-strong)", fontWeight: 900, minWidth: 48 }}>
                 {minImpactFactor.toFixed(1)}
               </Typography>
             </Box>
@@ -879,7 +875,7 @@ export default function DatasetDownloadPage({
                   height: 42,
                   borderRadius: 2,
                   fontWeight: 900,
-                  background: "linear-gradient(90deg, #2a5caa 0%, #6d5df6 100%)",
+                  background: "var(--app-accent-gradient)",
                 }}
               >
                 搜索
@@ -895,8 +891,8 @@ export default function DatasetDownloadPage({
                   height: 42,
                   borderRadius: 2,
                   fontWeight: 900,
-                  borderColor: "rgba(147, 197, 253, 0.28)",
-                  color: "#dbeafe",
+                  borderColor: "var(--app-border-strong)",
+                  color: "var(--app-primary)",
                 }}
               >
                 重置
@@ -911,15 +907,16 @@ export default function DatasetDownloadPage({
                   height: 42,
                   borderRadius: 2,
                   fontWeight: 900,
-                  borderColor: "rgba(251, 191, 36, 0.34)",
-                  color: "#fde68a",
+                  borderColor: "var(--app-warning)",
+                  background: "var(--app-warning-soft)",
+                  color: "var(--app-warning)",
                 }}
               >
                 {isCleaningMetadata ? "清理中" : "清理无 PDF 元数据"}
               </Button>
             </Stack>
 
-            <Typography sx={{ mt: 1.5, color: "rgba(203, 213, 225, 0.84)", lineHeight: 1.7 }}>
+            <Typography sx={{ mt: 1.5, color: "var(--app-text-muted)", lineHeight: 1.7 }}>
               当前数据源：{selectedSourceText || "未选择"}。点击搜索后，HunterAgent 会优先检索已出版来源
               {selectedPublishedSources.length > 0 ? `（${selectedPublishedSources.map(getSourceLabel).join(" / ")}）` : ""}
               并应用 CCF/影响因子条件。
@@ -1069,7 +1066,7 @@ export default function DatasetDownloadPage({
                               <Typography
                                 key={`${item.source}-${index}-${log}`}
                                 sx={{
-                                  color: "rgba(226, 232, 240, 0.82)",
+                                  color: "var(--app-text)",
                                   fontFamily: '"Courier New", Consolas, monospace',
                                   fontSize: "0.78rem",
                                   lineHeight: 1.45,
@@ -1102,7 +1099,7 @@ export default function DatasetDownloadPage({
                     p: 2,
                   }}
                 >
-                  <Typography sx={{ color: "#f8fafc", fontWeight: 800, mb: 1 }}>
+                  <Typography sx={{ color: "var(--app-text-strong)", fontWeight: 800, mb: 1 }}>
                     HunterAgent 状态
                   </Typography>
                   <Stack spacing={0.75}>
@@ -1110,7 +1107,7 @@ export default function DatasetDownloadPage({
                       <Typography
                         key={`${index}-${log}`}
                         sx={{
-                          color: "rgba(203, 213, 225, 0.86)",
+                          color: "var(--app-text-muted)",
                           fontFamily: '"Courier New", Consolas, monospace',
                           fontSize: "0.9rem",
                           lineHeight: 1.55,
@@ -1126,15 +1123,15 @@ export default function DatasetDownloadPage({
               {results.length === 0 && !error ? (
                 <Box
                   sx={{
-                    border: "1px dashed rgba(147, 197, 253, 0.28)",
+                    border: "1px dashed var(--app-border-strong)",
                     borderRadius: 2,
-                    background: "rgba(15, 23, 42, 0.46)",
-                    color: "rgba(203, 213, 225, 0.82)",
+                    background: "var(--app-surface-soft)",
+                    color: "var(--app-text-muted)",
                     textAlign: "center",
                     p: 3.5,
                   }}
                 >
-                  <Typography sx={{ color: "#f8fafc", fontWeight: 800 }}>
+                  <Typography sx={{ color: "var(--app-text-strong)", fontWeight: 800 }}>
                     {agentLogs.length > 1 ? "没有符合筛选条件的结果" : "等待搜索结果"}
                   </Typography>
                   <Typography sx={{ mt: 1 }}>
@@ -1150,9 +1147,9 @@ export default function DatasetDownloadPage({
                       key={`${paper.source}-${paper.externalId || index}-${paper.title}`}
                       elevation={0}
                       sx={{
-                        border: "1px solid rgba(148, 163, 184, 0.18)",
+                        border: "1px solid var(--app-border)",
                         borderRadius: 2,
-                        background: "rgba(15, 23, 42, 0.62)",
+                        background: "var(--app-surface)",
                         backdropFilter: "blur(12px)",
                         p: 2.25,
                       }}
@@ -1230,13 +1227,13 @@ export default function DatasetDownloadPage({
                       </Stack>
                       <Typography
                         component="h3"
-                        sx={{ color: "#f8fafc", fontWeight: 800, lineHeight: 1.45 }}
+                        sx={{ color: "var(--app-text-strong)", fontWeight: 800, lineHeight: 1.45 }}
                       >
                         {paper.title}
                       </Typography>
                       {paper.authors && paper.authors.length > 0 && (
                         <Typography
-                          sx={{ mt: 1, color: "rgba(203, 213, 225, 0.82)", lineHeight: 1.7 }}
+                          sx={{ mt: 1, color: "var(--app-text-muted)", lineHeight: 1.7 }}
                         >
                           {paper.authors.slice(0, 4).join(", ")}
                         </Typography>
@@ -1245,7 +1242,7 @@ export default function DatasetDownloadPage({
                         <Typography
                           sx={{
                             mt: 1,
-                            color: "rgba(203, 213, 225, 0.82)",
+                            color: "var(--app-text-muted)",
                             lineHeight: 1.7,
                             display: "-webkit-box",
                             WebkitLineClamp: 3,
@@ -1302,8 +1299,9 @@ export default function DatasetDownloadPage({
                               minWidth: 120,
                               borderRadius: 2,
                               fontWeight: 900,
-                              borderColor: "rgba(251, 191, 36, 0.42)",
-                              color: "#fde68a",
+                              borderColor: "var(--app-warning)",
+                              background: "var(--app-warning-soft)",
+                              color: "var(--app-warning)",
                             }}
                           >
                             {linkingPaperId === paperKey ? "绑定中" : "绑定 PDF"}
@@ -1363,7 +1361,7 @@ export default function DatasetDownloadPage({
           sx={{
             alignItems: "center",
             minWidth: 320,
-            boxShadow: "0 18px 45px rgba(15, 23, 42, 0.35)",
+            boxShadow: "var(--app-shadow)",
           }}
         >
           {completionNoticeMessage}

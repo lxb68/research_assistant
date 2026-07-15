@@ -167,6 +167,7 @@ export default function SettingsWorkspace() {
   const [isSavingModelConfig, setIsSavingModelConfig] = useState(false);
   const [isDiscoveringModels, setIsDiscoveringModels] = useState(false);
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
+  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [modelMessage, setModelMessage] = useState("");
   const [modelError, setModelError] = useState("");
   const [systemConstraint, setSystemConstraint] = useState("");
@@ -174,6 +175,13 @@ export default function SettingsWorkspace() {
   const apiKeyRequired = selectedProvider.id === "custom"
     ? protocol === "anthropic" || protocol === "gemini"
     : selectedProvider.requiresApiKey;
+  const normalizedModelName = modelName.trim().toLocaleLowerCase();
+  const hasExactModel = discoveredModels.some(
+    (model) => model.toLocaleLowerCase() === normalizedModelName,
+  );
+  const visibleModels = hasExactModel
+    ? discoveredModels
+    : discoveredModels.filter((model) => model.toLocaleLowerCase().includes(normalizedModelName));
 
   /** 以类型安全方式更新单个设置字段。 */
   function set<K extends keyof SettingsState>(key: K, value: SettingsState[K]) {
@@ -300,6 +308,7 @@ export default function SettingsWorkspace() {
     setApiKeyInput("");
     setMaskedApiKey("");
     setDiscoveredModels([]);
+    setIsModelMenuOpen(false);
     setModelConfigured(false);
     setModelError("");
     setModelMessage(`${nextProvider.name} 已选中，请发现或填写模型后保存。`);
@@ -327,12 +336,14 @@ export default function SettingsWorkspace() {
       }
       const models = payload.models || [];
       setDiscoveredModels(models);
+      setIsModelMenuOpen(models.length > 0);
       if (!modelName && models.length > 0) {
         setModelName(models[0]);
       }
       setModelMessage(models.length > 0 ? `已发现 ${models.length} 个可用模型。` : "服务连接成功，但没有返回可用模型。");
     } catch (error) {
       setDiscoveredModels([]);
+      setIsModelMenuOpen(false);
       setModelError(error instanceof Error ? error.message : "发现模型失败");
     } finally {
       setIsDiscoveringModels(false);
@@ -348,6 +359,7 @@ export default function SettingsWorkspace() {
     setBaseUrl("https://api.openai.com/v1");
     setApiKeyInput("");
     setDiscoveredModels([]);
+    setIsModelMenuOpen(false);
     window.localStorage.removeItem(WORKSPACE_SETTINGS_STORAGE_KEY);
     setSaved(true);
   }
@@ -454,17 +466,71 @@ export default function SettingsWorkspace() {
                 </div>
               )}
 
-              <label className="settings-row">
-                <span className="settings-row-label">模型名称</span>
+              <div className="settings-row">
+                <label className="settings-row-label" htmlFor="model-name-input">模型名称</label>
                 <div className="settings-model-picker">
-                  <input
-                    type="text"
-                    className="settings-input settings-input-mono"
-                    value={modelName}
-                    onChange={(e) => setModelName(e.target.value)}
-                    placeholder={selectedProvider.modelPlaceholder}
-                    list="available-model-options"
-                  />
+                  <div
+                    className="settings-model-combobox"
+                    onBlur={(event) => {
+                      if (!event.currentTarget.contains(event.relatedTarget)) {
+                        setIsModelMenuOpen(false);
+                      }
+                    }}
+                  >
+                    <input
+                      id="model-name-input"
+                      type="text"
+                      className="settings-input settings-input-mono settings-model-input"
+                      value={modelName}
+                      onChange={(event) => {
+                        setModelName(event.target.value);
+                        setIsModelMenuOpen(discoveredModels.length > 0);
+                      }}
+                      onFocus={() => setIsModelMenuOpen(discoveredModels.length > 0)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          setIsModelMenuOpen(false);
+                        }
+                      }}
+                      placeholder={selectedProvider.modelPlaceholder}
+                      role="combobox"
+                      aria-autocomplete="list"
+                      aria-expanded={isModelMenuOpen}
+                      aria-controls="available-model-options"
+                    />
+                    {discoveredModels.length > 0 ? (
+                      <button
+                        type="button"
+                        className="settings-model-toggle"
+                        aria-label={isModelMenuOpen ? "收起模型列表" : "展开模型列表"}
+                        aria-expanded={isModelMenuOpen}
+                        onClick={() => setIsModelMenuOpen((current) => !current)}
+                      >
+                        <span aria-hidden="true">⌄</span>
+                      </button>
+                    ) : null}
+                    {isModelMenuOpen ? (
+                      <div id="available-model-options" className="settings-model-menu" role="listbox">
+                        {visibleModels.length > 0 ? visibleModels.map((model) => (
+                          <button
+                            key={model}
+                            type="button"
+                            className={`settings-model-option${model === modelName ? " is-selected" : ""}`}
+                            role="option"
+                            aria-selected={model === modelName}
+                            onClick={() => {
+                              setModelName(model);
+                              setIsModelMenuOpen(false);
+                            }}
+                          >
+                            {model}
+                          </button>
+                        )) : (
+                          <span className="settings-model-empty">没有匹配的模型，仍可直接填写模型 ID。</span>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
                   <button
                     type="button"
                     className="settings-btn settings-btn-ghost settings-discover-btn"
@@ -474,15 +540,12 @@ export default function SettingsWorkspace() {
                     {isDiscoveringModels ? "发现中..." : "发现模型"}
                   </button>
                 </div>
-                <datalist id="available-model-options">
-                  {discoveredModels.map((model) => <option key={model} value={model} />)}
-                </datalist>
                 <span className="settings-hint">
                   {providerId === "ollama"
                     ? "从本机 Ollama 的 /api/tags 读取已安装模型，请先启动 Ollama 服务。"
                     : "可点击“发现模型”读取账号可用模型，也可以直接填写模型 ID。"}
                 </span>
-              </label>
+              </div>
 
               <label className="settings-row">
                 <span className="settings-row-label">Base URL</span>
