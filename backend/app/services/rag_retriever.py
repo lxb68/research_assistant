@@ -7,7 +7,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -115,6 +115,7 @@ class RAGRetriever:
         papers: list[dict[str, Any]],
         *,
         minimum_evidence_count: int | None = None,
+        section_score_adjuster: Callable[[str], float] | None = None,
     ) -> list[dict[str, Any]]:
         """融合稀疏与向量得分，返回去冗余后的高相关证据。"""
         normalized_query = str(query).strip()
@@ -184,6 +185,8 @@ class RAGRetriever:
                 chunk.score = self.bm25_weight * normalized_bm25[index] + self.vector_weight * normalized_vectors[index]
             else:
                 chunk.score = normalized_bm25[index]
+            if section_score_adjuster is not None:
+                chunk.score += float(section_score_adjuster(chunk.section))
             if chunk.score > 0:
                 ranked.append(chunk)
         ranked.sort(key=lambda item: item.score, reverse=True)

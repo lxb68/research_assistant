@@ -207,6 +207,9 @@ class OrchestratorRoutingTest(unittest.IsolatedAsyncioTestCase):
             paper_ids=["paper-3"],
             retrieval_query="Squirrel 实验部分的通信开销如何？",
             target_chunks=[{"record_id": "paper-3", "chunk_index": 7}],
+            retrieval_facets=[],
+            question_type="simple_fact",
+            target_evidence_count=2,
         )
         self.assertEqual(research_agent.run.call_args.kwargs["evidence"], evidence)
 

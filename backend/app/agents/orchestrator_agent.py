@@ -8,6 +8,7 @@ import threading
 from typing import Any, Callable
 
 from app.agents.domainTree_agent import DomainTreeAgent
+from app.agents.evidence_evaluator import EvidenceEvaluator
 from app.agents.error_recovery_agent import ErrorRecoveryAgent, RecoveryExhaustedError
 from app.agents.hunter_agent import HunterAgent
 from app.agents.research_chat_agent import ResearchChatAgent
@@ -46,6 +47,7 @@ class OrchestratorAgent:
             base_delay_seconds=settings.error_recovery_base_delay_seconds,
             log_callback=self.log_callback,
         )
+        self.evidence_evaluator = EvidenceEvaluator()
 
     async def run(
         self,
@@ -313,7 +315,9 @@ class OrchestratorAgent:
                 "role": "system",
                 "content": (
                     "你是一个友好、简洁的中文助手。直接回答用户当前问题，不要调用或假装调用任何研究工具，"
-                    f"也不要描述内部流程。\n\n{SYSTEM_SECURITY_CONSTRAINT}"
+                    "也不要描述内部流程。使用 Markdown；行内数学公式必须使用 $...$，独立公式必须使用 $$...$$，"
+                    "不要用普通圆括号包裹 LaTeX。代码使用带语言标识的 Markdown 围栏。"
+                    f"\n\n{SYSTEM_SECURITY_CONSTRAINT}"
                 ),
             }
         ]
@@ -445,8 +449,16 @@ class OrchestratorAgent:
                 }
             plan = {
                 "standaloneQuestion": task,
+                "questionType": "simple_fact",
+                "complexity": "simple",
                 "targetPaperIds": list(paper_ids or []),
                 "targetChunks": [],
+                "retrievalFacets": [
+                    {"id": "facet-1", "goal": task, "query": task, "preferredSectionTypes": []},
+                ],
+                "answerRequirements": [],
+                "requiresIterativeRetrieval": False,
+                "targetEvidenceCount": settings.orchestrator_min_evidence,
                 "needsClarification": False,
                 "clarificationQuestion": "",
                 "planningFallback": True,
@@ -458,7 +470,7 @@ class OrchestratorAgent:
             event="query_planning",
             data=plan,
         )
-        trace.append({"step": "query_planning", "agent": "research_chat", "status": "completed", **plan})
+        trace.append({"step": "query_planning", "agent": "query_planning", "status": "completed", **plan})
         if plan.get("needsClarification"):
             self._log("当前研究追问存在无法唯一确定的指代，需要用户澄清")
             return {
@@ -475,6 +487,9 @@ class OrchestratorAgent:
 
         paper_ids = list(plan.get("targetPaperIds") or paper_ids or []) or None
         target_chunks = list(plan.get("targetChunks") or [])
+        retrieval_facets = list(plan.get("retrievalFacets") or [])
+        question_type = str(plan.get("questionType") or "simple_fact")
+        target_evidence_count = int(plan.get("targetEvidenceCount") or settings.orchestrator_min_evidence)
         allow_search = bool(args.get("allow_external_search", True)) and not paper_ids and not target_chunks
         retrieval_query = str(plan.get("standaloneQuestion") or task).strip()
 
@@ -487,18 +502,34 @@ class OrchestratorAgent:
             paper_ids=paper_ids,
             retrieval_query=retrieval_query,
             target_chunks=target_chunks,
+            retrieval_facets=retrieval_facets,
+            question_type=question_type,
+            target_evidence_count=target_evidence_count,
         )
         raise_if_task_cancelled(cancel_event)
-        sufficient, reasons = self._assess_evidence(
+        evaluation = await self._evaluate_retrieved_evidence(
             diagnostics,
+            evidence=evidence,
+            plan=plan,
             required_paper_ids=paper_ids,
             required_chunk_refs=target_chunks,
         )
+        sufficient = bool(evaluation["sufficient"])
+        reasons = list(evaluation["reasons"])
         self.run_logger.log(
             "RAGRetriever",
             "本地证据充分度评估完成",
             event="evidence_assessment",
-            data={"diagnostics": diagnostics, "sufficient": sufficient, "reasons": reasons},
+            data={
+                "diagnostics": diagnostics,
+                "sufficient": sufficient,
+                "reasons": reasons,
+                "evidencePreview": self._evidence_preview(evidence),
+                "semanticEvaluation": {
+                    "facetAssessments": evaluation.get("facetAssessments", []),
+                    "requirementAssessments": evaluation.get("requirementAssessments", []),
+                },
+            },
         )
         trace.append(
             {
@@ -509,6 +540,57 @@ class OrchestratorAgent:
                 "reasons": reasons,
             }
         )
+
+        max_retrieval_rounds = max(1, min(settings.orchestrator_max_retrieval_rounds, 3))
+        if not sufficient and max_retrieval_rounds > 1 and plan.get("requiresIterativeRetrieval"):
+            refinement_facets = self.evidence_evaluator.refinement_facets(plan, evaluation)
+            if refinement_facets:
+                self._log("首轮证据存在覆盖缺口，正在执行一次补偿检索")
+                raise_if_task_cancelled(cancel_event)
+                evidence, diagnostics = await asyncio.to_thread(
+                    research_agent.retrieve_evidence,
+                    task,
+                    history=history,
+                    paper_ids=paper_ids,
+                    retrieval_query=retrieval_query,
+                    target_chunks=target_chunks,
+                    retrieval_facets=refinement_facets,
+                    question_type=question_type,
+                    target_evidence_count=target_evidence_count,
+                    existing_evidence=evidence,
+                )
+                raise_if_task_cancelled(cancel_event)
+                evaluation = await self._evaluate_retrieved_evidence(
+                    diagnostics,
+                    evidence=evidence,
+                    plan=plan,
+                    required_paper_ids=paper_ids,
+                    required_chunk_refs=target_chunks,
+                )
+                sufficient = bool(evaluation["sufficient"])
+                reasons = list(evaluation["reasons"])
+                self.run_logger.log(
+                    "RAGRetriever",
+                    "补偿检索后的证据充分度评估完成",
+                    event="evidence_refinement_assessment",
+                    data={
+                        "refinementFacets": refinement_facets,
+                        "diagnostics": diagnostics,
+                        "sufficient": sufficient,
+                        "reasons": reasons,
+                        "evidencePreview": self._evidence_preview(evidence),
+                    },
+                )
+                trace.append(
+                    {
+                        "step": "retrieval_refinement",
+                        "agent": "query_planning",
+                        "status": "sufficient" if sufficient else "insufficient",
+                        "facets": refinement_facets,
+                        "diagnostics": diagnostics,
+                        "reasons": reasons,
+                    }
+                )
 
         search_result: dict[str, Any] | None = None
         search_error = ""
@@ -585,14 +667,29 @@ class OrchestratorAgent:
                 task,
                 history=history,
                 retrieval_query=retrieval_query,
+                retrieval_facets=retrieval_facets,
+                question_type=question_type,
+                target_evidence_count=target_evidence_count,
+                existing_evidence=evidence,
             )
             raise_if_task_cancelled(cancel_event)
-            sufficient, reasons = self._assess_evidence(diagnostics)
+            evaluation = await self._evaluate_retrieved_evidence(
+                diagnostics,
+                evidence=evidence,
+                plan=plan,
+            )
+            sufficient = bool(evaluation["sufficient"])
+            reasons = list(evaluation["reasons"])
             self.run_logger.log(
                 "RAGRetriever",
                 "补充搜索后的证据充分度评估完成",
                 event="evidence_assessment",
-                data={"diagnostics": diagnostics, "sufficient": sufficient, "reasons": reasons},
+                data={
+                    "diagnostics": diagnostics,
+                    "sufficient": sufficient,
+                    "reasons": reasons,
+                    "evidencePreview": self._evidence_preview(evidence),
+                },
             )
             trace.append(
                 {
@@ -604,7 +701,19 @@ class OrchestratorAgent:
                 }
             )
 
-        if not sufficient:
+        full_text_available = bool(diagnostics.get("fullTextAvailable"))
+        if not sufficient and full_text_available and paper_ids:
+            self._log("本地全文已存在但部分深层细节仍未完全覆盖，将基于现有证据生成有边界的回答")
+            trace.append(
+                {
+                    "step": "evidence_fallback",
+                    "agent": "orchestrator",
+                    "status": "best_effort",
+                    "reason": "full_text_available",
+                    "missingFacetIds": evaluation.get("missingFacetIds", []),
+                }
+            )
+        elif not sufficient:
             required_materials = self._required_materials(task, diagnostics, search_result, search_error)
             self._log("仍缺少足够证据，需要用户补充 PDF 材料")
             return {
@@ -632,6 +741,7 @@ class OrchestratorAgent:
                     paper_ids=paper_ids,
                     retrieval_query=retrieval_query,
                     evidence=evidence,
+                    answer_requirements=list(plan.get("coreRequirements") or plan.get("answerRequirements") or []),
                 ),
                 cancel_event=cancel_event,
             )
@@ -673,37 +783,126 @@ class OrchestratorAgent:
         required_paper_ids: list[str] | None = None,
         required_chunk_refs: list[dict[str, Any]] | None = None,
     ) -> tuple[bool, list[str]]:
-        """根据检索诊断信息判断当前证据是否充分。"""
-        reasons: list[str] = []
-        evidence_count = int(diagnostics.get("evidenceCount") or 0)
-        distinct_papers = int(diagnostics.get("distinctPaperCount") or 0)
-        coverage = float(diagnostics.get("queryCoverage") or 0)
-        required_ids = {str(record_id) for record_id in required_paper_ids or [] if str(record_id)}
-        if evidence_count < settings.orchestrator_min_evidence:
-            reasons.append(f"相关证据片段仅 {evidence_count} 条")
-        minimum_distinct_papers = min(2, settings.orchestrator_min_evidence)
-        if required_ids:
-            minimum_distinct_papers = min(minimum_distinct_papers, len(required_ids))
-        if distinct_papers < minimum_distinct_papers:
-            reasons.append(f"相关证据仅覆盖 {distinct_papers} 篇文献")
-        if coverage < settings.orchestrator_min_query_coverage:
-            reasons.append(f"问题关键词覆盖率仅 {coverage:.0%}")
-        selected_ids = {str(record_id) for record_id in diagnostics.get("selectedPaperIds") or [] if str(record_id)}
-        missing_ids = sorted(required_ids - selected_ids)
-        if missing_ids:
-            reasons.append(f"指定文献中有 {len(missing_ids)} 篇未检索到有效证据")
-        required_chunks = {
-            (str(item.get("record_id") or item.get("recordId") or ""), int(item.get("chunk_index") or item.get("chunkIndex") or 0))
-            for item in required_chunk_refs or []
+        """保留原有二元接口，内部统一使用 EvidenceEvaluator。"""
+        evaluation = self._evaluate_evidence(
+            diagnostics,
+            required_paper_ids=required_paper_ids,
+            required_chunk_refs=required_chunk_refs,
+        )
+        return bool(evaluation["sufficient"]), list(evaluation["reasons"])
+
+    def _evaluate_evidence(
+        self,
+        diagnostics: dict[str, Any],
+        *,
+        plan: dict[str, Any] | None = None,
+        required_paper_ids: list[str] | None = None,
+        required_chunk_refs: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """返回包含 facet 缺口的完整证据评估结果。"""
+        return self.evidence_evaluator.evaluate(
+            diagnostics,
+            plan=plan,
+            required_paper_ids=required_paper_ids,
+            required_chunk_refs=required_chunk_refs,
+        )
+
+    async def _evaluate_retrieved_evidence(
+        self,
+        diagnostics: dict[str, Any],
+        *,
+        evidence: list[dict[str, Any]],
+        plan: dict[str, Any],
+        required_paper_ids: list[str] | None = None,
+        required_chunk_refs: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """先做确定性检查，再对复杂问题执行逐 facet 的语义证据验证。"""
+        evaluation = self._evaluate_evidence(
+            diagnostics,
+            plan=plan,
+            required_paper_ids=required_paper_ids,
+            required_chunk_refs=required_chunk_refs,
+        )
+        if str(plan.get("complexity") or "simple") != "complex" or not evidence:
+            return evaluation
+        model = ModelConfigStore().build_model_payload()
+        if not model:
+            return {**evaluation, "semanticValidated": False, "semanticValidationError": "模型未配置"}
+        try:
+            semantic, raw_response = await asyncio.to_thread(
+                self.evidence_evaluator.evaluate_semantic,
+                evidence,
+                plan,
+                completion=chat_completion,
+                model=model,
+                timeout=settings.research_agent_request_timeout,
+            )
+            self.run_logger.log(
+                "EvidenceEvaluator",
+                "语义证据覆盖验证完成",
+                event="semantic_evidence_assessment",
+                data={
+                    "rawResponsePreview": raw_response[: self.ROUTER_RAW_LOG_LIMIT],
+                    "responseLength": len(raw_response),
+                    "truncated": len(raw_response) > self.ROUTER_RAW_LOG_LIMIT,
+                    "facetAssessments": semantic.get("facetAssessments", []),
+                    "requirementAssessments": semantic.get("requirementAssessments", []),
+                    "answerable": semantic.get("answerable", False),
+                },
+            )
+        except Exception as error:
+            raw_response = str(getattr(error, "raw_response", "") or "")
+            self.run_logger.log(
+                "EvidenceEvaluator",
+                "语义证据覆盖验证失败，保留确定性评估结果",
+                event="semantic_evidence_assessment_error",
+                data={
+                    "errorType": type(error).__name__,
+                    "errorMessage": str(error),
+                    "rawResponsePreview": raw_response[: self.ROUTER_RAW_LOG_LIMIT],
+                    "responseLength": len(raw_response),
+                    "truncated": len(raw_response) > self.ROUTER_RAW_LOG_LIMIT,
+                },
+            )
+            fallback_refinements = []
+            for item in plan.get("retrievalFacets") or []:
+                if not isinstance(item, dict) or not str(item.get("query") or "").strip():
+                    continue
+                fallback_refinements.append(
+                    {
+                        **item,
+                        "query": (
+                            f"{str(item.get('query') or '').strip()}\n"
+                            f"{str(item.get('goal') or '').strip()}\n"
+                            "direct evidence detailed steps complete workflow"
+                        ).strip(),
+                    }
+                )
+            return {
+                **evaluation,
+                "sufficient": False,
+                "semanticValidated": False,
+                "semanticValidationError": str(error),
+                "refinementFacets": fallback_refinements,
+            }
+
+        reasons = list(evaluation.get("reasons") or [])
+        if not semantic.get("answerable"):
+            partial_count = sum(
+                item.get("status") == "partial"
+                for item in [*semantic.get("facetAssessments", []), *semantic.get("requirementAssessments", [])]
+            )
+            unsupported_count = sum(
+                item.get("status") == "unsupported"
+                for item in [*semantic.get("facetAssessments", []), *semantic.get("requirementAssessments", [])]
+            )
+            reasons.append(f"语义验证仍有 {partial_count} 项部分支持、{unsupported_count} 项缺少直接证据")
+        return {
+            **evaluation,
+            **semantic,
+            "sufficient": bool(evaluation.get("sufficient")) and bool(semantic.get("answerable")),
+            "reasons": reasons,
         }
-        resolved_chunks = {
-            (str(item.get("recordId") or item.get("record_id") or ""), int(item.get("chunkIndex") or item.get("chunk_index") or 0))
-            for item in diagnostics.get("resolvedChunkRefs") or []
-        }
-        missing_chunks = required_chunks - resolved_chunks
-        if missing_chunks:
-            reasons.append(f"指定片段中有 {len(missing_chunks)} 条无法从本地文献恢复")
-        return not reasons, reasons
 
     def _required_materials(
         self,

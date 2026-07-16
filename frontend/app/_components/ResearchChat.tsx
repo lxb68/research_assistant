@@ -24,6 +24,7 @@ import ThumbUpAltOutlined from "@mui/icons-material/ThumbUpAltOutlined";
 import { buildApiUrl } from "@/lib/api";
 import { useBackgroundTasks } from "@/app/_components/BackgroundTaskProvider";
 import { fetchJob } from "@/lib/background-jobs";
+import MessageContent from "@/app/_components/MessageContent";
 
 type Props = { onOpenDownload: () => void; onOpenBrowse: () => void; onOpenDomainTree: () => void; onOpenSettings: () => void };
 type Source = {
@@ -454,7 +455,7 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
             {!messages.length && <div className="research-empty"><span><AutoAwesomeRounded /></span><h2>今天想研究什么？</h2><p>我会从你的知识库中检索、分析并标注每一处引用。</p></div>}
             {messages.map((message) => <article className={`research-message ${message.role}`} key={message.id}>
               <div className="research-avatar">{message.role === "agent" ? <AutoAwesomeRounded /> : "LX"}</div>
-              <div><header><strong>{message.role === "agent" ? "Research Agent" : "你"}</strong><span>{message.id <= 2 ? "10:24" : "刚刚"}</span></header><p>{message.content}</p>
+              <div><header><strong>{message.role === "agent" ? "Research Agent" : "你"}</strong><span>{message.id <= 2 ? "10:24" : "刚刚"}</span></header><MessageContent content={message.content} />
                 {message.role === "agent" && <>{message.sources?.length ? <div className="research-citations">{message.sources.map((source) => <button key={`${message.id}-${source.index}`}>{source.index} · {source.title}</button>)}</div> : null}<footer><button onClick={() => { navigator.clipboard?.writeText(message.content); setCopied(message.id); }}><ContentCopyRounded />{copied === message.id ? "已复制" : "复制"}</button><button><ThumbUpAltOutlined />有帮助</button><button onClick={() => saveResearchRecord(message)}><BookmarkAddOutlined />{researchRecords.some((record) => record.conversationId === activeConversationId && record.messageId === message.id) ? "已保存" : "保存到研究记录"}</button></footer></>}
               </div>
             </article>)}

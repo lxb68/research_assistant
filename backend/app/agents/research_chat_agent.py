@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from app.agents.hunter_agent import HunterAgent
+from app.agents.query_planning_agent import QueryPlanningAgent
 from app.core.config import settings
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
 from app.services.model_client import chat_completion
@@ -33,20 +33,6 @@ class ResearchAgentConfig:
 
 class ResearchChatAgent:
     """基于本地论文知识库进行检索增强研究问答。"""
-
-    QUERY_PLANNER_SYSTEM_PROMPT = """你是研究对话的上下文查询规划器。根据当前问题、最近对话和候选证据来源，生成可独立检索的问题并解析指代。
-
-要求：
-1. standalone_question 必须是脱离对话历史后仍语义完整的研究问题；可以补入历史中明确出现的论文标题、方法、结论或实验对象。
-2. 不要把无关的历史问题机械拼接进 standalone_question。
-3. target_paper_ids 和 target_chunks 只能使用 candidate_sources 中真实存在的值，不能编造 ID。
-4. 用户明确追问某篇论文时填写 target_paper_ids；追问某个引用、章节或片段时填写 target_chunks。
-5. 如果“它、前者、这个片段、上述方法”等指代无法唯一确定，设置 needs_clarification=true，并给出简短 clarification_question。
-6. 问题本身完整且没有限定来源时，目标数组保持为空。
-
-只输出一个 JSON 对象，不要输出 Markdown 或额外文字：
-{"standalone_question":"...","target_paper_ids":[],"target_chunks":[{"record_id":"...","chunk_index":0}],"needs_clarification":false,"clarification_question":""}
-"""
 
     def __init__(
         self,
@@ -100,6 +86,7 @@ class ResearchChatAgent:
         paper_ids: list[str] | None = None,
         retrieval_query: str | None = None,
         evidence: list[dict[str, Any]] | None = None,
+        answer_requirements: list[str] | None = None,
     ) -> dict[str, Any]:
         """执行当前代理的主要业务流程并返回结构化结果。"""
         normalized_question = str(question).strip()
@@ -140,6 +127,7 @@ class ResearchChatAgent:
             question=normalized_question,
             history=history or [],
             evidence=evidence,
+            answer_requirements=answer_requirements or [],
         )
         retrieved_sources = [
             {
@@ -183,6 +171,10 @@ class ResearchChatAgent:
         paper_ids: list[str] | None = None,
         retrieval_query: str | None = None,
         target_chunks: list[dict[str, Any]] | None = None,
+        retrieval_facets: list[dict[str, Any]] | None = None,
+        question_type: str = "simple_fact",
+        target_evidence_count: int | None = None,
+        existing_evidence: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """从本地论文库检索与问题相关的证据片段。"""
         normalized_question = str(question).strip()
@@ -190,11 +182,26 @@ class ResearchChatAgent:
             raise ValueError("研究问题不能为空")
         papers = self._load_papers(paper_ids)
         query = str(retrieval_query or normalized_question).strip()
-        evidence = self.retriever.retrieve(
-            self._expand_retrieval_query(query),
-            papers,
-            minimum_evidence_count=settings.orchestrator_min_evidence,
+        facets = [dict(item) for item in retrieval_facets or [] if isinstance(item, dict)]
+        desired_count = max(
+            settings.orchestrator_min_evidence,
+            min(int(target_evidence_count or settings.orchestrator_min_evidence), self.config.max_sources),
         )
+        if facets:
+            evidence, retrieval_diagnostics = self._retrieve_facets(
+                papers,
+                facets,
+                question_type=question_type,
+                target_evidence_count=desired_count,
+                existing_evidence=existing_evidence or [],
+            )
+        else:
+            evidence = self.retriever.retrieve(
+                self._expand_retrieval_query(query),
+                papers,
+                minimum_evidence_count=settings.orchestrator_min_evidence,
+            )
+            retrieval_diagnostics = dict(self.retriever.last_diagnostics)
         resolved_target_evidence = self.retriever.resolve_chunk_references(papers, target_chunks or [])
         if resolved_target_evidence:
             merged: list[dict[str, Any]] = []
@@ -208,7 +215,13 @@ class ResearchChatAgent:
                 if len(merged) >= self.config.max_sources:
                     break
             evidence = merged
-        diagnostics = {"paperCount": len(papers), **self.retriever.last_diagnostics}
+        full_text_paper_count = sum(bool(self.retriever._read_markdown(paper)) for paper in papers)
+        diagnostics = {
+            "paperCount": len(papers),
+            "fullTextPaperCount": full_text_paper_count,
+            "fullTextAvailable": bool(papers) and full_text_paper_count == len(papers),
+            **retrieval_diagnostics,
+        }
         diagnostics.update(
             {
                 "evidenceCount": len(evidence),
@@ -232,6 +245,217 @@ class ResearchChatAgent:
         )
         return evidence, diagnostics
 
+    def _retrieve_facets(
+        self,
+        papers: list[dict[str, Any]],
+        facets: list[dict[str, Any]],
+        *,
+        question_type: str,
+        target_evidence_count: int,
+        existing_evidence: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """执行多路 facet 检索，并按来源章节和覆盖维度融合结果。"""
+        merged: dict[tuple[str, int], dict[str, Any]] = {}
+        retrieval_runs: list[dict[str, Any]] = []
+        per_facet_limit = max(2, min(4, target_evidence_count // max(1, len(facets)) + 1))
+        for facet in facets[: settings.query_planner_max_facets]:
+            facet_id = str(facet.get("id") or f"facet-{len(retrieval_runs) + 1}")
+            facet_query = str(facet.get("query") or "").strip()
+            if not facet_query:
+                continue
+            preferred_types = {
+                str(value).strip().lower()
+                for value in facet.get("preferredSectionTypes") or facet.get("preferred_section_types") or []
+                if str(value).strip()
+            }
+            expanded_facet_query = self._expand_facet_query(
+                facet_query,
+                question_type=question_type,
+                preferred_types=preferred_types,
+            )
+            results = self.retriever.retrieve(
+                self._expand_retrieval_query(expanded_facet_query),
+                papers,
+                minimum_evidence_count=per_facet_limit,
+                section_score_adjuster=lambda section, preferred=preferred_types: self._section_intent_adjustment(
+                    question_type=question_type,
+                    section_type=self._classify_section_type(section),
+                    preferred_types=preferred,
+                ),
+            )
+            run_diagnostics = dict(self.retriever.last_diagnostics)
+            run_diagnostics.update({"facetId": facet_id, "query": facet_query, "expandedQuery": expanded_facet_query})
+            retrieval_runs.append(run_diagnostics)
+            for rank, raw_item in enumerate(results[:per_facet_limit], start=1):
+                item = dict(raw_item)
+                key = (str(item.get("record_id") or ""), int(item.get("chunk_index") or 0))
+                section_type = self._classify_section_type(str(item.get("section") or ""))
+                section_adjustment = self._section_intent_adjustment(
+                    question_type=question_type,
+                    section_type=section_type,
+                    preferred_types=preferred_types,
+                )
+                contribution = float(item.get("score") or 0) + section_adjustment + 1 / (20 + rank)
+                if key not in merged:
+                    item["matched_facet_ids"] = [facet_id]
+                    item["section_type"] = section_type
+                    item["fusion_score"] = contribution
+                    merged[key] = item
+                else:
+                    current = merged[key]
+                    if facet_id not in current["matched_facet_ids"]:
+                        current["matched_facet_ids"].append(facet_id)
+                        current["fusion_score"] += 0.08
+                    current["fusion_score"] = max(float(current["fusion_score"]), contribution)
+                    current["score"] = max(float(current.get("score") or 0), float(item.get("score") or 0))
+
+        for raw_item in existing_evidence:
+            item = dict(raw_item)
+            key = (str(item.get("record_id") or ""), int(item.get("chunk_index") or 0))
+            item.setdefault("matched_facet_ids", [])
+            item.setdefault("section_type", self._classify_section_type(str(item.get("section") or "")))
+            item.setdefault("fusion_score", float(item.get("score") or 0) + 0.05)
+            if key not in merged:
+                merged[key] = item
+
+        ranked = sorted(merged.values(), key=lambda item: float(item.get("fusion_score") or 0), reverse=True)
+        selected: list[dict[str, Any]] = []
+        selected_keys: set[tuple[str, int]] = set()
+        per_section: dict[tuple[str, str], int] = {}
+        context_chars = 0
+
+        def try_select(item: dict[str, Any]) -> bool:
+            nonlocal context_chars
+            key = (str(item.get("record_id") or ""), int(item.get("chunk_index") or 0))
+            if key in selected_keys:
+                return False
+            section_key = (str(item.get("record_id") or ""), str(item.get("section") or ""))
+            if per_section.get(section_key, 0) >= 2:
+                return False
+            text_size = len(str(item.get("text") or ""))
+            if context_chars + text_size > self.config.max_context_chars:
+                return False
+            selected.append(item)
+            selected_keys.add(key)
+            per_section[section_key] = per_section.get(section_key, 0) + 1
+            context_chars += text_size
+            return True
+
+        # 先覆盖每个动态检索 facet，再用全局融合分补满剩余上下文。
+        for facet in facets:
+            facet_id = str(facet.get("id") or "")
+            if not facet_id:
+                continue
+            for item in ranked:
+                if facet_id in (item.get("matched_facet_ids") or []) and try_select(item):
+                    break
+            if len(selected) >= target_evidence_count:
+                break
+        if len(selected) < target_evidence_count:
+            for item in ranked:
+                try_select(item)
+                if len(selected) >= target_evidence_count:
+                    break
+
+        selected_facet_ids = {
+            str(facet_id)
+            for item in selected
+            for facet_id in item.get("matched_facet_ids") or []
+            if str(facet_id)
+        }
+        requested_facet_ids = {str(item.get("id") or "") for item in facets if str(item.get("id") or "")}
+        section_types = {str(item.get("section_type") or "background") for item in selected}
+        method_types = {"method", "framework", "protocol", "algorithm", "implementation", "overview"}
+        query_coverages = [float(item.get("queryCoverage") or 0) for item in retrieval_runs]
+        diagnostics = {
+            "retrievalMode": "+".join(dict.fromkeys(str(item.get("retrievalMode") or "") for item in retrieval_runs)),
+            "embeddingBackend": "+".join(dict.fromkeys(str(item.get("embeddingBackend") or "") for item in retrieval_runs)),
+            "embeddingFailures": list(dict.fromkeys(
+                str(failure)
+                for item in retrieval_runs
+                for failure in item.get("embeddingFailures") or []
+            )),
+            "chunkingStrategy": "mineru_structure_semantic_token_overlap",
+            "candidateCount": max((int(item.get("candidateCount") or 0) for item in retrieval_runs), default=0),
+            "evidenceCount": len(selected),
+            "distinctPaperCount": len({str(item.get("record_id") or "") for item in selected}),
+            "selectedPaperIds": list(dict.fromkeys(str(item.get("record_id") or "") for item in selected)),
+            "queryCoverage": round(sum(query_coverages) / max(1, len(query_coverages)), 4),
+            "topScore": round(max((float(item.get("score") or 0) for item in selected), default=0), 4),
+            "facetCount": len(requested_facet_ids),
+            "coveredFacetCount": len(requested_facet_ids & selected_facet_ids),
+            "facetCoverage": round(len(requested_facet_ids & selected_facet_ids) / max(1, len(requested_facet_ids)), 4),
+            "coveredFacetIds": sorted(requested_facet_ids & selected_facet_ids),
+            "missingFacetIds": sorted(requested_facet_ids - selected_facet_ids),
+            "coveredSectionTypes": sorted(section_types),
+            "methodEvidenceCount": sum(str(item.get("section_type") or "") in method_types for item in selected),
+            "targetEvidenceCount": target_evidence_count,
+            "retrievalRuns": retrieval_runs,
+        }
+        return selected, diagnostics
+
+    @staticmethod
+    def _expand_facet_query(
+        query: str,
+        *,
+        question_type: str,
+        preferred_types: set[str],
+    ) -> str:
+        """按通用章节意图扩展 facet，不依赖论文名称或固定章节号。"""
+        additions: list[str] = []
+        if question_type == "mechanism":
+            if preferred_types & {"overview", "framework", "background"}:
+                additions.append("complete workflow end-to-end putting everything together full framework")
+            if preferred_types & {"method", "protocol", "algorithm", "implementation"}:
+                additions.append("method protocol algorithm implementation detailed steps")
+        elif question_type == "evaluation":
+            additions.append("experiment evaluation result metrics comparison")
+        return "\n".join([query, *additions]).strip()
+
+    @staticmethod
+    def _classify_section_type(section: str) -> str:
+        """把论文标题归一为通用章节类型，供跨领域重排使用。"""
+        section_path = str(section or "")
+        parts = [part.strip() for part in section_path.split(" > ") if part.strip()]
+        # 第一层通常是论文标题，不能让标题中的 Framework、Training 等词污染章节类型。
+        relevant_path = " > ".join(parts[1:]) if len(parts) > 1 else section_path
+        lowered = relevant_path.casefold()
+        patterns = (
+            ("experiment", ("experiment", "evaluation", "effectiveness", "benchmark", "实验", "评估")),
+            ("result", ("result", "finding", "结果")),
+            ("comparison", ("comparison", "compare", "related work", "比较", "相关工作")),
+            ("protocol", ("protocol", "协议")),
+            ("algorithm", ("algorithm", "算法")),
+            ("framework", ("framework", "architecture", "框架", "架构")),
+            ("implementation", ("implementation", "system design", "实现", "系统设计")),
+            ("overview", ("overview", "putting everything together", "complete workflow", "end-to-end", "概述", "完整流程", "整体流程")),
+            ("method", ("method", "approach", "training", "optimization", "方法", "训练", "优化")),
+            ("discussion", ("discussion", "limitation", "讨论", "局限")),
+            ("background", ("background", "preliminar", "introduction", "背景", "预备", "引言")),
+        )
+        for section_type, keywords in patterns:
+            if any(keyword in lowered for keyword in keywords):
+                return section_type
+        return "background"
+
+    @staticmethod
+    def _section_intent_adjustment(
+        *,
+        question_type: str,
+        section_type: str,
+        preferred_types: set[str],
+    ) -> float:
+        adjustment = 0.22 if section_type in preferred_types else 0.0
+        if question_type == "mechanism":
+            if section_type in {"method", "framework", "protocol", "algorithm", "implementation", "overview"}:
+                adjustment += 0.18
+            elif section_type in {"experiment", "result"}:
+                adjustment -= 0.15
+        elif question_type == "evaluation":
+            if section_type in {"experiment", "result", "evaluation"}:
+                adjustment += 0.18
+        return adjustment
+
     def plan_retrieval(
         self,
         question: str,
@@ -239,145 +463,16 @@ class ResearchChatAgent:
         *,
         explicit_paper_ids: list[str] | None = None,
     ) -> tuple[dict[str, Any], str]:
-        """结合历史文本和结构化来源，把追问规划为独立、受约束的检索任务。"""
-        normalized_question = str(question or "").strip()
-        if not normalized_question:
-            raise ValueError("研究问题不能为空")
+        """兼容原入口，并把实际规划委托给独立 QueryPlanningAgent。"""
         model = ModelConfigStore().build_model_payload()
         if not model:
             raise ValueError("请先配置模型参数")
-
-        context_messages: list[dict[str, Any]] = []
-        candidate_sources: list[dict[str, Any]] = []
-        seen_sources: set[tuple[str, int]] = set()
-        for message in (history or [])[-8:]:
-            role = str(message.get("role") or "").strip()
-            content = str(message.get("content") or "").strip()
-            if role not in {"user", "assistant"} or not content:
-                continue
-            normalized_sources: list[dict[str, Any]] = []
-            for source in list(message.get("sources") or [])[:20]:
-                record_id = str(source.get("record_id") or source.get("recordId") or "").strip()
-                if not record_id:
-                    continue
-                normalized_source = {
-                    "index": int(source.get("index") or 0),
-                    "record_id": record_id,
-                    "title": str(source.get("title") or "")[:1000],
-                    "section": str(source.get("section") or "")[:1000],
-                    "chunk_index": int(source.get("chunk_index") or source.get("chunkIndex") or 0),
-                    "excerpt": str(source.get("excerpt") or "")[:1200],
-                }
-                normalized_sources.append(normalized_source)
-                source_key = (record_id, normalized_source["chunk_index"])
-                if source_key not in seen_sources:
-                    seen_sources.add(source_key)
-                    candidate_sources.append(normalized_source)
-            context_messages.append({"role": role, "content": content[:6000], "sources": normalized_sources})
-
-        planner_input = {
-            "current_question": normalized_question,
-            "history": context_messages,
-            "candidate_sources": candidate_sources,
-            "explicit_paper_ids": list(explicit_paper_ids or []),
-        }
-        raw_response = chat_completion(
-            model,
-            [
-                {
-                    "role": "system",
-                    "content": f"{self.QUERY_PLANNER_SYSTEM_PROMPT}\n\n{SYSTEM_SECURITY_CONSTRAINT}",
-                },
-                {"role": "user", "content": json.dumps(planner_input, ensure_ascii=False)},
-            ],
-            temperature=0,
+        planner = QueryPlanningAgent(
+            completion=chat_completion,
+            model=model,
             timeout=self.config.request_timeout,
-            response_format={"type": "json_object"},
         )
-        try:
-            payload = self._parse_planner_response(raw_response)
-        except Exception as error:
-            setattr(error, "raw_response", str(raw_response or ""))
-            raise
-
-        known_ids = {str(source["record_id"]) for source in candidate_sources}
-        explicit_ids = {str(record_id) for record_id in explicit_paper_ids or [] if str(record_id)}
-        allowed_ids = known_ids | explicit_ids
-        proposed_values = payload.get("target_paper_ids")
-        if not isinstance(proposed_values, list):
-            proposed_values = []
-        proposed_ids = [str(value).strip() for value in proposed_values if str(value).strip()]
-        target_paper_ids = list(dict.fromkeys(proposed_ids if not explicit_ids else explicit_paper_ids or []))
-        invalid_ids = [record_id for record_id in target_paper_ids if record_id not in allowed_ids]
-        target_paper_ids = [record_id for record_id in target_paper_ids if record_id in allowed_ids]
-
-        known_chunks = {
-            (str(source["record_id"]), int(source["chunk_index"]))
-            for source in candidate_sources
-        }
-        target_chunks: list[dict[str, Any]] = []
-        invalid_chunks: list[dict[str, Any]] = []
-        proposed_chunks = payload.get("target_chunks")
-        if not isinstance(proposed_chunks, list):
-            proposed_chunks = []
-        for item in proposed_chunks:
-            if not isinstance(item, dict):
-                continue
-            try:
-                chunk_index = int(item.get("chunk_index") or 0)
-            except (TypeError, ValueError):
-                invalid_chunks.append({"record_id": str(item.get("record_id") or "").strip(), "chunk_index": -1})
-                continue
-            reference = {
-                "record_id": str(item.get("record_id") or "").strip(),
-                "chunk_index": chunk_index,
-            }
-            if (reference["record_id"], reference["chunk_index"]) in known_chunks:
-                if reference not in target_chunks:
-                    target_chunks.append(reference)
-            else:
-                invalid_chunks.append(reference)
-        for reference in target_chunks:
-            if reference["record_id"] not in target_paper_ids:
-                target_paper_ids.append(reference["record_id"])
-
-        needs_clarification = payload.get("needs_clarification") is True
-        if (invalid_ids and not target_paper_ids) or (invalid_chunks and not target_chunks):
-            needs_clarification = True
-        clarification = str(payload.get("clarification_question") or "").strip()
-        if needs_clarification and not clarification:
-            clarification = "我无法唯一确定你指的是哪篇文献或哪个片段，请补充论文标题、章节或引用内容。"
-        plan = {
-            "standaloneQuestion": str(payload.get("standalone_question") or normalized_question).strip(),
-            "targetPaperIds": target_paper_ids,
-            "targetChunks": target_chunks,
-            "needsClarification": needs_clarification,
-            "clarificationQuestion": clarification,
-            "candidateSourceCount": len(candidate_sources),
-            "invalidTargetIds": invalid_ids,
-            "invalidTargetChunks": invalid_chunks,
-        }
-        return plan, str(raw_response or "")
-
-    def _parse_planner_response(self, raw_response: str) -> dict[str, Any]:
-        """解析查询规划器 JSON，拒绝非对象结果。"""
-        text = str(raw_response or "").strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            text = "\n".join(lines[1:-1]).strip() if len(lines) >= 3 else text
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            start, end = text.find("{"), text.rfind("}")
-            if start < 0 or end <= start:
-                raise ValueError("模型未返回有效的上下文查询规划结果")
-            try:
-                payload = json.loads(text[start : end + 1])
-            except json.JSONDecodeError as error:
-                raise ValueError("模型未返回有效的上下文查询规划结果") from error
-        if not isinstance(payload, dict):
-            raise ValueError("模型返回的上下文查询规划结构无效")
-        return payload
+        return planner.plan(question, history, explicit_paper_ids=explicit_paper_ids)
 
     def _load_papers(self, paper_ids: list[str] | None) -> list[dict[str, Any]]:
         """加载论文。"""
@@ -400,10 +495,17 @@ class ResearchChatAgent:
         question: str,
         history: list[dict[str, str]],
         evidence: list[dict[str, Any]],
+        answer_requirements: list[str],
     ) -> str:
         """调用已配置模型，根据证据上下文生成研究回答。"""
         context = self.retriever.build_context(evidence)
         system_prompt = self._load_prompt().replace("{{evidence}}", context)
+        if answer_requirements:
+            requirements_text = "\n".join(f"- {str(item)[:500]}" for item in answer_requirements if str(item).strip())
+            system_prompt = (
+                f"{system_prompt}\n\n# 本次回答的核心覆盖目标\n{requirements_text}\n"
+                "这些目标用于组织回答；个别非核心实现细节缺失时应明确边界，但不要因此否定已有证据能够支持的整体回答。"
+            )
         system_prompt = f"{system_prompt}\n\n{SYSTEM_SECURITY_CONSTRAINT}"
         messages = [{"role": "system", "content": system_prompt}]
         for message in history[-8:]:
