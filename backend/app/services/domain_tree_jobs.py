@@ -395,10 +395,12 @@ class DomainTreeJobManager:
     def shutdown(self) -> None:
         self._stop_event.set()
         with self._lock:
-            active_ids = list(self._active)
-            for active in self._active.values():
-                active.cancel_event.set()
+            active_jobs = list(self._active.items())
+        # 先持久化“服务中断”，再广播取消，避免工作线程抢先写成普通 cancelled。
+        active_ids = [job_id for job_id, _active in active_jobs]
         self.repository.interrupt_jobs(active_ids)
+        for _job_id, active in active_jobs:
+            active.cancel_event.set()
         self._executor.shutdown(wait=False, cancel_futures=True)
         thread = self._cleanup_thread
         if thread and thread.is_alive():

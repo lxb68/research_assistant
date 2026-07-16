@@ -2,7 +2,7 @@
 
 import asyncio
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from app.agents import OrchestratorAgent
 from app.api.streaming import ndjson_worker_response
@@ -36,8 +36,8 @@ async def research_chat(payload: ResearchChatRequest) -> dict:
 
 
 @router.post("/api/research/chat/stream")
-def research_chat_stream(payload: ResearchChatRequest):
-    def produce(emit) -> None:
+async def research_chat_stream(payload: ResearchChatRequest, request: Request):
+    def produce(emit, cancel_event) -> None:
         def push_log(message: str) -> None:
             emit({"type": "log", "message": message})
 
@@ -46,11 +46,12 @@ def research_chat_stream(payload: ResearchChatRequest):
                 payload.question,
                 action="auto",
                 arguments=_research_arguments(payload),
+                cancel_event=cancel_event,
             ),
         )
         emit({"type": "result", "result": result})
 
-    return ndjson_worker_response(produce)
+    return ndjson_worker_response(request, produce)
 
 
 @router.post("/api/orchestrator/run")

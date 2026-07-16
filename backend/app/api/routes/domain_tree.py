@@ -1,42 +1,14 @@
 """Domain tree and knowledge graph job routes."""
 
-import threading
-
 from fastapi import APIRouter, HTTPException
 
 from app.agents import DomainTreeAgent
 from app.schemas.api import DomainTreeGenerateRequest
-from app.services.domain_tree_jobs import DomainTreeJobOutcome, domain_tree_jobs
+from app.services.background_jobs import BackgroundJobCapacityExceeded, background_job_manager
 from app.services.model_config import ModelConfigStore
 
 
 router = APIRouter()
-
-
-def _run_domain_tree_job(
-    payload: DomainTreeGenerateRequest,
-    model_payload: dict[str, object],
-    progress_callback,
-    cancel_event: threading.Event,
-) -> DomainTreeJobOutcome:
-    agent = DomainTreeAgent()
-    tags = agent.handle_domain_tree_sync(
-        payload.project_id,
-        action=payload.action,
-        all_toc=payload.all_toc,
-        new_toc=payload.new_toc,
-        model=payload.model or model_payload,
-        language=payload.language,
-        delete_toc=payload.delete_toc,
-        cancel_event=cancel_event,
-        progress_callback=progress_callback,
-    )
-    if not tags:
-        raise ValueError("未找到可用于生成领域树的 Markdown 或目录数据")
-    result_path = agent.get_result_path(payload.project_id)
-    if not result_path.exists():
-        raise RuntimeError("领域树已生成，但读取结果失败")
-    return DomainTreeJobOutcome(result_path=str(result_path))
 
 
 @router.post("/api/domain-tree/generate")
@@ -44,17 +16,20 @@ def generate_domain_tree(payload: DomainTreeGenerateRequest) -> dict:
     model_payload = ModelConfigStore().build_model_payload()
     if not model_payload:
         raise HTTPException(status_code=400, detail="请先配置模型参数")
-    job, created = domain_tree_jobs.submit(
-        payload.project_id,
-        payload.action,
-        lambda report, cancel_event: _run_domain_tree_job(payload, model_payload, report, cancel_event),
-    )
+    try:
+        job, created = background_job_manager.submit(
+            "domain_tree",
+            payload.model_dump(),
+            dedupe_key=f"domain-tree:{payload.project_id}",
+        )
+    except BackgroundJobCapacityExceeded as error:
+        raise HTTPException(status_code=503, detail=str(error), headers={"Retry-After": "1"}) from error
     return {"status": "accepted", "created": created, **job}
 
 
 @router.get("/api/domain-tree/jobs/active/{project_id}")
 def get_active_domain_tree_job(project_id: str) -> dict:
-    job = domain_tree_jobs.get_active(project_id)
+    job = background_job_manager.find_active("domain_tree", f"domain-tree:{project_id}")
     if not job:
         raise HTTPException(status_code=404, detail="当前项目没有活动的领域树任务")
     return job
@@ -62,15 +37,21 @@ def get_active_domain_tree_job(project_id: str) -> dict:
 
 @router.get("/api/domain-tree/jobs/{job_id}")
 def get_domain_tree_job(job_id: str) -> dict:
-    job = domain_tree_jobs.get(job_id)
+    job = background_job_manager.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="领域树任务不存在")
+    if job.get("type") != "domain_tree":
+        raise HTTPException(status_code=404, detail="领域树任务不存在")
+    if job.get("status") == "completed":
+        project_id = str((job.get("request") or {}).get("project_id") or "")
+        job = {**job, "result": DomainTreeAgent().get_result(project_id) if project_id else None}
     return job
 
 
 @router.post("/api/domain-tree/jobs/{job_id}/cancel")
 def cancel_domain_tree_job(job_id: str) -> dict:
-    job = domain_tree_jobs.cancel(job_id)
+    existing = background_job_manager.get(job_id)
+    job = background_job_manager.cancel(job_id) if existing and existing.get("type") == "domain_tree" else None
     if not job:
         raise HTTPException(status_code=404, detail="领域树任务不存在")
     return job

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from threading import Event
 from typing import Any, Awaitable, Callable, TypeVar
 
 import requests
+
+from app.services.task_control import TaskCancelled, raise_if_task_cancelled
 
 
 T = TypeVar("T")
@@ -46,14 +49,24 @@ class ErrorRecoveryAgent:
         self.base_delay_seconds = max(0.0, min(base_delay_seconds, 10.0))
         self.log_callback = log_callback
 
-    async def execute(self, operation_name: str, operation: AsyncOperation[T]) -> tuple[T, list[dict[str, Any]]]:
+    async def execute(
+        self,
+        operation_name: str,
+        operation: AsyncOperation[T],
+        *,
+        cancel_event: Event | None = None,
+    ) -> tuple[T, list[dict[str, Any]]]:
         """执行异步操作，并仅对明确可恢复的错误进行有限重试。"""
         trace: list[dict[str, Any]] = []
         for cycle in range(1, self.max_cycles + 1):
+            raise_if_task_cancelled(cancel_event)
             try:
                 value = await operation()
+                raise_if_task_cancelled(cancel_event)
                 trace.append({"cycle": cycle, "status": "success", "operation": operation_name})
                 return value, trace
+            except TaskCancelled:
+                raise
             except Exception as error:
                 decision = self.classify(error)
                 trace.append(
@@ -79,7 +92,13 @@ class ErrorRecoveryAgent:
                     ) from error
                 delay = min(self.base_delay_seconds * (2 ** (cycle - 1)), 4.0)
                 if delay:
-                    await asyncio.sleep(delay)
+                    deadline = asyncio.get_running_loop().time() + delay
+                    while True:
+                        raise_if_task_cancelled(cancel_event)
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            break
+                        await asyncio.sleep(min(0.1, remaining))
         raise AssertionError("错误恢复循环不应执行到此处")
 
     def classify(self, error: Exception) -> RecoveryDecision:

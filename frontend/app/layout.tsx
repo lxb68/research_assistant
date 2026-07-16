@@ -3,6 +3,7 @@
 import type { Metadata } from "next";
 import ThemeRegistry from "../components/ThemeRegistry";
 import { APP_THEME_STORAGE_KEY } from "@/lib/theme";
+import { BackgroundTaskProvider } from "@/app/_components/BackgroundTaskProvider";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -29,7 +30,9 @@ export default function RootLayout({
       </head>
       {/* 所有页面都会渲染到 body 中，这里保留最轻量的全局布局。 */}
       <body>
-        <ThemeRegistry>{children}</ThemeRegistry>
+        <ThemeRegistry>
+          <BackgroundTaskProvider>{children}</BackgroundTaskProvider>
+        </ThemeRegistry>
       </body>
     </html>
   );

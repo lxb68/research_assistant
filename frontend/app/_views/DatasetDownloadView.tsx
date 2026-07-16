@@ -24,7 +24,8 @@ import RadioButtonUncheckedIcon from "@mui/icons-material/RadioButtonUnchecked";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import SearchIcon from "@mui/icons-material/Search";
 import { buildApiUrl } from "@/lib/api";
-import { readNdjsonStream } from "@/lib/stream";
+import { useBackgroundTasks } from "@/app/_components/BackgroundTaskProvider";
+import { fetchJob } from "@/lib/background-jobs";
 
 type PaperSource = "arxiv" | "pubmed" | "crossref" | "ieee" | "open_access";
 type SourceState = "idle" | "searching" | "done" | "error";
@@ -79,11 +80,7 @@ type DatasetDownloadResponse = {
   papers: PaperResult[];
 };
 
-type StreamEvent =
-  | { type: "log"; message: string }
-  | { type: "result"; result: DatasetDownloadResponse }
-  | { type: "error"; message: string }
-  | { type: "done" };
+type StreamEvent = { type: "log"; message: string };
 
 const paperSources: Array<{
   id: PaperSource;
@@ -181,6 +178,7 @@ export default function DatasetDownloadPage({
   embedded = false,
   isActiveView = true,
 }: DatasetDownloadPageProps = {}) {
+  const { jobs, submitJob } = useBackgroundTasks();
   const [query, setQuery] = useState("");
   const [selectedSources, setSelectedSources] = useState<PaperSource[]>(defaultSelectedSources);
   const [limitPerSource, setLimitPerSource] = useState(10);
@@ -203,6 +201,7 @@ export default function DatasetDownloadPage({
   const [completionNoticeOpen, setCompletionNoticeOpen] = useState(false);
   const [completionNoticeMessage, setCompletionNoticeMessage] = useState("");
   const activeViewRef = useRef(isActiveView);
+  const restoredJobRef = useRef("");
   const glassPanel = {
     border: "1px solid var(--app-border)",
     background: "var(--app-surface)",
@@ -267,6 +266,35 @@ export default function DatasetDownloadPage({
     activeViewRef.current = isActiveView;
   }, [isActiveView]);
 
+  useEffect(() => {
+    const latest = jobs.find((job) => job.type === "dataset_download");
+    if (!latest || restoredJobRef.current === latest.jobId) return;
+    const timer = window.setTimeout(() => {
+      if (["queued", "running", "cancelling"].includes(latest.status)) {
+        setIsSearching(true);
+        setSummary(`后台任务 ${latest.jobId.slice(0, 12)} 正在继续执行，可自由切换页面。`);
+        return;
+      }
+      setIsSearching(false);
+      restoredJobRef.current = latest.jobId;
+      if (latest.status !== "completed" || !latest.result) return;
+      const payload = latest.result as unknown as DatasetDownloadResponse;
+      const sources = ((latest.request?.sources as PaperSource[] | undefined) ?? payload.sources ?? defaultSelectedSources);
+      setSelectedSources(sources);
+      setResults(payload.papers ?? []);
+      setAgentLogs(payload.logs ?? []);
+      setSummary(`已从后台任务恢复结果：共保存 ${payload.savedCount ?? 0} 篇论文。`);
+      setProgress(sources.map((source) => ({
+        source,
+        state: payload.errors?.some((item) => item.source === source) ? "error" : "done",
+        message: payload.errors?.find((item) => item.source === source)?.message || "后台任务已完成",
+        count: payload.savedCountsBySource?.[source] ?? payload.papers?.filter((paper) => paper.source === source).length ?? 0,
+        logs: getLogsForSource(payload.logs ?? [], source),
+      })));
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [jobs]);
+
   /** 切换论文检索来源。 */
   function toggleSource(source: PaperSource) {
     setSelectedSources((current) => {
@@ -304,18 +332,13 @@ export default function DatasetDownloadPage({
     });
   }
 
-  /** 发起流式数据集检索并处理进度事件。 */
+  /** 提交持久化任务，并用事件游标增量恢复日志。 */
   async function streamDataset(
     keyword: string,
     limit: number,
     onStreamEvent: (event: StreamEvent) => void,
   ) {
-    const response = await fetch(buildApiUrl("/api/datasets/download/stream"), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    const job = await submitJob("dataset_download", {
         keyword,
         sources: selectedSources,
         limit_per_source: limit,
@@ -324,45 +347,32 @@ export default function DatasetDownloadPage({
         year_to: yearTo ? Number(yearTo) : null,
         min_impact_factor: minImpactFactor > 0 ? minImpactFactor : null,
         ccf_levels: selectedCcfLevels,
-      }),
     });
-
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      if (response.status === 404) {
-        throw new Error(
-          "后端没有找到流式接口 /api/datasets/download/stream。请重启后端，并确认使用 app.main:app 启动。",
-        );
+    let cursor = 0;
+    while (true) {
+      const [current, eventResponse] = await Promise.all([
+        fetchJob(job.jobId),
+        fetch(buildApiUrl(`/api/jobs/${job.jobId}/events?after=${cursor}`), { cache: "no-store" }),
+      ]);
+      if (eventResponse.ok) {
+        const eventPayload = await eventResponse.json() as {
+          events?: Array<{ sequence: number; type: string; payload: { message?: string } }>;
+          nextCursor?: number;
+        };
+        for (const item of eventPayload.events ?? []) {
+          if (item.type === "log" && item.payload.message) onStreamEvent({ type: "log", message: item.payload.message });
+        }
+        cursor = eventPayload.nextCursor ?? cursor;
       }
-      throw new Error(payload.detail || payload.error || "HunterAgent 下载数据集失败");
-    }
-
-    if (!response.body) {
-      throw new Error("浏览器无法读取后端流式响应");
-    }
-
-    // 回调中的直接赋值不会参与 TypeScript 的跨函数控制流分析，因此用结果数组显式承接最终事件。
-    const finalResults: DatasetDownloadResponse[] = [];
-
-    await readNdjsonStream<StreamEvent>(response.body, (event) => {
-      onStreamEvent(event);
-      if (event.type === "result") {
-        finalResults.push({
-          ...event.result,
-          errors: event.result.errors ?? [],
-          papers: event.result.papers ?? [],
-        });
+      if (current.status === "completed" && current.result) {
+        const result = current.result as unknown as DatasetDownloadResponse;
+        return { ...result, errors: result.errors ?? [], papers: result.papers ?? [] };
       }
-      if (event.type === "error") {
-        throw new Error(event.message);
+      if (["failed", "cancelled", "interrupted"].includes(current.status)) {
+        throw new Error(current.error || current.message || "后台下载任务未完成");
       }
-    });
-    const finalResult = finalResults.at(-1);
-    if (!finalResult) {
-      throw new Error("后端没有返回最终结果");
+      await new Promise((resolve) => window.setTimeout(resolve, 1200));
     }
-
-    return finalResult;
   }
 
   /** 筛选属于指定来源的运行日志。 */

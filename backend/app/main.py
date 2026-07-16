@@ -16,7 +16,9 @@ from app.api.routes.system import install_debug_route
 from app.core.config import settings
 from app.core.logging_config import configure_app_logging
 from app.services.mineru import MinerURequest
-from app.services.domain_tree_jobs import domain_tree_jobs
+from app.services.stream_tasks import stream_task_manager
+from app.services.background_jobs import background_job_manager
+from app.services.background_job_handlers import register_background_job_handlers
 
 
 configure_app_logging(settings.log_level)
@@ -25,11 +27,13 @@ configure_app_logging(settings.log_level)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Start job recovery/cleanup and interrupt local active jobs on shutdown."""
-    domain_tree_jobs.start()
+    register_background_job_handlers(background_job_manager)
+    background_job_manager.start()
     try:
         yield
     finally:
-        domain_tree_jobs.shutdown()
+        background_job_manager.shutdown()
+        stream_task_manager.shutdown()
 
 app = FastAPI(
     title="Research Assistant API",

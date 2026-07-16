@@ -100,6 +100,41 @@ DOMAIN_TREE_JOB_CLEANUP_INTERVAL_SECONDS=3600
 DOMAIN_TREE_JOB_MAX_HISTORY=1000
 # 可选；默认写入 storage/metadata/domain_tree_jobs.sqlite3
 DOMAIN_TREE_JOB_DB=
+STREAM_MAX_WORKERS=4
+STREAM_MAX_PENDING_TASKS=20
+STREAM_EVENT_QUEUE_SIZE=256
+# 代理层保活事件间隔，默认 20 秒
+STREAM_HEARTBEAT_SECONDS=20
+# 完成任务保留 24 小时，供页面返回后重新订阅
+STREAM_TASK_RETENTION_SECONDS=86400
+# 最多保留 200 个已完成任务，防止内存无限增长
+STREAM_MAX_RETAINED_TASKS=200
+# 统一后台任务中心（SQLite 为权威状态，线程池只负责执行）
+BACKGROUND_JOB_MAX_WORKERS=4
+BACKGROUND_JOB_MAX_PENDING_TASKS=20
+BACKGROUND_JOB_STALE_SECONDS=300
+BACKGROUND_JOB_HEARTBEAT_SECONDS=10
+BACKGROUND_JOB_CLEANUP_INTERVAL_SECONDS=60
+BACKGROUND_JOB_TTL_HOURS=168
+BACKGROUND_JOB_MAX_HISTORY=1000
+BACKGROUND_JOB_MAX_EVENTS_PER_JOB=500
+# 可选；默认分别写入 storage/metadata/background_jobs.sqlite3 与 conversations.sqlite3
+BACKGROUND_JOB_DB=
+CONVERSATION_DB=
+```
+
+后台任务中心接口：
+
+```text
+POST /api/jobs
+GET  /api/jobs
+GET  /api/jobs/{job_id}
+GET  /api/jobs/{job_id}/events?after=0
+POST /api/jobs/{job_id}/cancel
+POST /api/jobs/{job_id}/retry
+POST /api/jobs/pdf-import
+GET  /api/conversations
+GET  /api/conversations/{conversation_id}
 ```
 
 说明：

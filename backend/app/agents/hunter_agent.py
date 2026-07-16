@@ -33,6 +33,7 @@ from app.services.split import (
     split_markdown_document,
 )
 from app.services.sjr_metrics import SjrMetrics
+from app.services.task_control import TaskCancelled, raise_if_task_cancelled
 from app.services.venue_metrics import enrich_paper_metrics
 import requests
 
@@ -82,8 +83,10 @@ class HunterAgent:
         year_to: int | None = None,
         min_impact_factor: float | None = None,
         ccf_levels: list[str] | None = None,
+        cancel_event=None,
     ) -> dict:
         """论文搜索主流程：循环扩大候选池，直到保存目标数量或达到最大轮次。"""
+        raise_if_task_cancelled(cancel_event)
         normalized_keyword = keyword.strip()
         if not normalized_keyword:
             raise ValueError("搜索关键词不能为空")
@@ -127,6 +130,7 @@ class HunterAgent:
         latest_filtered_papers: list[Paper] = []
 
         for round_index in range(1, MAX_SEARCH_ROUNDS + 1):
+            raise_if_task_cancelled(cancel_event)
             per_source_limit = min(200, target_per_source * round_index)
             self._log(
                 f"第 {round_index}/{MAX_SEARCH_ROUNDS} 轮检索：每个数据源最多取 {per_source_limit} 篇，"
@@ -137,7 +141,9 @@ class HunterAgent:
                 keyword=search_keyword,
                 sources=active_sources,
                 limit_per_source=per_source_limit,
+                cancel_event=cancel_event,
             )
+            raise_if_task_cancelled(cancel_event)
             self._log(
                 f"搜索完成，候选论文 {len(latest_search_result['papers'])} 篇，"
                 f"错误 {len(latest_search_result['errors'])} 个",
@@ -187,6 +193,7 @@ class HunterAgent:
                 )
 
             for paper in candidate_papers:
+                raise_if_task_cancelled(cancel_event)
                 source = str(paper.get("source", "")).lower()
                 if saved_counts_by_source.get(source, 0) >= target_per_source:
                     continue
@@ -228,8 +235,10 @@ class HunterAgent:
                         keyword=normalized_keyword,
                         search_keyword=search_keyword,
                         download_pdf=download_pdf,
+                        cancel_event=cancel_event,
                     )
                 )
+                raise_if_task_cancelled(cancel_event)
                 saved_keys.add(paper_key)
                 saved_counts_by_source[source] = saved_counts_by_source.get(source, 0) + 1
 
@@ -242,6 +251,7 @@ class HunterAgent:
                 f"当前各数据源保存数量={saved_counts_by_source}",
             )
 
+        raise_if_task_cancelled(cancel_event)
         self._log(f"任务完成，保存 {len(saved_papers)} 篇")
 
         return {
@@ -266,12 +276,14 @@ class HunterAgent:
         keyword: str,
         sources: list[str],
         limit_per_source: int,
+        cancel_event=None,
     ) -> dict:
         """调用不同的数据源搜索文献。"""
         papers: list[Paper] = []
         errors: list[dict[str, str]] = []
 
         for source in sources:
+            raise_if_task_cancelled(cancel_event)
             source_key = source.lower().strip()
             search_tool = self.search_tools.get(source_key)
             self._log(f"开始搜索数据源 {source_key}")
@@ -284,6 +296,9 @@ class HunterAgent:
 
             try:
                 source_papers = search_tool(keyword, limit_per_source)
+                raise_if_task_cancelled(cancel_event)
+            except TaskCancelled:
+                raise
             except Exception as error:
                 errors.append({"source": source_key, "message": str(error)})
                 self._log(f"数据源 {source_key} 搜索失败: {error}")
@@ -402,6 +417,7 @@ class HunterAgent:
         keyword: str,
         search_keyword: str,
         download_pdf: bool = True,
+        cancel_event=None,
     ) -> Paper:
         """下载 PDF 并把论文信息写入数据库。"""
         pdf_path = ""
@@ -412,9 +428,17 @@ class HunterAgent:
 
         if download_pdf and pdf_url:
             try:
+                raise_if_task_cancelled(cancel_event)
                 self._log(f"{source_prefix} 开始下载 PDF: {pdf_url}")
-                pdf_path = str(self.download_tool(pdf_url, paper))
+                if getattr(self.download_tool, "__func__", None) is HunterAgent._download_pdf:
+                    pdf_path = str(self.download_tool(pdf_url, paper, cancel_event=cancel_event))
+                else:
+                    # 测试或扩展注入的下载器保持原有二参数协议。
+                    pdf_path = str(self.download_tool(pdf_url, paper))
+                raise_if_task_cancelled(cancel_event)
                 self._log(f"{source_prefix} PDF 下载完成: {pdf_path}")
+            except TaskCancelled:
+                raise
             except Exception as error:
                 pdf_error = str(error)
                 self._log(f"{source_prefix} PDF 下载失败: {pdf_error}")
@@ -886,8 +910,10 @@ class HunterAgent:
         doi: str = "",
         url: str = "",
         custom_tags: list[str] | None = None,
+        cancel_event=None,
     ) -> Paper:
         """导入 PDF 文件，优先用 PyMuPDF 解析，必要时尝试 MinerU 精细解析。"""
+        raise_if_task_cancelled(cancel_event)
         if not pdf_bytes:
             raise ValueError("PDF 文件内容为空")
         if not filename.lower().endswith(".pdf"):
@@ -899,11 +925,14 @@ class HunterAgent:
         pdf_path = import_dir / f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{safe_name}"
         pdf_path.write_bytes(pdf_bytes)
 
-        extracted = self._extract_pdf_text(pdf_path)
+        raise_if_task_cancelled(cancel_event)
+        extracted = self._extract_pdf_text(pdf_path, cancel_event=cancel_event)
+        raise_if_task_cancelled(cancel_event)
         parsed = self._parse_pdf_metadata(extracted["text"], extracted["metadata"])
         if extracted["parser"] == "pymupdf" and self._parsed_pdf_metadata_is_sparse(parsed):
             self._log("PyMuPDF 解析的元数据较少，尝试使用 MinerU 精细解析")
-            mineru_text = self._extract_pdf_text_with_mineru(pdf_path)
+            mineru_text = self._extract_pdf_text_with_mineru(pdf_path, cancel_event=cancel_event)
+            raise_if_task_cancelled(cancel_event)
             if mineru_text:
                 parsed = self._parse_pdf_metadata(mineru_text, extracted["metadata"])
                 extracted = {
@@ -954,11 +983,12 @@ class HunterAgent:
             ccf_catalog=self.ccf_catalog,
             sjr_metrics=self.sjr_metrics,
         )
+        raise_if_task_cancelled(cancel_event)
         saved_paper = self._save_paper_to_db(enriched_paper)
         self._log(f"PDF 导入论文元数据: {saved_paper.get('id')} parser={extracted['parser']}")
         return saved_paper
 
-    def _extract_pdf_text(self, pdf_path: Path) -> dict[str, object]:
+    def _extract_pdf_text(self, pdf_path: Path, *, cancel_event=None) -> dict[str, object]:
         """用 PyMuPDF 快速提取 PDF 文本；文本不足时尝试 MinerU。"""
         metadata: dict[str, object] = {}
         text = ""
@@ -969,8 +999,13 @@ class HunterAgent:
 
             with fitz.open(pdf_path) as document:
                 metadata = dict(document.metadata or {})
-                pages_text = [page.get_text("text") for page in document]
+                pages_text = []
+                for page in document:
+                    raise_if_task_cancelled(cancel_event)
+                    pages_text.append(page.get_text("text"))
                 text = "\n".join(part.strip() for part in pages_text if part.strip())
+        except TaskCancelled:
+            raise
         except ImportError as error:
             warning = "PyMuPDF 未安装，无法快速解析 PDF"
             self._log(warning)
@@ -982,7 +1017,7 @@ class HunterAgent:
             self._log(f"PDF 元数据={metadata}，文本长度={len(text)}")
             return {"text": text, "metadata": metadata, "parser": "pymupdf", "warning": warning}
 
-        mineru_text = self._extract_pdf_text_with_mineru(pdf_path)
+        mineru_text = self._extract_pdf_text_with_mineru(pdf_path, cancel_event=cancel_event)
         if mineru_text:
             combined_warning = warning or "PyMuPDF 提取文本较少，已使用 MinerU 精细解析"
             self._log(f"PDF 元数据={metadata}，MinerU 文本长度={len(mineru_text)}")
@@ -1017,7 +1052,7 @@ class HunterAgent:
         self._log(f"PDF 元数据解析字段填充数: {filled_count}/6")
         return filled_count < 3
 
-    def _extract_pdf_text_with_mineru(self, pdf_path: Path) -> str:
+    def _extract_pdf_text_with_mineru(self, pdf_path: Path, *, cancel_event=None) -> str:
         """如果本机安装了 MinerU/magic-pdf CLI，则调用它生成 markdown/text 后读取。"""
         command = shutil.which("mineru") or shutil.which("magic-pdf")
         if not command:
@@ -1032,7 +1067,9 @@ class HunterAgent:
             ]
             for args in candidates:
                 try:
+                    raise_if_task_cancelled(cancel_event)
                     subprocess.run(args, check=True, capture_output=True, text=True, timeout=120)
+                    raise_if_task_cancelled(cancel_event)
                     output_path = Path(output_dir)
                     text_parts = [
                         path.read_text(encoding="utf-8", errors="ignore")
@@ -1042,6 +1079,8 @@ class HunterAgent:
                     extracted = "\n".join(part.strip() for part in text_parts if part.strip())
                     if extracted:
                         return extracted
+                except TaskCancelled:
+                    raise
                 except Exception as error:
                     self._log(f"MinerU 命令尝试失败 ({' '.join(args)}): {error}")
 
@@ -1621,7 +1660,7 @@ class HunterAgent:
         """Ensure the repository schema exists for legacy callers."""
         self.repository.ensure_schema()
 
-    def _download_pdf(self, pdf_url: str, paper: Paper) -> Path:
+    def _download_pdf(self, pdf_url: str, paper: Paper, *, cancel_event=None) -> Path:
         """下载 PDF 文件到本地论文目录。"""
         request = Request(
             pdf_url,
@@ -1634,7 +1673,16 @@ class HunterAgent:
         try:
             with urlopen(request, timeout=settings.request_timeout) as response:
                 content_type = response.headers.get("Content-Type", "")
-                pdf_bytes = response.read()
+                chunks: list[bytes] = []
+                while True:
+                    raise_if_task_cancelled(cancel_event)
+                    chunk = response.read(64 * 1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                pdf_bytes = b"".join(chunks)
+        except TaskCancelled:
+            raise
         except HTTPError as error:
             raise RuntimeError(f"PDF 下载失败，HTTP {error.code}: {error.reason}") from error
         except URLError as error:

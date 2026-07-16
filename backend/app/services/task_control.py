@@ -13,8 +13,18 @@ import requests
 T = TypeVar("T")
 
 
-class DomainTreeGenerationCancelled(RuntimeError):
+class TaskCancelled(RuntimeError):
+    """表示共享取消信号已经触发。"""
+
+
+class DomainTreeGenerationCancelled(TaskCancelled):
     """表示领域树任务已收到用户取消请求。"""
+
+
+def raise_if_task_cancelled(cancel_event: Event | None) -> None:
+    """供通用 Agent 和同步业务步骤检查协作式取消。"""
+    if cancel_event is not None and cancel_event.is_set():
+        raise TaskCancelled("任务已取消")
 
 
 def raise_if_cancelled(cancel_event: Event | None) -> None:
@@ -67,7 +77,9 @@ def call_with_retry(
 
 __all__ = [
     "DomainTreeGenerationCancelled",
+    "TaskCancelled",
     "call_with_retry",
     "is_retryable_model_error",
     "raise_if_cancelled",
+    "raise_if_task_cancelled",
 ]

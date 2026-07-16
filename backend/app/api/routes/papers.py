@@ -27,7 +27,7 @@ def split_form_values(value: str) -> list[str]:
     return [part.strip() for part in values if part.strip()]
 
 
-def _run_dataset(agent: HunterAgent, payload: DatasetDownloadRequest) -> dict:
+def _run_dataset(agent: HunterAgent, payload: DatasetDownloadRequest, *, cancel_event=None) -> dict:
     return agent.run(
         payload.keyword,
         sources=payload.sources,
@@ -37,6 +37,7 @@ def _run_dataset(agent: HunterAgent, payload: DatasetDownloadRequest) -> dict:
         year_to=payload.year_to,
         min_impact_factor=payload.min_impact_factor,
         ccf_levels=payload.ccf_levels,
+        cancel_event=cancel_event,
     )
 
 
@@ -65,12 +66,12 @@ def dataset_download(payload: DatasetDownloadRequest) -> dict:
 
 
 @router.post("/api/datasets/download/stream")
-def dataset_download_stream(payload: DatasetDownloadRequest):
-    def produce(emit) -> None:
+async def dataset_download_stream(payload: DatasetDownloadRequest, request: Request):
+    def produce(emit, cancel_event) -> None:
         agent = HunterAgent(log_callback=lambda message: emit({"type": "log", "message": message}))
-        emit({"type": "result", "result": _run_dataset(agent, payload)})
+        emit({"type": "result", "result": _run_dataset(agent, payload, cancel_event=cancel_event)})
 
-    return ndjson_worker_response(produce)
+    return ndjson_worker_response(request, produce)
 
 
 @router.post("/api/papers/link-local-pdf")
@@ -218,6 +219,7 @@ async def import_pdf_paper(
 
 @router.post("/api/papers/import-pdf/stream")
 async def import_pdf_paper_stream(
+    request: Request,
     file: UploadFile = File(...), title: str = Form(""), authors: str = Form(""),
     abstract: str = Form(""), year: str = Form(""), doi: str = Form(""),
     url: str = Form(""), custom_tags: str = Form(""),
@@ -225,18 +227,19 @@ async def import_pdf_paper_stream(
     content = await file.read()
     filename = file.filename or "paper.pdf"
 
-    def produce(emit) -> None:
+    def produce(emit, cancel_event) -> None:
         push_log = lambda message: emit({"type": "log", "message": message})
         push_log(f"已接收 PDF 文件：{filename}，大小 {len(content)} bytes")
         push_log("开始解析 PDF：优先使用 PyMuPDF，必要时尝试 MinerU")
         paper = _import_pdf(
             HunterAgent(log_callback=push_log), content, filename,
             title=title, authors=authors, abstract=abstract, year=year, doi=doi, url=url, custom_tags=custom_tags,
+            cancel_event=cancel_event,
         )
         emit({"type": "result", "paper": paper})
         push_log("PDF 导入完成，已保存到本地数据集")
 
-    return ndjson_worker_response(produce)
+    return ndjson_worker_response(request, produce)
 
 
 __all__ = ["router", "split_form_values"]

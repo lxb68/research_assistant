@@ -77,6 +77,30 @@ class Settings:
     )
     request_timeout = int(os.getenv("REQUEST_TIMEOUT", "15"))
     log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+    # 流式接口共享固定执行池，避免按请求创建线程。
+    stream_max_workers = max(1, int(os.getenv("STREAM_MAX_WORKERS", "4")))
+    stream_max_pending_tasks = max(0, int(os.getenv("STREAM_MAX_PENDING_TASKS", "20")))
+    stream_event_queue_size = max(8, int(os.getenv("STREAM_EVENT_QUEUE_SIZE", "256")))
+    stream_heartbeat_seconds = max(1.0, float(os.getenv("STREAM_HEARTBEAT_SECONDS", "20")))
+    stream_task_retention_seconds = max(60.0, float(os.getenv("STREAM_TASK_RETENTION_SECONDS", "86400")))
+    stream_max_retained_tasks = max(1, int(os.getenv("STREAM_MAX_RETAINED_TASKS", "200")))
+    background_job_db = os.getenv("BACKGROUND_JOB_DB") or str(
+        BACKEND_DIR / "storage" / "metadata" / "background_jobs.sqlite3",
+    )
+    background_job_max_workers = max(1, int(os.getenv("BACKGROUND_JOB_MAX_WORKERS", "4")))
+    background_job_max_pending_tasks = max(0, int(os.getenv("BACKGROUND_JOB_MAX_PENDING_TASKS", "20")))
+    background_job_stale_seconds = max(5, int(os.getenv("BACKGROUND_JOB_STALE_SECONDS", "300")))
+    background_job_heartbeat_seconds = max(1, int(os.getenv("BACKGROUND_JOB_HEARTBEAT_SECONDS", "10")))
+    background_job_cleanup_interval_seconds = max(
+        1,
+        int(os.getenv("BACKGROUND_JOB_CLEANUP_INTERVAL_SECONDS", "60")),
+    )
+    background_job_ttl_hours = max(1, int(os.getenv("BACKGROUND_JOB_TTL_HOURS", "168")))
+    background_job_max_history = max(1, int(os.getenv("BACKGROUND_JOB_MAX_HISTORY", "1000")))
+    background_job_max_events_per_job = max(10, int(os.getenv("BACKGROUND_JOB_MAX_EVENTS_PER_JOB", "500")))
+    conversation_db = os.getenv("CONVERSATION_DB") or str(
+        BACKEND_DIR / "storage" / "metadata" / "conversations.sqlite3",
+    )
     domain_tree_retry_attempts = max(1, int(os.getenv("DOMAIN_TREE_RETRY_ATTEMPTS", "3")))
     domain_tree_retry_base_delay_seconds = max(
         0.0,

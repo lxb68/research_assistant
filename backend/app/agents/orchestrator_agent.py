@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from typing import Any, Callable
 
 from app.agents.domainTree_agent import DomainTreeAgent
@@ -14,6 +15,7 @@ from app.core.config import settings
 from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
 from app.services.run_logger import RunLogger
+from app.services.task_control import TaskCancelled, raise_if_task_cancelled
 
 
 class OrchestratorAgent:
@@ -45,8 +47,16 @@ class OrchestratorAgent:
             log_callback=self.log_callback,
         )
 
-    async def run(self, task: str, *, action: str = "auto", arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def run(
+        self,
+        task: str,
+        *,
+        action: str = "auto",
+        arguments: dict[str, Any] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
         """执行当前代理的主要业务流程并返回结构化结果。"""
+        raise_if_task_cancelled(cancel_event)
         normalized_task = str(task).strip()
         if not normalized_task:
             raise ValueError("编排任务不能为空")
@@ -61,7 +71,7 @@ class OrchestratorAgent:
             data={"task": normalized_task, "requestedAction": normalized_action, "arguments": args},
         )
         if normalized_action == "auto":
-            route = await self._route_task(normalized_task, args)
+            route = await self._route_task(normalized_task, args, cancel_event=cancel_event)
             selected = route["action"]
         else:
             route = {"action": normalized_action, "source": "explicit"}
@@ -69,7 +79,7 @@ class OrchestratorAgent:
         self._log(f"编排器已选择处理方式：{selected}")
 
         if selected == "direct":
-            answer = await self._answer_direct(normalized_task, args)
+            answer = await self._answer_direct(normalized_task, args, cancel_event=cancel_event)
             return {
                 "agent": "orchestrator",
                 "action": "direct",
@@ -97,7 +107,9 @@ class OrchestratorAgent:
                     sources=list(args.get("sources") or ["arxiv", "crossref", "open_access"]),
                     limit_per_source=max(1, min(int(args.get("limit_per_source") or 5), 50)),
                     download_pdf=bool(args.get("download_pdf", True)),
+                    cancel_event=cancel_event,
                 ),
+                cancel_event=cancel_event,
             )
             return {
                 "agent": "hunter",
@@ -120,7 +132,9 @@ class OrchestratorAgent:
                     action=str(args.get("domain_action") or "rebuild"),
                     model=model,
                     language=str(args.get("language") or "auto"),
+                    cancel_event=cancel_event,
                 ),
+                cancel_event=cancel_event,
             )
             result = domain_agent.get_result(project_id)
             return {
@@ -131,9 +145,15 @@ class OrchestratorAgent:
                 "runLog": self.run_logger.public_info(),
             }
 
-        return await self._run_research_pipeline(normalized_task, args)
+        return await self._run_research_pipeline(normalized_task, args, cancel_event=cancel_event)
 
-    async def _route_task(self, task: str, args: dict[str, Any]) -> dict[str, str]:
+    async def _route_task(
+        self,
+        task: str,
+        args: dict[str, Any],
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, str]:
         """使用已配置模型判断是否需要研究 Agent，并在无需工具时直接作答。"""
         model = ModelConfigStore().build_model_payload()
         if not model:
@@ -153,6 +173,7 @@ class OrchestratorAgent:
         messages.append({"role": "user", "content": task})
 
         try:
+            raise_if_task_cancelled(cancel_event)
             raw_decision = await asyncio.to_thread(
                 chat_completion,
                 model,
@@ -161,6 +182,7 @@ class OrchestratorAgent:
                 timeout=settings.research_agent_request_timeout,
                 response_format={"type": "json_object"},
             )
+            raise_if_task_cancelled(cancel_event)
         except RuntimeError as call_error:
             if "模型返回了空回答" not in str(call_error):
                 raise
@@ -217,6 +239,7 @@ class OrchestratorAgent:
                 },
             ]
             try:
+                raise_if_task_cancelled(cancel_event)
                 repaired_raw = await asyncio.to_thread(
                     chat_completion,
                     model,
@@ -225,6 +248,9 @@ class OrchestratorAgent:
                     timeout=settings.research_agent_request_timeout,
                     response_format={"type": "json_object"},
                 )
+                raise_if_task_cancelled(cancel_event)
+            except TaskCancelled:
+                raise
             except Exception as repair_call_error:
                 self.run_logger.log(
                     "OrchestratorAgent",
@@ -271,7 +297,13 @@ class OrchestratorAgent:
         )
         return decision
 
-    async def _answer_direct(self, task: str, args: dict[str, Any]) -> str:
+    async def _answer_direct(
+        self,
+        task: str,
+        args: dict[str, Any],
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
         """在调用方明确指定 direct 时，使用通用模型直接回答而不进入研究流程。"""
         model = ModelConfigStore().build_model_payload()
         if not model:
@@ -291,13 +323,16 @@ class OrchestratorAgent:
             if role in {"user", "assistant"} and content:
                 messages.append({"role": role, "content": content[:6000]})
         messages.append({"role": "user", "content": task})
-        return await asyncio.to_thread(
+        raise_if_task_cancelled(cancel_event)
+        answer = await asyncio.to_thread(
             chat_completion,
             model,
             messages,
             temperature=0.2,
             timeout=settings.research_agent_request_timeout,
         )
+        raise_if_task_cancelled(cancel_event)
+        return answer
 
     def _parse_route_decision(self, raw_decision: str) -> dict[str, str]:
         """解析并校验模型路由结果，拒绝执行未注册动作。"""
@@ -347,7 +382,13 @@ class OrchestratorAgent:
             cleaned.append(cleaned_message)
         return cleaned
 
-    async def _run_research_pipeline(self, task: str, args: dict[str, Any]) -> dict[str, Any]:
+    async def _run_research_pipeline(
+        self,
+        task: str,
+        args: dict[str, Any],
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
         """依次评估本地证据、补充论文并生成研究回答。"""
         history = self._clean_history(list(args.get("history") or []))
         paper_ids = list(args.get("paper_ids") or []) or None
@@ -355,12 +396,14 @@ class OrchestratorAgent:
         research_agent = ResearchChatAgent(log_callback=self.log_callback)
 
         try:
+            raise_if_task_cancelled(cancel_event)
             plan, raw_plan = await asyncio.to_thread(
                 research_agent.plan_retrieval,
                 task,
                 history,
                 explicit_paper_ids=paper_ids,
             )
+            raise_if_task_cancelled(cancel_event)
             self.run_logger.log(
                 "OrchestratorAgent",
                 "上下文查询规划模型原始响应已接收",
@@ -371,6 +414,8 @@ class OrchestratorAgent:
                     "truncated": len(raw_plan) > self.ROUTER_RAW_LOG_LIMIT,
                 },
             )
+        except TaskCancelled:
+            raise
         except Exception as error:
             raw_plan = str(getattr(error, "raw_response", "") or "")
             self.run_logger.log(
@@ -434,6 +479,7 @@ class OrchestratorAgent:
         retrieval_query = str(plan.get("standaloneQuestion") or task).strip()
 
         self._log("正在判断本地知识库证据是否充分")
+        raise_if_task_cancelled(cancel_event)
         evidence, diagnostics = await asyncio.to_thread(
             research_agent.retrieve_evidence,
             task,
@@ -442,6 +488,7 @@ class OrchestratorAgent:
             retrieval_query=retrieval_query,
             target_chunks=target_chunks,
         )
+        raise_if_task_cancelled(cancel_event)
         sufficient, reasons = self._assess_evidence(
             diagnostics,
             required_paper_ids=paper_ids,
@@ -469,7 +516,9 @@ class OrchestratorAgent:
             self._log("本地证据不足，正在调用 HunterAgent 搜索补充论文")
             hunter_agent = HunterAgent(log_callback=self.log_callback)
             requested_search_keyword = str(args.get("search_keyword") or retrieval_query)
+            raise_if_task_cancelled(cancel_event)
             search_keyword = await asyncio.to_thread(hunter_agent.translate_search_query, requested_search_keyword)
+            raise_if_task_cancelled(cancel_event)
             self.run_logger.log(
                 "OrchestratorAgent",
                 "已通过后端翻译服务生成英文论文检索词",
@@ -491,7 +540,9 @@ class OrchestratorAgent:
                             ),
                         ),
                         download_pdf=True,
+                        cancel_event=cancel_event,
                     ),
+                    cancel_event=cancel_event,
                 )
                 trace.append(
                     {
@@ -528,12 +579,14 @@ class OrchestratorAgent:
                 })
 
             self._log("正在使用补充后的知识库重新评估证据")
+            raise_if_task_cancelled(cancel_event)
             evidence, diagnostics = await asyncio.to_thread(
                 research_agent.retrieve_evidence,
                 task,
                 history=history,
                 retrieval_query=retrieval_query,
             )
+            raise_if_task_cancelled(cancel_event)
             sufficient, reasons = self._assess_evidence(diagnostics)
             self.run_logger.log(
                 "RAGRetriever",
@@ -580,6 +633,7 @@ class OrchestratorAgent:
                     retrieval_query=retrieval_query,
                     evidence=evidence,
                 ),
+                cancel_event=cancel_event,
             )
         except RecoveryExhaustedError as error:
             trace.append({

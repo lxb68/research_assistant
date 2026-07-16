@@ -22,7 +22,8 @@ import SendRounded from "@mui/icons-material/SendRounded";
 import SettingsOutlined from "@mui/icons-material/SettingsOutlined";
 import ThumbUpAltOutlined from "@mui/icons-material/ThumbUpAltOutlined";
 import { buildApiUrl } from "@/lib/api";
-import { readNdjsonStream } from "@/lib/stream";
+import { useBackgroundTasks } from "@/app/_components/BackgroundTaskProvider";
+import { fetchJob } from "@/lib/background-jobs";
 
 type Props = { onOpenDownload: () => void; onOpenBrowse: () => void; onOpenDomainTree: () => void; onOpenSettings: () => void };
 type Source = {
@@ -43,7 +44,6 @@ type Message = {
   contextSources?: Source[];
   responseMode?: "direct" | "research";
 };
-type StreamEvent = { type: "log"; message: string } | { type: "result"; result: OrchestratorResult } | { type: "error"; message: string } | { type: "done" };
 type OrchestratorResult = {
   action: string;
   result: {
@@ -90,6 +90,7 @@ function usableHistory(messages: Message[]) {
 
 /** 管理研究对话、流式响应和本地会话记录。 */
 export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomainTree, onOpenSettings }: Props) {
+  const { jobs, submitJob } = useBackgroundTasks();
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
@@ -152,7 +153,73 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
     window.localStorage.setItem(RESEARCH_RECORDS_KEY, JSON.stringify(researchRecords));
   }, [hasHydrated, researchRecords]);
 
-  /** 提交问题并消费后端返回的流式研究事件。 */
+  useEffect(() => {
+    if (!hasHydrated) return;
+    let cancelled = false;
+    void fetch(buildApiUrl("/api/conversations?sessionId=local&limit=100"), { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) return { conversations: [] };
+        return response.json();
+      })
+      .then((payload: { conversations?: Array<{ id: string; title: string; messages: Array<Record<string, unknown>> }> }) => {
+        if (cancelled) return;
+        const serverConversations: Conversation[] = (payload.conversations ?? []).map((conversation) => ({
+          id: conversation.id,
+          title: conversation.title,
+          date: "已同步",
+          messages: conversation.messages.map((raw, index) => {
+            const numericId = Number(raw.id);
+            const rawSources = Array.isArray(raw.sources) ? raw.sources as Array<Record<string, unknown>> : [];
+            const rawContext = Array.isArray(raw.contextSources) ? raw.contextSources as Array<Record<string, unknown>> : [];
+            const normalizeSources = (sources: Array<Record<string, unknown>>) => sources.map((source, sourceIndex) => ({
+              index: Number(source.index ?? sourceIndex + 1),
+              recordId: String(source.recordId ?? source.record_id ?? ""),
+              title: String(source.title ?? ""),
+              year: String(source.year ?? ""),
+              source: String(source.source ?? ""),
+              section: String(source.section ?? ""),
+              chunkIndex: Number(source.chunkIndex ?? source.chunk_index ?? 0),
+              excerpt: String(source.excerpt ?? ""),
+            }));
+            return {
+              id: Number.isFinite(numericId) ? numericId : Date.now() + index,
+              role: raw.role === "assistant" ? "agent" : "user",
+              content: String(raw.content ?? ""),
+              sources: normalizeSources(rawSources),
+              contextSources: normalizeSources(rawContext),
+              responseMode: raw.responseMode === "direct" ? "direct" : "research",
+            } satisfies Message;
+          }),
+        }));
+        setConversations((current) => {
+          const byId = new Map(current.map((conversation) => [conversation.id, conversation]));
+          for (const incoming of serverConversations) {
+            const existing = byId.get(incoming.id);
+            const messagesById = new Map((existing?.messages ?? []).map((message) => [message.id, message]));
+            for (const message of incoming.messages) messagesById.set(message.id, message);
+            byId.set(incoming.id, { ...existing, ...incoming, messages: [...messagesById.values()].sort((a, b) => a.id - b.id) });
+          }
+          return [...byId.values()];
+        });
+        const active = serverConversations.find((conversation) => conversation.id === activeConversationId);
+        if (active) {
+          setMessages((current) => {
+            const byId = new Map(current.map((message) => [message.id, message]));
+            for (const message of active.messages) byId.set(message.id, message);
+            return [...byId.values()].sort((a, b) => a.id - b.id);
+          });
+        }
+        const highest = serverConversations.reduce(
+          (value, conversation) => Math.max(value, ...conversation.messages.map((message) => message.id)),
+          0,
+        );
+        nextMessageId.current = Math.max(nextMessageId.current, highest + 1);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [activeConversationId, hasHydrated, jobs]);
+
+  /** 提交持久化研究任务；后台完成后直接写入对应会话。 */
   async function send(value = input) {
     const prompt = value.trim();
     if (!prompt || thinking) return;
@@ -181,55 +248,59 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
     setThinking(true);
     setThinkingText("正在判断如何处理你的问题…");
     try {
-      const response = await fetch(buildApiUrl("/api/research/chat/stream"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question: prompt,
-          history: usableHistory(messages).slice(-8).map((message) => ({
-            role: message.role === "agent" ? "assistant" : "user",
-            content: message.content,
-            sources: message.role === "agent"
-              ? (message.contextSources ?? message.sources ?? []).map((source) => ({
-                  index: source.index,
-                  record_id: source.recordId ?? "",
-                  title: source.title,
-                  year: source.year ?? "",
-                  section: source.section ?? "",
-                  chunk_index: source.chunkIndex ?? 0,
-                  excerpt: source.excerpt ?? "",
-                }))
-              : [],
-          })),
-        }),
+      const job = await submitJob("research_chat", {
+        question: prompt,
+        title,
+        history: usableHistory(messages).slice(-8).map((message) => ({
+          role: message.role === "agent" ? "assistant" : "user",
+          content: message.content,
+          sources: message.role === "agent"
+            ? (message.contextSources ?? message.sources ?? []).map((source) => ({
+                index: source.index,
+                record_id: source.recordId ?? "",
+                title: source.title,
+                year: source.year ?? "",
+                section: source.section ?? "",
+                chunk_index: source.chunkIndex ?? 0,
+                excerpt: source.excerpt ?? "",
+              }))
+            : [],
+        })),
+      }, {
+        conversationId,
+        messageId: String(id),
+        responseMessageId: String(id + 1),
       });
-      if (!response.ok || !response.body) throw new Error("研究对话服务暂时不可用");
-      await readNdjsonStream<StreamEvent>(response.body, (event) => {
-        if (event.type === "log") setThinkingText(event.message);
-        if (event.type === "error") throw new Error(event.message);
-        if (event.type === "result") {
-          const payload = event.result.result;
-          const materialText = payload.requiredMaterials?.map((item, index) => `${index + 1}. ${item.description}`).join("\n");
-          const needsUserHelp = payload.status === "needs_materials" || payload.status === "needs_user_action";
-          const content = needsUserHelp
-            ? `${payload.message || "当前流程需要你的协助。"}${materialText ? `\n\n建议补充：\n${materialText}` : ""}`
-            : payload.answer || "研究任务已完成，但没有返回可展示的回答。";
-          const agentMessage: Message = {
-            id: id + 1,
-            role: "agent",
-            content,
-            sources: payload.sources,
-            contextSources: payload.retrievedSources ?? payload.sources,
-            responseMode: event.result.action === "direct" ? "direct" : "research",
-          };
-          setMessages((items) => [...items, agentMessage]);
-          setConversations((items) => items.map((conversation) =>
-            conversation.id === conversationId
-              ? { ...conversation, messages: [...conversation.messages, agentMessage] }
-              : conversation,
-          ));
-        }
-      });
+      let current = job;
+      while (!["completed", "failed", "cancelled", "interrupted"].includes(current.status)) {
+        setThinkingText(current.message || "研究任务正在后台执行…");
+        await new Promise((resolve) => window.setTimeout(resolve, 1200));
+        current = await fetchJob(job.jobId);
+      }
+      if (current.status !== "completed" || !current.result) {
+        throw new Error(current.error || current.message || "研究任务未完成");
+      }
+      const result = current.result as unknown as OrchestratorResult;
+      const payload = result.result;
+      const materialText = payload.requiredMaterials?.map((item, index) => `${index + 1}. ${item.description}`).join("\n");
+      const needsUserHelp = payload.status === "needs_materials" || payload.status === "needs_user_action";
+      const content = needsUserHelp
+        ? `${payload.message || "当前流程需要你的协助。"}${materialText ? `\n\n建议补充：\n${materialText}` : ""}`
+        : payload.answer || "研究任务已完成，但没有返回可展示的回答。";
+      const agentMessage: Message = {
+        id: id + 1,
+        role: "agent",
+        content,
+        sources: payload.sources,
+        contextSources: payload.retrievedSources ?? payload.sources,
+        responseMode: result.action === "direct" ? "direct" : "research",
+      };
+      setMessages((items) => items.some((item) => item.id === agentMessage.id) ? items : [...items, agentMessage]);
+      setConversations((items) => items.map((conversation) =>
+        conversation.id === conversationId && !conversation.messages.some((message) => message.id === agentMessage.id)
+          ? { ...conversation, messages: [...conversation.messages, agentMessage] }
+          : conversation,
+      ));
     } catch (error) {
       const agentMessage: Message = { id: id + 1, role: "agent", content: error instanceof Error ? `请求失败：${error.message}` : "研究对话请求失败，请稍后重试。" };
       setMessages((items) => [...items, agentMessage]);

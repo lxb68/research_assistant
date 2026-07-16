@@ -11,8 +11,9 @@ import {
   WORKSPACE_SETTINGS_STORAGE_KEY,
 } from "@/lib/constants";
 import { SavedPaper } from "@/lib/papers";
-import { readNdjsonStream } from "@/lib/stream";
 import { splitDelimitedText, uniqueTrimmedValues } from "@/lib/text";
+import { useBackgroundTasks } from "@/app/_components/BackgroundTaskProvider";
+import { fetchJob } from "@/lib/background-jobs";
 
 type PdfImportForm = {
   title: string;
@@ -22,12 +23,6 @@ type PdfImportForm = {
   doi: string;
   url: string;
   tags: string;
-};
-
-type ImportStreamEvent = {
-  type: "log" | "error" | "result" | "done";
-  message?: string;
-  paper?: SavedPaper;
 };
 
 const emptyPdfImportForm: PdfImportForm = {
@@ -78,6 +73,7 @@ function getSplitLengthsFromSettings() {
 
 /** 管理本地论文浏览、导入、删除和重新分块。 */
 export default function DatasetBrowserView() {
+  const { registerJob } = useBackgroundTasks();
   const [papers, setPapers] = useState<SavedPaper[]>([]);
   const [query, setQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
@@ -158,7 +154,7 @@ export default function DatasetBrowserView() {
     });
   }
 
-  /** 上传 PDF 并消费解析进度事件。 */
+  /** 上传 PDF 并交给持久化后台任务解析。 */
   async function importPdfPaper(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!pdfFile || isImporting) {
@@ -168,7 +164,6 @@ export default function DatasetBrowserView() {
     setIsImporting(true);
     setError("");
     setImportLogs([]);
-
     try {
       const formData = new FormData();
       formData.set("file", pdfFile);
@@ -180,7 +175,7 @@ export default function DatasetBrowserView() {
       formData.set("url", pdfImportForm.url);
       formData.set("custom_tags", splitDelimitedText(pdfImportForm.tags).join(", "));
 
-      const response = await fetch(buildApiUrl("/api/papers/import-pdf/stream"), {
+      const response = await fetch(buildApiUrl("/api/jobs/pdf-import"), {
         method: "POST",
         body: formData,
       });
@@ -188,30 +183,27 @@ export default function DatasetBrowserView() {
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.detail || "导入 PDF 文献失败");
       }
-      if (!response.body) {
-        throw new Error("后端没有返回流式进度");
+      const submitted = await response.json();
+      registerJob(submitted);
+      let current = submitted;
+      let cursor = 0;
+      while (!["completed", "failed", "cancelled", "interrupted"].includes(current.status)) {
+        const eventResponse = await fetch(buildApiUrl(`/api/jobs/${submitted.jobId}/events?after=${cursor}`), { cache: "no-store" });
+        if (eventResponse.ok) {
+          const events = await eventResponse.json() as { events?: Array<{ sequence: number; type: string; payload: { message?: string } }>; nextCursor?: number };
+          for (const item of events.events ?? []) {
+            if (item.type === "log" && item.payload.message) setImportLogs((logs) => [...logs, item.payload.message!]);
+          }
+          cursor = events.nextCursor ?? cursor;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        current = await fetchJob(submitted.jobId);
       }
-
-      let importedPaper: SavedPaper | null = null;
-      await readNdjsonStream<ImportStreamEvent>(response.body, (eventPayload) => {
-        if (eventPayload.type === "log" && eventPayload.message) {
-          setImportLogs((currentLogs) => [...currentLogs, eventPayload.message!]);
-        }
-        if (eventPayload.type === "error" && eventPayload.message) {
-          throw new Error(eventPayload.message);
-        }
-        if (eventPayload.type === "result" && eventPayload.paper) {
-          importedPaper = eventPayload.paper;
-          setPapers((currentPapers) => [
-            eventPayload.paper!,
-            ...currentPapers.filter((paper) => paper.id !== eventPayload.paper!.id),
-          ]);
-        }
-      });
-
-      if (!importedPaper) {
-        throw new Error("导入结束，但没有收到论文结果");
+      if (current.status !== "completed" || !current.result?.paper) {
+        throw new Error(current.error || current.message || "导入结束，但没有收到论文结果");
       }
+      const importedPaper = current.result.paper as SavedPaper;
+      setPapers((currentPapers) => [importedPaper, ...currentPapers.filter((paper) => paper.id !== importedPaper.id)]);
 
       setPdfFile(null);
       setPdfImportForm(emptyPdfImportForm);
