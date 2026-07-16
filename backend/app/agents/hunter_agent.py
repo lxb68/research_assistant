@@ -22,6 +22,7 @@ import time
 from app.core.config import settings
 from app.services.ccf_catalog import CcfCatalog
 from app.services.paper_search import SUPPORTED_SOURCES
+from app.services.paper_repository import PaperRepository
 from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore
 from app.services.providers.arxiv import ARXIV_API_URL
@@ -68,7 +69,7 @@ class HunterAgent:
 
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_metadata_db()
+        self.repository = PaperRepository(self.metadata_db_path)
 
     def run(
         self,
@@ -446,53 +447,7 @@ class HunterAgent:
         existing_id = str(record.get("id", "")).strip()
         record["id"] = existing_id or self._build_record_id(record)
 
-        with sqlite3.connect(self.metadata_db_path) as connection:
-            connection.execute(
-                """
-                INSERT INTO papers (
-                    id,
-                    source,
-                    title,
-                    doi,
-                    external_id,
-                    url,
-                    pdf_url,
-                    pdf_path,
-                    keyword,
-                    relevance_score,
-                    metadata_json,
-                    saved_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    source = excluded.source,
-                    title = excluded.title,
-                    doi = excluded.doi,
-                    external_id = excluded.external_id,
-                    url = excluded.url,
-                    pdf_url = excluded.pdf_url,
-                    pdf_path = excluded.pdf_path,
-                    keyword = excluded.keyword,
-                    relevance_score = excluded.relevance_score,
-                    metadata_json = excluded.metadata_json,
-                    saved_at = excluded.saved_at
-                """,
-                (
-                    record["id"],
-                    record.get("source", ""),
-                    record.get("title", ""),
-                    record.get("doi", ""),
-                    record.get("externalId") or record.get("external_id") or "",
-                    record.get("url", ""),
-                    record.get("pdfUrl") or record.get("pdf_url") or "",
-                    record.get("pdfPath", ""),
-                    record.get("keyword", ""),
-                    record.get("relevanceScore", 0),
-                    json.dumps(record, ensure_ascii=False),
-                    record.get("savedAt", ""),
-                ),
-            )
-            connection.commit()
+        self.repository.save(record)
 
         source = str(record.get("source", "")).lower() or "unknown"
         self._log(f"[{source}] 元数据已保存: {record['id']}")
@@ -618,28 +573,7 @@ class HunterAgent:
 
     def list_saved_papers(self, *, limit: int = 100, keyword: str | None = None) -> list[Paper]:
         """读取已保存的论文元数据，用于前端浏览本地数据集。"""
-        clauses: list[str] = []
-        params: list[object] = []
-
-        if keyword:
-            clauses.append("(keyword LIKE ? OR title LIKE ?)")
-            keyword_pattern = f"%{keyword}%"
-            params.extend([keyword_pattern, keyword_pattern])
-
-        query = (
-            "SELECT id, source, title, doi, external_id, url, pdf_url, pdf_path, keyword, "
-            "relevance_score, metadata_json, saved_at FROM papers"
-        )
-        if clauses:
-            query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY saved_at DESC LIMIT ?"
-        params.append(max(1, min(limit, 500)))
-
-        with sqlite3.connect(self.metadata_db_path) as connection:
-            connection.row_factory = sqlite3.Row
-            rows = connection.execute(query, params).fetchall()
-
-        return [self._row_to_paper(row) for row in rows]
+        return self.repository.list(limit=limit, keyword=keyword)
 
     def delete_saved_papers(self, ids: list[str]) -> dict:
         """按论文记录 ID 批量删除已保存的元数据记录，不删除本地 PDF 文件。"""
@@ -692,13 +626,7 @@ class HunterAgent:
         if not normalized_ids:
             return
 
-        placeholders = ", ".join("?" for _ in normalized_ids)
-        with sqlite3.connect(self.metadata_db_path) as connection:
-            connection.execute(
-                f"DELETE FROM papers WHERE id IN ({placeholders})",
-                normalized_ids,
-            )
-            connection.commit()
+        self.repository.delete_rows(normalized_ids)
 
     def get_saved_paper(self, record_id: str) -> Paper | None:
         """按记录 ID 读取一条已保存论文。"""
@@ -1509,39 +1437,11 @@ class HunterAgent:
         doi: str | None = None,
         title: str | None = None,
     ) -> Paper | None:
-        """按 ID、DOI 或标题查找已保存论文记录。"""
-        clauses: list[str] = []
-        params: list[str] = []
-
-        if record_id:
-            clauses.append("id = ?")
-            params.append(record_id)
-        if doi:
-            clauses.append("doi = ?")
-            params.append(self._normalize_identifier(doi))
-        if title:
-            clauses.append("title = ?")
-            params.append(title)
-
-        if not clauses:
-            return None
-
-        query = (
-            "SELECT id, source, title, doi, external_id, url, pdf_url, pdf_path, keyword, "
-            "relevance_score, metadata_json, saved_at FROM papers WHERE "
-            + " OR ".join(clauses)
-            + " LIMIT 1"
+        return self.repository.find(
+            record_id=record_id,
+            doi=self._normalize_identifier(doi) if doi else None,
+            title=title,
         )
-
-        with sqlite3.connect(self.metadata_db_path) as connection:
-            connection.row_factory = sqlite3.Row
-            row = connection.execute(query, params).fetchone()
-            self._log(f"数据库行={row}，查询参数={params}")
-
-        if not row:
-            return None
-
-        return self._row_to_paper(row)
 
     def _row_to_paper(self, row: sqlite3.Row) -> Paper:
         """把 papers 表行转换为前端可使用的论文对象。"""
@@ -1718,27 +1618,8 @@ class HunterAgent:
         return path.exists() and path.is_file() and path.suffix.lower() == ".pdf"
 
     def _init_metadata_db(self) -> None:
-        """初始化论文元数据 SQLite 表。"""
-        with sqlite3.connect(self.metadata_db_path) as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS papers (
-                    id TEXT PRIMARY KEY,
-                    source TEXT NOT NULL DEFAULT '',
-                    title TEXT NOT NULL DEFAULT '',
-                    doi TEXT NOT NULL DEFAULT '',
-                    external_id TEXT NOT NULL DEFAULT '',
-                    url TEXT NOT NULL DEFAULT '',
-                    pdf_url TEXT NOT NULL DEFAULT '',
-                    pdf_path TEXT NOT NULL DEFAULT '',
-                    keyword TEXT NOT NULL DEFAULT '',
-                    relevance_score REAL NOT NULL DEFAULT 0,
-                    metadata_json TEXT NOT NULL,
-                    saved_at TEXT NOT NULL DEFAULT ''
-                )
-                """,
-            )
-            connection.commit()
+        """Ensure the repository schema exists for legacy callers."""
+        self.repository.ensure_schema()
 
     def _download_pdf(self, pdf_url: str, paper: Paper) -> Path:
         """下载 PDF 文件到本地论文目录。"""

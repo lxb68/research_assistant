@@ -18,6 +18,7 @@ from typing import Any, Callable
 from app.core.config import settings
 from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore
+from app.services.domain_tree_store import DomainTreeStore
 from app.services.semantic_graph import SemanticGraphExtractor, SemanticSourceDocument
 from app.services.task_control import (
     DomainTreeGenerationCancelled,
@@ -29,6 +30,16 @@ from app.services.task_control import (
 logger = logging.getLogger(__name__)
 
 _MODEL_OUTPUT_PREVIEW_CHARS = 2000
+
+
+class DomainTreeModelGenerationError(RuntimeError):
+    """Raised when model-backed domain-tree generation cannot produce a valid tree."""
+
+    def __init__(self, message: str, *, reason: str = "model_call_failed") -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 _AUTO_LANGUAGE_VALUES = {"auto", "跟随文献语言", "follow source", "source"}
 
 
@@ -231,6 +242,8 @@ class DomainTreeAgent:
         self.prompt_dir = Path(prompt_dir or (Path(__file__).resolve().parents[2] / "src" / "prompt")).resolve()
         self.analysis_root = self.storage_dir / "domain_tree"
         self.analysis_root.mkdir(parents=True, exist_ok=True)
+        self.store = DomainTreeStore()
+        self._generation_metadata: dict[str, Any] = self._default_generation_metadata()
 
     async def handle_domain_tree(
         self,
@@ -277,6 +290,7 @@ class DomainTreeAgent:
     ) -> list[dict[str, Any]] | None:
         """同步执行领域树主流程，供工作线程和测试直接调用。"""
         started_at = time.perf_counter()
+        self._generation_metadata = self._default_generation_metadata()
 
         def report(**update: Any) -> None:
             if progress_callback:
@@ -460,82 +474,22 @@ class DomainTreeAgent:
     # 获取当前项目的领域树标签，如果不存在则返回 None
     def get_tags(self, project_id: str) -> list[dict[str, Any]] | None:
         """读取项目当前保存的领域树标签。"""
-        domain_tree_path = self._analysis_dir(project_id) / "domain_tree.json"
-        if not domain_tree_path.exists():
-            return None
-
-        try:
-            payload = json.loads(domain_tree_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            logger.warning("[%s] 读取领域树失败：%s", project_id, error)
-            return None
-
-        # 解析 payload，确保返回的结果是一个列表
-        if isinstance(payload, dict):
-            tree = payload.get("domainTree")
-            return tree if isinstance(tree, list) else None
-
-        return payload if isinstance(payload, list) else None
+        return self.store.load_tags(self._analysis_dir(project_id))
 
     def get_result(self, project_id: str) -> dict[str, Any] | None:
         """读取项目完整的领域树、知识图谱和清单结果。"""
-        output_dir = self._analysis_dir(self._normalize_project_id(project_id))
-        domain_tree_path = output_dir / "domain_tree.json"
-        knowledge_graph_path = output_dir / "knowledge_graph.json"
-        manifest_path = output_dir / "manifest.json"
-        catalog_path = output_dir / "catalog.txt"
+        normalized = self._normalize_project_id(project_id)
+        return self.store.load_result(self._analysis_dir(normalized), normalized)
 
-        if not domain_tree_path.exists():
-            return None
-
-        try:
-            domain_payload = json.loads(domain_tree_path.read_text(encoding="utf-8"))
-            graph_status = (
-                str(domain_payload.get("graphStatus", "ready"))
-                if isinstance(domain_payload, dict)
-                else "ready"
-            )
-            graph_payload = (
-                json.loads(knowledge_graph_path.read_text(encoding="utf-8"))
-                if knowledge_graph_path.exists() and graph_status == "ready"
-                else {}
-            )
-            manifest_payload = (
-                json.loads(manifest_path.read_text(encoding="utf-8"))
-                if manifest_path.exists()
-                else {}
-            )
-            catalog_text = catalog_path.read_text(encoding="utf-8") if catalog_path.exists() else ""
-        except (OSError, json.JSONDecodeError) as error:
-            logger.warning("[%s] 读取领域树结果失败：%s", project_id, error)
-            return None
-
-        domain_tree = domain_payload.get("domainTree") if isinstance(domain_payload, dict) else domain_payload
-        return {
-            "projectId": domain_payload.get("projectId", project_id) if isinstance(domain_payload, dict) else project_id,
-            "generatedAt": domain_payload.get("generatedAt", "") if isinstance(domain_payload, dict) else "",
-            "action": domain_payload.get("action", "") if isinstance(domain_payload, dict) else "",
-            "language": domain_payload.get("language", "") if isinstance(domain_payload, dict) else "",
-            "requestedLanguage": domain_payload.get("requestedLanguage", "") if isinstance(domain_payload, dict) else "",
-            "graphStatus": graph_status,
-            "documentCount": domain_payload.get("documentCount", 0) if isinstance(domain_payload, dict) else 0,
-            "domainTree": domain_tree if isinstance(domain_tree, list) else [],
-            "knowledgeGraph": graph_payload if isinstance(graph_payload, dict) else {},
-            "manifest": manifest_payload if isinstance(manifest_payload, dict) else {},
-            "catalogText": catalog_text,
-        }
+    def get_result_path(self, project_id: str) -> Path:
+        """返回任务表可持久化的领域树结果文件路径。"""
+        normalized = self._normalize_project_id(project_id)
+        return (self._analysis_dir(normalized) / "domain_tree.json").resolve()
 
     def _load_manifest(self, project_id: str) -> dict[str, Any]:
         """加载项目清单。"""
-        manifest_path = self._analysis_dir(self._normalize_project_id(project_id)) / "manifest.json"
-        if not manifest_path.exists():
-            return {}
-        try:
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            logger.warning("[%s] 读取清单文件失败：%s", project_id, error)
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        normalized = self._normalize_project_id(project_id)
+        return self.store.load_manifest(self._analysis_dir(normalized))
 
     def get_project_tocs(self, project_id: str) -> str:
         """读取项目中各文档的目录结构。"""
@@ -600,6 +554,7 @@ class DomainTreeAgent:
             "graphStatus": "building",
             "documentCount": len(documents),
             "domainTree": tags,
+            **self._generation_metadata,
         }
         manifest_payload = {
             "projectId": project_id,
@@ -608,6 +563,7 @@ class DomainTreeAgent:
             "language": language,
             "requestedLanguage": requested_language or language,
             "graphStatus": "building",
+            **self._generation_metadata,
             "documents": [
                 {
                     "recordId": document.record_id,
@@ -668,6 +624,7 @@ class DomainTreeAgent:
             "graphStatus": "ready",
             "documentCount": len(documents),
             "domainTree": tags,
+            **self._generation_metadata,
         }
         graph_payload = {
             **knowledge_graph,
@@ -683,6 +640,7 @@ class DomainTreeAgent:
             "language": language,
             "requestedLanguage": requested_language or language,
             "graphStatus": "ready",
+            **self._generation_metadata,
             "documents": [
                 {
                     "recordId": document.record_id,
@@ -734,17 +692,56 @@ class DomainTreeAgent:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
         """生成领域树。"""
-        llm_output = self._call_llm(
-            prompt,
-            language=language,
-            model=model,
-            cancel_event=cancel_event,
-            progress_callback=progress_callback,
-        )
-        tags = self.extract_json_from_llm_output(llm_output) if llm_output else None
-        if tags:
+        runtime = self._resolve_model_runtime(model)
+        allow_fallback = runtime.get("allow_heuristic_fallback") is True
+        failure: DomainTreeModelGenerationError | None = None
+        try:
+            llm_output = self._call_llm(
+                prompt,
+                language=language,
+                model=runtime,
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+            )
+            tags = self.extract_json_from_llm_output(llm_output)
+            if not tags:
+                raise DomainTreeModelGenerationError(
+                    "模型返回内容不是有效的领域树 JSON",
+                    reason="invalid_model_output",
+                )
+            self._generation_metadata = self._default_generation_metadata()
             return self.filter_domain_tree(tags)
-        logger.info("大模型不可用或返回了无效 JSON，改用启发式规则生成领域树")
+        except DomainTreeGenerationCancelled:
+            raise
+        except DomainTreeModelGenerationError as error:
+            failure = error
+        except Exception as error:
+            failure = DomainTreeModelGenerationError(
+                f"领域树模型调用失败：{error}",
+                reason="model_call_failed",
+            )
+
+        if not allow_fallback:
+            raise failure
+
+        warning = f"模型生成失败，已按设置降级为启发式生成：{failure}"
+        logger.warning(warning)
+        self._generation_metadata = {
+            "generationMode": "heuristic",
+            "degraded": True,
+            "degradeReason": failure.reason,
+            "warnings": [warning],
+        }
+        if progress_callback:
+            progress_callback(
+                {
+                    "stage": "domain_tree",
+                    "message": "模型生成失败，已按设置降级为启发式生成",
+                    "generationMode": "heuristic",
+                    "degraded": True,
+                    "degradeReason": failure.reason,
+                }
+            )
         return self._heuristic_domain_tree(documents, catalog_text, language=language)
 
     def _call_llm(
@@ -755,11 +752,11 @@ class DomainTreeAgent:
         model: Any | None,
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
-    ) -> str | None:
+    ) -> str:
         """调用大模型生成领域树，并校验返回结构。"""
         runtime = self._resolve_model_runtime(model)
         if not runtime:
-            return None
+            raise DomainTreeModelGenerationError("模型配置不可用", reason="model_not_configured")
         system_constraint = str(runtime.get("system_constraint") or "").strip()
         output_language_constraint = (
             "Return all domain and subdomain labels in Chinese."
@@ -820,7 +817,10 @@ class DomainTreeAgent:
                 (time.perf_counter() - started_at) * 1000,
                 error,
             )
-            return None
+            raise DomainTreeModelGenerationError(
+                f"领域树模型调用失败：{error}",
+                reason="model_call_failed",
+            ) from error
 
     def _report_model_retry(
         self,
@@ -841,12 +841,21 @@ class DomainTreeAgent:
                 }
             )
 
-    def _resolve_model_runtime(self, model: Any | None) -> dict[str, str]:
+    def _resolve_model_runtime(self, model: Any | None) -> dict[str, Any]:
         """把请求传入的模型设置统一转换为语义抽取可复用的运行时配置。"""
-        runtime = dict(model) if isinstance(model, dict) else ModelConfigStore().build_model_payload()
+        runtime = dict(model) if isinstance(model, dict) else (ModelConfigStore().build_model_payload() or {})
         if isinstance(model, str) and model.strip():
             runtime["model"] = model.strip()
-        return {str(key): str(value) for key, value in runtime.items() if value is not None}
+        return {str(key): value for key, value in runtime.items() if value is not None}
+
+    @staticmethod
+    def _default_generation_metadata() -> dict[str, Any]:
+        return {
+            "generationMode": "llm",
+            "degraded": False,
+            "degradeReason": "",
+            "warnings": [],
+        }
 
     def extract_json_from_llm_output(self, output: str | None) -> list[dict[str, Any]] | None:
         """从大模型文本响应中提取 JSON 对象。"""

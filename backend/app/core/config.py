@@ -82,6 +82,17 @@ class Settings:
         0.0,
         float(os.getenv("DOMAIN_TREE_RETRY_BASE_DELAY_SECONDS", "2")),
     )
+    domain_tree_job_max_workers = max(1, int(os.getenv("DOMAIN_TREE_JOB_MAX_WORKERS", "2")))
+    domain_tree_job_ttl_hours = max(1, int(os.getenv("DOMAIN_TREE_JOB_TTL_HOURS", "168")))
+    domain_tree_job_stale_seconds = max(1, int(os.getenv("DOMAIN_TREE_JOB_STALE_SECONDS", "300")))
+    domain_tree_job_cleanup_interval_seconds = max(
+        1,
+        int(os.getenv("DOMAIN_TREE_JOB_CLEANUP_INTERVAL_SECONDS", "3600")),
+    )
+    domain_tree_job_max_history = max(1, int(os.getenv("DOMAIN_TREE_JOB_MAX_HISTORY", "1000")))
+    domain_tree_job_db = os.getenv("DOMAIN_TREE_JOB_DB") or str(
+        BACKEND_DIR / "storage" / "metadata" / "domain_tree_jobs.sqlite3",
+    )
     semantic_graph_max_workers = max(1, min(int(os.getenv("SEMANTIC_GRAPH_MAX_WORKERS", "4")), 16))
     research_agent_max_papers = int(os.getenv("RESEARCH_AGENT_MAX_PAPERS", "100"))
     research_agent_max_sources = int(os.getenv("RESEARCH_AGENT_MAX_SOURCES", "6"))

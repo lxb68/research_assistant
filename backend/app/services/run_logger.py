@@ -19,13 +19,19 @@ class RunLogger:
         self.run_id = run_id or uuid.uuid4().hex
         day = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
         self.run_dir = Path(root_dir) / day
-        self.run_dir.mkdir(parents=True, exist_ok=True)
         self.text_path = self.run_dir / f"{self.run_id}.log"
         self.jsonl_path = self.run_dir / f"{self.run_id}.jsonl"
         self._lock = threading.Lock()
+        self.enabled = True
+        try:
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self.enabled = False
 
     def log(self, component: str, message: str, *, event: str = "log", data: dict[str, Any] | None = None) -> None:
         """写入脱敏后的人类可读日志和结构化日志。"""
+        if not self.enabled:
+            return
         timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="milliseconds")
         safe_message = self._redact(str(message))
         safe_data = self._redact_value(data or {})
@@ -41,10 +47,13 @@ class RunLogger:
         if safe_data:
             text_line += f" | {json.dumps(safe_data, ensure_ascii=False, default=str)}"
         with self._lock:
-            with self.text_path.open("a", encoding="utf-8") as handle:
-                handle.write(text_line + "\n")
-            with self.jsonl_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            try:
+                with self.text_path.open("a", encoding="utf-8") as handle:
+                    handle.write(text_line + "\n")
+                with self.jsonl_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            except OSError:
+                self.enabled = False
 
     def public_info(self) -> dict[str, str]:
         """返回可安全公开的运行标识与日志路径。"""

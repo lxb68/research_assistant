@@ -247,6 +247,24 @@ class ModelConfigStoreTest(unittest.TestCase):
             runtime = ModelConfigStore(directory).load_runtime()
             self.assertEqual(runtime["provider"], "deepseek")
             self.assertEqual(runtime["protocol"], "openai_compatible")
+            self.assertFalse(runtime["allow_heuristic_fallback"])
+
+    def test_heuristic_fallback_setting_is_persisted_and_public(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ModelConfigStore(directory)
+            public = store.save(
+                provider="ollama",
+                protocol="ollama",
+                model="qwen3:8b",
+                base_url="http://127.0.0.1:11434",
+                api_key="",
+                allow_heuristic_fallback=True,
+            )
+
+            self.assertTrue(public["allowHeuristicFallback"])
+            self.assertTrue(store.load_runtime()["allow_heuristic_fallback"])
+            saved = json.loads(store.config_path.read_text(encoding="utf-8"))
+            self.assertTrue(saved["allowHeuristicFallback"])
 
 
 if __name__ == "__main__":

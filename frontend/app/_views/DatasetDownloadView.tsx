@@ -186,8 +186,9 @@ export default function DatasetDownloadPage({
   const [limitPerSource, setLimitPerSource] = useState(10);
   const [isSearching, setIsSearching] = useState(false);
   const [results, setResults] = useState<PaperResult[]>([]);
-  const [yearFrom, setYearFrom] = useState("2020");
-  const [yearTo, setYearTo] = useState("2026");
+  const currentYear = new Date().getFullYear();
+  const [yearFrom, setYearFrom] = useState(String(currentYear - 6));
+  const [yearTo, setYearTo] = useState(String(currentYear));
   const [minImpactFactor, setMinImpactFactor] = useState(0);
   const [selectedCcfLevels, setSelectedCcfLevels] = useState<string[]>([]);
   const [agentLogs, setAgentLogs] = useState<string[]>([]);
@@ -390,8 +391,8 @@ export default function DatasetDownloadPage({
     setQuery("");
     setSelectedSources(defaultSelectedSources);
     setLimitPerSource(10);
-    setYearFrom("2020");
-    setYearTo("2026");
+    setYearFrom(String(currentYear - 6));
+    setYearTo(String(currentYear));
     setMinImpactFactor(0);
     setSelectedCcfLevels([]);
     setResults([]);

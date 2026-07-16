@@ -118,6 +118,10 @@ type DomainTreeResult = {
   requestedLanguage?: string;
   graphStatus?: "building" | "ready" | "failed" | "cancelled" | string;
   documentCount?: number;
+  generationMode?: "llm" | "heuristic" | "unknown";
+  degraded?: boolean;
+  degradeReason?: string;
+  warnings?: string[];
   domainTree: DomainTreeNode[];
   knowledgeGraph?: {
     nodes?: GraphNode[];
@@ -149,7 +153,7 @@ type DomainTreeJob = {
   jobId: string;
   projectId: string;
   action: DomainTreeAction;
-  status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled";
+  status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted";
   stage: string;
   message: string;
   progress?: {
@@ -164,6 +168,9 @@ type DomainTreeJob = {
     cacheMisses?: number;
     maxWorkers?: number;
     domainTreeReady?: boolean;
+    generationMode?: "llm" | "heuristic";
+    degraded?: boolean;
+    degradeReason?: string;
   };
   partialResult?: DomainTreeResult | null;
   result?: DomainTreeResult | null;
@@ -809,7 +816,11 @@ export default function DomainTreePage({
           setMatchedChunks([]);
           setSelectedSecondaryKey("");
           setSelectedSecondaryLabel("");
-          setStatus(`${ACTION_LABELS[payload.action]}完成，领域树和知识图谱已更新。`);
+          setStatus(
+            payload.result?.degraded
+              ? `${ACTION_LABELS[payload.action]}已降级完成：模型生成失败，本次结果来自启发式规则。`
+              : `${ACTION_LABELS[payload.action]}完成，领域树和知识图谱已更新。`,
+          );
           setIsGenerating(false);
           setIsCancelling(false);
           setActiveJobId("");
@@ -824,6 +835,13 @@ export default function DomainTreePage({
         }
         if (payload.status === "cancelled") {
           setStatus("领域树生成已取消。");
+          setIsGenerating(false);
+          setIsCancelling(false);
+          setActiveJobId("");
+          return;
+        }
+        if (payload.status === "interrupted") {
+          setError(payload.error || "服务重启或任务心跳过期，领域树生成已中断");
           setIsGenerating(false);
           setIsCancelling(false);
           setActiveJobId("");
@@ -1190,6 +1208,12 @@ export default function DomainTreePage({
         </section>
 
         {status ? <div className="domain-tree-status">{status}</div> : null}
+        {result?.degraded ? (
+          <div className="domain-tree-degraded-warning" role="status">
+            <strong>当前展示的是降级结果</strong>
+            <span>{result.warnings?.[0] || "模型生成失败，本次领域树由启发式规则生成。"}</span>
+          </div>
+        ) : null}
         {isGenerating && activeJob ? (
           <div className="domain-tree-job-progress" aria-live="polite">
             <div className="domain-tree-job-progress-head">
@@ -1246,6 +1270,7 @@ export default function DomainTreePage({
                 <div className="domain-tree-meta">
                   <span>{result.documentCount ?? 0} 篇文档</span>
                   <span>{ACTION_LABELS[latestAction]}</span>
+                  <span>{result.degraded ? "启发式降级生成" : "模型生成"}</span>
                   <span>{result.generatedAt ? new Date(result.generatedAt).toLocaleString() : "刚刚生成"}</span>
                 </div>
               </div>

@@ -68,6 +68,9 @@ class ModelConfigStore:
         if not base_url:
             base_url = str(provider_config["baseUrl"]).rstrip("/")
         protocol = normalize_protocol(str(saved.get("protocol") or ""), provider)
+        allow_heuristic_fallback = bool(
+            saved.get("allowHeuristicFallback", saved.get("allow_heuristic_fallback", False))
+        )
         return {
             "api_key": api_key,
             "base_url": base_url,
@@ -75,6 +78,7 @@ class ModelConfigStore:
             "provider": provider,
             "protocol": protocol,
             "requires_api_key": requires_api_key(provider, protocol),
+            "allow_heuristic_fallback": allow_heuristic_fallback,
             "system_constraint": SYSTEM_SECURITY_CONSTRAINT,
         }
 
@@ -92,6 +96,7 @@ class ModelConfigStore:
         api_key: str,
         provider: str = "",
         protocol: str = "",
+        allow_heuristic_fallback: bool = False,
     ) -> dict[str, Any]:
         """校验并持久化模型配置。"""
         normalized_model = str(model).strip()
@@ -122,6 +127,7 @@ class ModelConfigStore:
             "model": normalized_model,
             "baseUrl": normalized_base_url,
             "apiKey": normalized_api_key,
+            "allowHeuristicFallback": bool(allow_heuristic_fallback),
         }
         self.config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return self.get_public_config()
@@ -145,6 +151,7 @@ class ModelConfigStore:
             "baseUrl": runtime["base_url"],
             "requiresApiKey": runtime["requires_api_key"],
             "hasApiKey": bool(runtime["api_key"]),
+            "allowHeuristicFallback": runtime["allow_heuristic_fallback"],
             "maskedApiKey": self._mask_secret(runtime["api_key"]),
             "systemConstraint": SYSTEM_SECURITY_CONSTRAINT,
         }

@@ -33,6 +33,7 @@ type ModelConfigResponse = {
   requiresApiKey?: boolean;
   hasApiKey?: boolean;
   maskedApiKey?: string;
+  allowHeuristicFallback?: boolean;
   systemConstraint?: string;
 };
 
@@ -162,6 +163,7 @@ export default function SettingsWorkspace() {
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [maskedApiKey, setMaskedApiKey] = useState("");
+  const [allowHeuristicFallback, setAllowHeuristicFallback] = useState(false);
   const [modelConfigured, setModelConfigured] = useState(false);
   const [isLoadingModelConfig, setIsLoadingModelConfig] = useState(true);
   const [isSavingModelConfig, setIsSavingModelConfig] = useState(false);
@@ -224,6 +226,7 @@ export default function SettingsWorkspace() {
         setProtocol(payload.protocol || "openai_compatible");
         setModelConfigured(Boolean(payload.configured));
         setMaskedApiKey(payload.maskedApiKey || "");
+        setAllowHeuristicFallback(Boolean(payload.allowHeuristicFallback));
         setBaseUrl(payload.baseUrl || "");
         setModelName(payload.model || defaultSettings.selectedModel);
         setSystemConstraint(payload.systemConstraint || "");
@@ -275,6 +278,7 @@ export default function SettingsWorkspace() {
           model: modelName,
           base_url: baseUrl,
           api_key: apiKeyInput,
+          allow_heuristic_fallback: allowHeuristicFallback,
         }),
       });
       const payload = (await response.json().catch(() => ({}))) as ModelConfigResponse & { detail?: string };
@@ -286,6 +290,7 @@ export default function SettingsWorkspace() {
       setProviderId(payload.provider || providerId);
       setProtocol(payload.protocol || protocol);
       setMaskedApiKey(payload.maskedApiKey || "");
+      setAllowHeuristicFallback(Boolean(payload.allowHeuristicFallback));
       setSystemConstraint(payload.systemConstraint || "");
       setApiKeyInput("");
       setSettings((current) => ({ ...current, selectedModel: modelName }));
@@ -358,6 +363,7 @@ export default function SettingsWorkspace() {
     setModelName(defaultSettings.selectedModel);
     setBaseUrl("https://api.openai.com/v1");
     setApiKeyInput("");
+    setAllowHeuristicFallback(false);
     setDiscoveredModels([]);
     setIsModelMenuOpen(false);
     window.localStorage.removeItem(WORKSPACE_SETTINGS_STORAGE_KEY);
@@ -583,6 +589,28 @@ export default function SettingsWorkspace() {
                 </span>
                 {maskedApiKey ? <span className="settings-secret-preview">当前密钥：{maskedApiKey}</span> : null}
               </label>
+
+              <div className="settings-row">
+                <span className="settings-row-label">允许降级</span>
+                <button
+                  type="button"
+                  className={`settings-fallback-toggle${allowHeuristicFallback ? " is-enabled" : ""}`}
+                  role="switch"
+                  aria-checked={allowHeuristicFallback}
+                  onClick={() => {
+                    setAllowHeuristicFallback((current) => !current);
+                    setSaved(false);
+                  }}
+                >
+                  <span className="settings-fallback-track" aria-hidden="true">
+                    <span className="settings-fallback-thumb" />
+                  </span>
+                  <span>{allowHeuristicFallback ? "已允许降级" : "禁止降级"}</span>
+                </button>
+                <span className="settings-hint">
+                  开启后，模型调用失败或返回无效 JSON 时会使用启发式规则继续生成，并明确标记为降级结果；默认关闭。
+                </span>
+              </div>
 
               <label className="settings-row">
                 <span className="settings-row-label">系统防泄露约束</span>

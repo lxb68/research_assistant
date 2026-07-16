@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import sys
+import json
 import threading
+import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -15,7 +18,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.services.domain_tree_jobs import DomainTreeJobManager
+from app.services.domain_tree_jobs import DomainTreeJobManager, DomainTreeJobOutcome
 from app.services.task_control import (
     DomainTreeGenerationCancelled,
     call_with_retry,
@@ -66,17 +69,48 @@ class ModelRetryTest(unittest.TestCase):
 class DomainTreeJobManagerTest(unittest.TestCase):
     """后台任务必须可观察、可取消且同项目去重。"""
 
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.db_path = self.root / "jobs.sqlite3"
+        self.managers: list[DomainTreeJobManager] = []
+
+    def tearDown(self) -> None:
+        for manager in self.managers:
+            manager.shutdown()
+        self.temp_dir.cleanup()
+
+    def manager(self, **kwargs) -> DomainTreeJobManager:
+        manager = DomainTreeJobManager(db_path=self.db_path, **kwargs)
+        self.managers.append(manager)
+        return manager
+
+    def write_result(self, project_id: str, label: str = "测试") -> Path:
+        output_dir = self.root / project_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "domain_tree.json").write_text(
+            json.dumps({"projectId": project_id, "domainTree": [{"label": label}], "graphStatus": "ready"}),
+            encoding="utf-8",
+        )
+        (output_dir / "knowledge_graph.json").write_text(
+            json.dumps({"nodes": [{"id": "large-result-marker"}], "edges": []}),
+            encoding="utf-8",
+        )
+        (output_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        return output_dir / "domain_tree.json"
+
     def wait_for_terminal(self, manager: DomainTreeJobManager, job_id: str) -> dict:
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             job = manager.get(job_id)
-            if job and job["status"] in {"completed", "failed", "cancelled"}:
+            if job and job["status"] in {"completed", "failed", "cancelled", "interrupted"}:
                 return job
             time.sleep(0.01)
         self.fail("领域树任务未在测试时限内结束")
 
     def test_reports_progress_and_result(self) -> None:
-        manager = DomainTreeJobManager(max_workers=1)
+        manager = self.manager(max_workers=1)
+        result_path = self.write_result("workspace")
 
         def runner(report, cancel_event) -> dict:
             report(
@@ -87,7 +121,7 @@ class DomainTreeJobManagerTest(unittest.TestCase):
                     "partialResult": {"domainTree": [{"label": "部分结果"}]},
                 }
             )
-            return {"domainTree": [{"label": "测试"}]}
+            return DomainTreeJobOutcome(result_path=str(result_path))
 
         job, created = manager.submit("workspace", "rebuild", runner)
         terminal = self.wait_for_terminal(manager, job["jobId"])
@@ -96,11 +130,39 @@ class DomainTreeJobManagerTest(unittest.TestCase):
         self.assertEqual(terminal["status"], "completed")
         self.assertEqual(terminal["progress"]["completedChunks"], 1)
         self.assertNotIn("partialResult", terminal["progress"])
-        self.assertEqual(terminal["partialResult"]["domainTree"][0]["label"], "部分结果")
+        self.assertIsNone(terminal["partialResult"])
         self.assertEqual(terminal["result"]["domainTree"][0]["label"], "测试")
+        self.assertEqual(manager.active_cache_size, 0)
+
+        with manager.repository.connect() as connection:
+            stored = connection.execute(
+                "SELECT progress_json, result_path FROM domain_tree_jobs WHERE id = ?",
+                (job["jobId"],),
+            ).fetchone()
+        self.assertNotIn("部分结果", stored["progress_json"])
+        self.assertNotIn("large-result-marker", stored["progress_json"])
+        self.assertEqual(stored["result_path"], str(result_path))
+
+    def test_completed_job_survives_manager_restart(self) -> None:
+        first = self.manager(max_workers=1)
+        result_path = self.write_result("persistent", "持久化结果")
+        job, _ = first.submit(
+            "persistent",
+            "rebuild",
+            lambda report, cancel: DomainTreeJobOutcome(str(result_path)),
+        )
+        self.wait_for_terminal(first, job["jobId"])
+
+        restarted = self.manager(max_workers=1)
+        restored = restarted.get(job["jobId"])
+
+        self.assertEqual(restored["status"], "completed")
+        self.assertEqual(restored["result"]["domainTree"][0]["label"], "持久化结果")
+        retention = datetime.fromisoformat(restored["expiresAt"]) - datetime.fromisoformat(restored["finishedAt"])
+        self.assertGreaterEqual(retention, timedelta(hours=167))
 
     def test_reuses_active_job_and_cancels_it(self) -> None:
-        manager = DomainTreeJobManager(max_workers=1)
+        manager = self.manager(max_workers=1)
         started = threading.Event()
 
         def runner(report, cancel_event) -> dict:
@@ -120,6 +182,74 @@ class DomainTreeJobManagerTest(unittest.TestCase):
 
         self.assertEqual(cancelling["status"], "cancelling")
         self.assertEqual(terminal["status"], "cancelled")
+
+    def test_transaction_reuses_active_job_across_managers(self) -> None:
+        first = self.manager(max_workers=1)
+        second = self.manager(max_workers=1)
+        started = threading.Event()
+
+        def runner(report, cancel_event) -> DomainTreeJobOutcome:
+            started.set()
+            while not cancel_event.wait(0.01):
+                pass
+            raise DomainTreeGenerationCancelled("cancelled")
+
+        job, created = first.submit("shared", "rebuild", runner)
+        self.assertTrue(created)
+        self.assertTrue(started.wait(1))
+        duplicate, duplicate_created = second.submit("shared", "revise", runner)
+        self.assertFalse(duplicate_created)
+        self.assertEqual(duplicate["jobId"], job["jobId"])
+        first.cancel(job["jobId"])
+        self.wait_for_terminal(first, job["jobId"])
+
+    def test_stale_running_job_becomes_interrupted(self) -> None:
+        manager = self.manager(max_workers=1, stale_seconds=5)
+        old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        row, _ = manager.repository.create_or_get_active("stale", "rebuild", stale_before=old)
+        with manager.repository.connect() as connection:
+            connection.execute(
+                "UPDATE domain_tree_jobs SET status = 'running', started_at = ?, heartbeat_at = ? WHERE id = ?",
+                (old, old, row["id"]),
+            )
+
+        self.assertEqual(manager.recover_stale_jobs(), 1)
+        recovered = manager.get(row["id"])
+        self.assertEqual(recovered["status"], "interrupted")
+
+    def test_shutdown_interrupts_local_running_job(self) -> None:
+        manager = self.manager(max_workers=1)
+        started = threading.Event()
+
+        def runner(report, cancel_event) -> DomainTreeJobOutcome:
+            started.set()
+            while not cancel_event.wait(0.01):
+                pass
+            raise DomainTreeGenerationCancelled("cancelled")
+
+        job, _ = manager.submit("restart", "rebuild", runner)
+        self.assertTrue(started.wait(1))
+        manager.shutdown()
+
+        self.assertEqual(manager.get(job["jobId"])["status"], "interrupted")
+        deadline = time.monotonic() + 1
+        while manager.active_cache_size and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(manager.active_cache_size, 0)
+
+    def test_cleanup_enforces_history_limit(self) -> None:
+        manager = self.manager(max_workers=1, max_history=2)
+        for index in range(4):
+            result_path = self.write_result(f"history-{index}")
+            job, _ = manager.submit(
+                f"history-{index}",
+                "rebuild",
+                lambda report, cancel, path=result_path: DomainTreeJobOutcome(str(path)),
+            )
+            self.wait_for_terminal(manager, job["jobId"])
+
+        self.assertEqual(manager.cleanup(), 2)
+        self.assertEqual(manager.repository.count(), 2)
 
 
 if __name__ == "__main__":
