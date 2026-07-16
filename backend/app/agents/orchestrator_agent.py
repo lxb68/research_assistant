@@ -897,10 +897,14 @@ class OrchestratorAgent:
                 for item in [*semantic.get("facetAssessments", []), *semantic.get("requirementAssessments", [])]
             )
             reasons.append(f"语义验证仍有 {partial_count} 项部分支持、{unsupported_count} 项缺少直接证据")
+        else:
+            # 关键词覆盖率用于触发补偿检索，但不应否决逐 facet 的直接证据验证。
+            # 证据数量、指定论文/片段缺失等确定性错误仍然保留为阻塞原因。
+            reasons = [reason for reason in reasons if not str(reason).startswith("问题关键词覆盖率仅")]
         return {
             **evaluation,
             **semantic,
-            "sufficient": bool(evaluation.get("sufficient")) and bool(semantic.get("answerable")),
+            "sufficient": not reasons and bool(semantic.get("answerable")),
             "reasons": reasons,
         }
 

@@ -116,6 +116,7 @@ class RAGRetriever:
         *,
         minimum_evidence_count: int | None = None,
         section_score_adjuster: Callable[[str], float] | None = None,
+        chunk_score_adjuster: Callable[[EvidenceChunk], float] | None = None,
     ) -> list[dict[str, Any]]:
         """融合稀疏与向量得分，返回去冗余后的高相关证据。"""
         normalized_query = str(query).strip()
@@ -187,6 +188,8 @@ class RAGRetriever:
                 chunk.score = normalized_bm25[index]
             if section_score_adjuster is not None:
                 chunk.score += float(section_score_adjuster(chunk.section))
+            if chunk_score_adjuster is not None:
+                chunk.score += float(chunk_score_adjuster(chunk))
             if chunk.score > 0:
                 ranked.append(chunk)
         ranked.sort(key=lambda item: item.score, reverse=True)

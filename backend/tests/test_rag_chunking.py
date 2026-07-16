@@ -177,6 +177,33 @@ class RAGRetrieverChunkIntegrationTest(unittest.TestCase):
         self.assertEqual(len(selected), 2)
         self.assertEqual({item.record_id for item in selected}, {"paper-1"})
 
+    def test_chunk_score_adjuster_can_promote_structured_protocol_block(self) -> None:
+        """调用方应能基于正文结构重排，避免只依赖可能错挂的章节标题。"""
+        retriever = RAGRetriever(max_chunks=1, max_chunks_per_paper=1)
+        paper = {
+            "id": "paper-1",
+            "title": "Secure Training",
+            "splitChunks": [
+                {
+                    "content": "A secure protocol computes a private score.",
+                    "headings": [{"heading": "Protocol", "level": 2, "position": 1}],
+                },
+                {
+                    "content": "1: locally prepare inputs\n2: jointly compute scores\n3: open the result",
+                    "headings": [{"heading": "Unrelated Optimization", "level": 2, "position": 2}],
+                },
+            ],
+        }
+
+        evidence = retriever.retrieve(
+            "secure protocol",
+            [paper],
+            chunk_score_adjuster=lambda chunk: 2.0 if "1: locally" in chunk.text else 0.0,
+        )
+
+        self.assertEqual(len(evidence), 1)
+        self.assertIn("1: locally prepare inputs", evidence[0]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

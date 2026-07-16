@@ -15,6 +15,7 @@ if str(BACKEND_DIR) not in sys.path:
 from app.agents.evidence_evaluator import EvidenceEvaluator
 from app.agents.orchestrator_agent import OrchestratorAgent
 from app.agents.research_chat_agent import ResearchAgentConfig, ResearchChatAgent
+from app.services.rag_retriever import EvidenceChunk
 
 
 class QueryPlanningAndRetrievalTest(unittest.TestCase):
@@ -74,6 +75,47 @@ class QueryPlanningAndRetrievalTest(unittest.TestCase):
     def test_putting_everything_together_is_classified_as_overview(self) -> None:
         section_type = self.agent._classify_section_type("Paper Title > 4.6 Putting Everything Together")
         self.assertEqual(section_type, "overview")
+
+    def test_numbered_protocol_overrides_misleading_section_heading(self) -> None:
+        """PDF 标题错挂时，正文中的完整步骤仍应识别为算法证据并得到提升。"""
+        text = """Require: shares from both parties. Ensure: shared model.
+1: locally partition the input.
+2: jointly compute partition scores.
+3: open the split identifier.
+4: locally update sample indicators.
+5: jointly compute leaf weights.
+Figure 7: Private GBDT Training Framework.
+"""
+        chunk = EvidenceChunk(
+            record_id="paper-1",
+            title="Paper",
+            section="4.5.2 To Use a Smaller Lattice Dimension",
+            text=text,
+            score=0,
+        )
+
+        self.assertEqual(
+            self.agent._classify_evidence_type(chunk.section, chunk.text),
+            "algorithm",
+        )
+        self.assertGreater(
+            self.agent._content_intent_adjustment(
+                chunk,
+                question_type="mechanism",
+                preferred_types={"protocol", "algorithm"},
+            ),
+            0.5,
+        )
+
+    def test_workflow_query_expands_with_algorithm_contract_terms(self) -> None:
+        """完整流程检索应主动命中 Require/Ensure 和编号步骤块。"""
+        expanded = self.agent._expand_facet_query(
+            "完整训练流程",
+            question_type="mechanism",
+            preferred_types={"overview", "framework"},
+        )
+
+        self.assertIn("require ensure input output numbered steps", expanded)
 
     def test_mechanism_fusion_prefers_method_over_experiment(self) -> None:
         method = {
@@ -188,6 +230,71 @@ class QueryPlanningAndRetrievalTest(unittest.TestCase):
 
 
 class IterativeOrchestratorTest(unittest.IsolatedAsyncioTestCase):
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_semantic_support_overrides_only_lexical_coverage_warning(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """直接证据逐项验证通过后，中英文字面覆盖率不应继续一票否决。"""
+        build_model_payload.return_value = {"model": "test-model"}
+        completion.return_value = json.dumps(
+            {
+                "facets": [
+                    {
+                        "id": "workflow",
+                        "status": "supported",
+                        "supporting_refs": ["paper-1:3"],
+                    }
+                ],
+                "requirements": [
+                    {
+                        "id": "req-1",
+                        "status": "supported",
+                        "supporting_refs": ["paper-1:3"],
+                    }
+                ],
+                "optional_details": [],
+            },
+            ensure_ascii=False,
+        )
+        agent = OrchestratorAgent()
+        agent.run_logger = Mock()
+
+        evaluation = await agent._evaluate_retrieved_evidence(
+            {
+                "evidenceCount": 2,
+                "distinctPaperCount": 1,
+                "selectedPaperIds": ["paper-1"],
+                "queryCoverage": 0.1,
+                "facetCount": 1,
+                "facetCoverage": 1.0,
+                "methodEvidenceCount": 2,
+            },
+            evidence=[
+                {
+                    "record_id": "paper-1",
+                    "chunk_index": 3,
+                    "title": "Paper",
+                    "section": "Algorithm",
+                    "text": "完整训练步骤。",
+                }
+            ],
+            plan={
+                "standaloneQuestion": "完整协议是什么？",
+                "complexity": "complex",
+                "questionType": "mechanism",
+                "targetEvidenceCount": 2,
+                "retrievalFacets": [{"id": "workflow", "goal": "完整流程", "query": "workflow"}],
+                "coreRequirements": ["说明完整步骤"],
+            },
+            required_paper_ids=["paper-1"],
+        )
+
+        self.assertTrue(evaluation["sufficient"])
+        self.assertEqual(evaluation["reasons"], [])
+
     @patch("app.agents.orchestrator_agent.ResearchChatAgent")
     async def test_complex_pipeline_runs_one_refinement_round(self, research_agent_class: Mock) -> None:
         research_agent = research_agent_class.return_value

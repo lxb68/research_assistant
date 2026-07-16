@@ -13,7 +13,7 @@ from app.core.config import settings
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
 from app.services.model_client import chat_completion
 from app.services.embedding_store import EmbeddingClient, SQLiteVectorStore
-from app.services.rag_retriever import RAGRetriever
+from app.services.rag_retriever import EvidenceChunk, RAGRetriever
 
 
 LogCallback = Callable[[str], None]
@@ -282,6 +282,11 @@ class ResearchChatAgent:
                     section_type=self._classify_section_type(section),
                     preferred_types=preferred,
                 ),
+                chunk_score_adjuster=lambda chunk, preferred=preferred_types: self._content_intent_adjustment(
+                    chunk,
+                    question_type=question_type,
+                    preferred_types=preferred,
+                ),
             )
             run_diagnostics = dict(self.retriever.last_diagnostics)
             run_diagnostics.update({"facetId": facet_id, "query": facet_query, "expandedQuery": expanded_facet_query})
@@ -289,7 +294,10 @@ class ResearchChatAgent:
             for rank, raw_item in enumerate(results[:per_facet_limit], start=1):
                 item = dict(raw_item)
                 key = (str(item.get("record_id") or ""), int(item.get("chunk_index") or 0))
-                section_type = self._classify_section_type(str(item.get("section") or ""))
+                section_type = self._classify_evidence_type(
+                    str(item.get("section") or ""),
+                    str(item.get("text") or ""),
+                )
                 section_adjustment = self._section_intent_adjustment(
                     question_type=question_type,
                     section_type=section_type,
@@ -313,7 +321,13 @@ class ResearchChatAgent:
             item = dict(raw_item)
             key = (str(item.get("record_id") or ""), int(item.get("chunk_index") or 0))
             item.setdefault("matched_facet_ids", [])
-            item.setdefault("section_type", self._classify_section_type(str(item.get("section") or "")))
+            item.setdefault(
+                "section_type",
+                self._classify_evidence_type(
+                    str(item.get("section") or ""),
+                    str(item.get("text") or ""),
+                ),
+            )
             item.setdefault("fusion_score", float(item.get("score") or 0) + 0.05)
             if key not in merged:
                 merged[key] = item
@@ -405,7 +419,10 @@ class ResearchChatAgent:
         additions: list[str] = []
         if question_type == "mechanism":
             if preferred_types & {"overview", "framework", "background"}:
-                additions.append("complete workflow end-to-end putting everything together full framework")
+                additions.append(
+                    "complete workflow end-to-end putting everything together full framework "
+                    "require ensure input output numbered steps"
+                )
             if preferred_types & {"method", "protocol", "algorithm", "implementation"}:
                 additions.append("method protocol algorithm implementation detailed steps")
         elif question_type == "evaluation":
@@ -437,6 +454,53 @@ class ResearchChatAgent:
             if any(keyword in lowered for keyword in keywords):
                 return section_type
         return "background"
+
+    @classmethod
+    def _classify_evidence_type(cls, section: str, text: str) -> str:
+        """结合标题和正文识别算法块，容忍 PDF 解析造成的标题错挂。"""
+        if cls._looks_like_algorithm_block(text):
+            return "algorithm"
+        return cls._classify_section_type(section)
+
+    @staticmethod
+    def _looks_like_algorithm_block(text: str) -> bool:
+        """识别带输入输出、编号步骤或算法图标题的结构化协议正文。"""
+        normalized = str(text or "")
+        numbered_steps = len(re.findall(r"(?m)^\s*\d{1,3}:\s+", normalized))
+        has_contract = bool(re.search(r"(?i)\brequire\s*:|\bensure\s*:", normalized))
+        has_algorithm_caption = bool(
+            re.search(r"(?i)figure\s+\d+\s*:.*(?:algorithm|protocol|framework|training)", normalized)
+        )
+        has_step_operations = bool(
+            re.search(
+                r"(?i)\b(?:jointly compute|locally update|open the|for internal nodes|for leaf nodes|end for)\b",
+                normalized,
+            )
+        )
+        return numbered_steps >= 3 and (has_contract or has_algorithm_caption or has_step_operations)
+
+    @classmethod
+    def _content_intent_adjustment(
+        cls,
+        chunk: EvidenceChunk,
+        *,
+        question_type: str,
+        preferred_types: set[str],
+    ) -> float:
+        """按正文结构提升完整算法/协议块，不依赖论文名或固定章节号。"""
+        if question_type != "mechanism" or not cls._looks_like_algorithm_block(chunk.text):
+            return 0.0
+        numbered_steps = len(re.findall(r"(?m)^\s*\d{1,3}:\s+", chunk.text))
+        adjustment = 0.45
+        if numbered_steps >= 8:
+            adjustment += 0.15
+        if re.search(r"(?i)\brequire\s*:.*\bensure\s*:", chunk.text, flags=re.DOTALL):
+            adjustment += 0.12
+        if re.search(r"(?i)figure\s+\d+\s*:.*(?:protocol|framework|training)", chunk.text):
+            adjustment += 0.12
+        if preferred_types & {"overview", "framework", "method", "protocol", "algorithm", "implementation"}:
+            adjustment += 0.08
+        return adjustment
 
     @staticmethod
     def _section_intent_adjustment(
