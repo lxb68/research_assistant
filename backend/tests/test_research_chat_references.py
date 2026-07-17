@@ -24,6 +24,11 @@ class ResearchChatReferenceTest(unittest.TestCase):
         self.agent.log_callback = None
         self.agent.hunter = Mock()
         self.agent.retriever = Mock()
+        self.agent.graph_retriever = Mock()
+        self.agent.graph_retriever.retrieve.return_value = ([], {"enabled": False, "attempted": False})
+        self.agent.graph_retriever.merge_evidence.side_effect = (
+            lambda text_evidence, graph_evidence, limit: [*text_evidence, *graph_evidence][:limit]
+        )
 
     @patch("app.agents.research_chat_agent.chat_completion")
     @patch("app.agents.research_chat_agent.ModelConfigStore.build_model_payload")
@@ -69,6 +74,10 @@ class ResearchChatReferenceTest(unittest.TestCase):
         self.assertEqual(plan["targetChunks"], [{"record_id": "paper-3", "chunk_index": 7}])
         planner_payload = json.loads(completion.call_args.args[1][1]["content"])
         self.assertEqual(planner_payload["candidate_sources"][0]["record_id"], "paper-3")
+        self.assertNotIn("history", planner_payload)
+        self.assertEqual(planner_payload["historical_user_intents"][0]["content"], "Squirrel 的实验结果是什么？")
+        self.assertEqual(planner_payload["prior_answers"][0]["trust"], "unverified_prior_answer")
+        self.assertFalse(planner_payload["prior_answers"][0]["allowed_as_evidence"])
 
     @patch("app.agents.research_chat_agent.chat_completion")
     @patch("app.agents.research_chat_agent.ModelConfigStore.build_model_payload")

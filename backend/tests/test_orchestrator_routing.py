@@ -235,12 +235,47 @@ class OrchestratorRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completion.call_count, 2)
         self.assertEqual(completion.call_args_list[0].kwargs["response_format"], {"type": "json_object"})
         self.assertEqual(completion.call_args_list[1].kwargs["response_format"], {"type": "json_object"})
+        router_messages = completion.call_args_list[0].args[1]
+        self.assertFalse(any(message["role"] == "assistant" for message in router_messages))
+        self.assertEqual(router_messages[-2]["role"], "user")
+        self.assertIn("unverified_prior_answer", router_messages[-2]["content"])
+        self.assertIn('"priorAnswersAreEvidence": false', router_messages[-2]["content"])
         repair_payload = completion.call_args_list[1].args[1][1]["content"]
         self.assertIn("两者分别是什么技术路线", repair_payload)
+        self.assertIn("unverified_prior_answer", repair_payload)
         events = [call.kwargs.get("event") for call in agent.run_logger.log.call_args_list]
         self.assertIn("intent_routing_parse_error", events)
         self.assertIn("intent_routing_repair_raw_response", events)
         self.assertIn("intent_routing", events)
+
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_direct_answer_receives_prior_answer_as_unverified_structured_context(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """普通直答可读取待变换文本，但不能把旧回答回放成可信 assistant 消息。"""
+        build_model_payload.return_value = self.model
+        completion.return_value = "Translated answer"
+
+        answer = await OrchestratorAgent()._answer_direct(
+            "把刚才的回答翻译成英文",
+            {
+                "history": [
+                    {"role": "user", "content": "请解释这个概念"},
+                    {"role": "assistant", "content": "未经核验的旧回答"},
+                ]
+            },
+        )
+
+        self.assertEqual(answer, "Translated answer")
+        messages = completion.call_args.args[1]
+        self.assertFalse(any(message["role"] == "assistant" for message in messages))
+        self.assertEqual(messages[-2]["role"], "user")
+        self.assertIn("未经核验的旧回答", messages[-2]["content"])
+        self.assertIn('"usageMode": "transform"', messages[-2]["content"])
+        self.assertIn('"priorAnswersAreEvidence": false', messages[-2]["content"])
 
     @patch("app.agents.orchestrator_agent.chat_completion")
     @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")

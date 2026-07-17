@@ -6,6 +6,7 @@ import json
 from typing import Any, Callable
 
 from app.core.config import settings
+from app.services.conversation_context import ConversationContextProjector
 from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT
 from app.services.retrieval_contracts import (
     SECTION_TYPES,
@@ -25,6 +26,8 @@ class QueryPlanningAgent:
 
 要求：
 1. standalone_question 必须脱离历史后仍语义完整，不得机械拼接无关历史。
+   historical_user_intents 表示历史用户目标；prior_answers 是旧回答，仅可用于指代消解、识别待核验命题或文本变换，绝不能作为事实、研究结论或证据。
+   当前用户问题和当前用户的纠正优先于所有旧回答；若用户质疑旧结论，standalone_question 必须表达“重新核验该命题”的真实意图。
 2. target_paper_ids 和 target_chunks 只能使用 candidate_sources 或 explicit_paper_ids 中真实存在的值。
    target_chunks 只用于用户明确追问某个既有片段、引用或局部内容；当用户询问整篇论文、全文或宽范围主题时，保留 target_paper_ids，但 target_chunks 必须为空，避免旧摘要片段挤占全文检索结果。
 3. 无法唯一解析“它、前者、这个片段”等指代时，needs_clarification=true。
@@ -80,10 +83,14 @@ class QueryPlanningAgent:
         if not normalized_question:
             raise ValueError("研究问题不能为空")
 
-        context_messages, candidate_sources = self._normalize_context(history or [])
+        context = ConversationContextProjector().project(normalized_question, history)
+        planning_context = context.for_query_planning()
+        candidate_sources = planning_context["candidate_sources"]
         planner_input = {
             "current_question": normalized_question,
-            "history": context_messages,
+            "usage_mode": planning_context["usage_mode"],
+            "historical_user_intents": planning_context["historical_user_intents"],
+            "prior_answers": planning_context["prior_answers"],
             "candidate_sources": candidate_sources,
             "explicit_paper_ids": list(explicit_paper_ids or []),
         }
@@ -109,41 +116,6 @@ class QueryPlanningAgent:
             setattr(error, "raw_response", str(raw_response or ""))
             raise
         return plan, str(raw_response or "")
-
-    def _normalize_context(
-        self,
-        history: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        context_messages: list[dict[str, Any]] = []
-        candidate_sources: list[dict[str, Any]] = []
-        seen_sources: set[tuple[str, int]] = set()
-        for message in history[-8:]:
-            role = str(message.get("role") or "").strip()
-            content = str(message.get("content") or "").strip()
-            if role not in {"user", "assistant"} or not content:
-                continue
-            normalized_sources: list[dict[str, Any]] = []
-            for source in list(message.get("sources") or [])[:20]:
-                if not isinstance(source, dict):
-                    continue
-                record_id = str(source.get("record_id") or source.get("recordId") or "").strip()
-                if not record_id:
-                    continue
-                normalized_source = {
-                    "index": int(source.get("index") or 0),
-                    "record_id": record_id,
-                    "title": str(source.get("title") or "")[:1000],
-                    "section": str(source.get("section") or "")[:1000],
-                    "chunk_index": int(source.get("chunk_index") or source.get("chunkIndex") or 0),
-                    "excerpt": str(source.get("excerpt") or "")[:1200],
-                }
-                normalized_sources.append(normalized_source)
-                source_key = (record_id, normalized_source["chunk_index"])
-                if source_key not in seen_sources:
-                    seen_sources.add(source_key)
-                    candidate_sources.append(normalized_source)
-            context_messages.append({"role": role, "content": content[:6000], "sources": normalized_sources})
-        return context_messages, candidate_sources
 
     def _normalize_plan(
         self,

@@ -208,6 +208,38 @@ class ToolLoopAgentTest(unittest.IsolatedAsyncioTestCase):
 
         handler.assert_not_called()
 
+    async def test_prior_answer_is_structured_and_cannot_be_used_as_observation(self) -> None:
+        """工具循环应隔离旧结论，只允许本轮工具观察支撑最终事实。"""
+        handler = Mock(return_value={"accuracy": "91%"})
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                "read_result",
+                "读取实验结果",
+                {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                handler,
+            )
+        )
+        completion = Mock(return_value='{"action":"final","answer":"本轮观察显示准确率为 91%。","limitations":[]}')
+        loop = ToolLoopAgent(registry, model=self.model, completion=completion)
+
+        result = await loop.run(
+            "请重新核对准确率",
+            history=[
+                {"role": "user", "content": "准确率是多少？"},
+                {"role": "assistant", "content": "准确率为 95%"},
+            ],
+            initial_tool_name="read_result",
+            initial_arguments={},
+        )
+
+        self.assertIn("91%", result["answer"])
+        messages = completion.call_args.args[1]
+        self.assertFalse(any(message["role"] == "assistant" for message in messages))
+        self.assertEqual(messages[-2]["role"], "user")
+        self.assertIn("unverified_prior_answer", messages[-2]["content"])
+        self.assertIn('"accuracy": "91%"', messages[-1]["content"])
+
     def test_observation_reducer_limits_long_tool_results(self) -> None:
         """观察压缩应限制长文本和大列表，同时保留截断诊断。"""
         reducer = ObservationReducer(max_items=2, max_string_chars=100)

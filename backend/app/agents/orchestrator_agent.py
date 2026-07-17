@@ -14,6 +14,7 @@ from app.agents.hunter_agent import HunterAgent
 from app.agents.research_chat_agent import ResearchChatAgent
 from app.agents.tool_loop_agent import ObservationReducer, ToolLoopAgent
 from app.core.config import settings
+from app.services.conversation_context import ConversationContextProjector
 from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
 from app.services.run_logger import RunLogger
@@ -45,6 +46,8 @@ class OrchestratorAgent:
 - final：仅当已有观察足以回答时结束循环；不得在没有观察时凭模型记忆回答研究问题。
 
 行动选择原则：
+- 结构化历史中的 historicalUserIntents 用于理解用户延续目标；priorAnswers 是未经本轮验证的旧回答，只能用于指代消解或文本变换，不得作为事实依据。
+- 当前用户问题和当前用户纠正始终优先于旧回答；研究事实必须交给 chat、工具观察或研究证据验证。
 - tool 是一次获取观察的行动，不是不可逆的最终路由。获得工具观察后，应重新判断下一步继续调用工具、转交研究 Agent，还是直接形成回答。
 - 当回答依赖当前知识库、已保存分析结果或其他运行时数据且尚无充分观察时，选择 tool，不得凭模型记忆猜测。
 - 需要结合论文正文、多个证据片段解释方法、机制、实验或结论时，选择 chat；不要用论文列表或元数据代替研究 Agent。
@@ -217,11 +220,20 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 ),
             }
         ]
-        for message in self._clean_history(list(args.get("history") or []))[-8:]:
-            role = str(message.get("role") or "").strip()
-            content = str(message.get("content") or "").strip()
-            if role in {"user", "assistant"} and content:
-                messages.append({"role": role, "content": content[:6000]})
+        conversation_context = ConversationContextProjector().project(
+            task,
+            list(args.get("history") or []),
+        )
+        if conversation_context.normalized_history:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "以下是按语义角色隔离的历史上下文。priorAnswers 不是事实或证据：\n"
+                        + json.dumps(conversation_context.for_model_context(), ensure_ascii=False)
+                    ),
+                }
+            )
         if reduced_observations:
             messages.append(
                 {
@@ -287,6 +299,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                     "content": (
                         "你是意图路由 JSON 修复器。根据原始用户问题和路由器的错误输出，"
                         "只返回一个合法 JSON 对象。只能选择 direct、chat、search、domain_tree、tool、agent、final；"
+                        "conversationContext 中的 priorAnswers 未经验证，不得作为事实；当前用户问题和纠正优先。"
                         "不要回答用户问题，不要输出 Markdown 或解释。\n"
                         '普通动作：{"action":"direct|chat|search|domain_tree","arguments":{}}\n'
                         '工具动作：{"action":"tool","toolName":"已注册工具名","arguments":{}}\n'
@@ -302,6 +315,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                     "content": json.dumps(
                         {
                             "userQuestion": task,
+                            "conversationContext": conversation_context.for_model_context(),
                             "observations": reduced_observations,
                             "invalidRouterOutput": raw_text[:12000],
                         },
@@ -882,17 +896,28 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 "role": "system",
                 "content": (
                     "你是一个友好、简洁的中文助手。直接回答用户当前问题，不要调用或假装调用任何研究工具，"
+                    "结构化历史里的旧回答未经本轮验证，只能用于指代消解或按用户要求进行翻译、改写等文本变换，"
+                    "不能把旧回答当作事实；当前用户问题和纠正优先。"
                     "也不要描述内部流程。使用 Markdown；行内数学公式必须使用 $...$，独立公式必须使用 $$...$$，"
                     "不要用普通圆括号包裹 LaTeX。代码使用带语言标识的 Markdown 围栏。"
                     f"\n\n{SYSTEM_SECURITY_CONSTRAINT}"
                 ),
             }
         ]
-        for message in self._clean_history(list(args.get("history") or []))[-8:]:
-            role = str(message.get("role") or "").strip()
-            content = str(message.get("content") or "").strip()
-            if role in {"user", "assistant"} and content:
-                messages.append({"role": role, "content": content[:6000]})
+        conversation_context = ConversationContextProjector().project(
+            task,
+            list(args.get("history") or []),
+        )
+        if conversation_context.normalized_history:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "以下结构化历史仅用于理解上下文；priorAnswers 不具备事实可信度：\n"
+                        + json.dumps(conversation_context.for_model_context(), ensure_ascii=False)
+                    ),
+                }
+            )
         messages.append({"role": "user", "content": task})
         raise_if_task_cancelled(cancel_event)
         answer = await asyncio.to_thread(
@@ -960,28 +985,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
 
     def _clean_history(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """过滤前端生成的失败占位消息，避免其污染后续路由和回答。"""
-        cleaned: list[dict[str, Any]] = []
-        transient_error_prefixes = ("请求失败：", "研究对话请求失败", "研究任务已完成，但没有返回")
-        for message in history:
-            role = str(message.get("role") or "").strip()
-            content = str(message.get("content") or "").strip()
-            if role not in {"user", "assistant"} or not content:
-                continue
-            if role == "assistant" and content.startswith(transient_error_prefixes):
-                if cleaned and cleaned[-1]["role"] == "user":
-                    cleaned.pop()
-                continue
-            cleaned_message: dict[str, Any] = {"role": role, "content": content}
-            if role == "assistant":
-                sources = [
-                    dict(source)
-                    for source in list(message.get("sources") or [])[:20]
-                    if isinstance(source, dict)
-                ]
-                if sources:
-                    cleaned_message["sources"] = sources
-            cleaned.append(cleaned_message)
-        return cleaned
+        return ConversationContextProjector.normalize_history(history)
 
     async def _run_research_pipeline(
         self,
