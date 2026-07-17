@@ -15,6 +15,7 @@ from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAI
 from app.services.model_client import chat_completion
 from app.services.rag_factory import build_default_rag_retriever
 from app.services.rag_retriever import EvidenceChunk, RAGRetriever
+from app.services.retrieval_contracts import compile_tfidf_query, normalize_section_types
 
 
 LogCallback = Callable[[str], None]
@@ -268,13 +269,12 @@ class ResearchChatAgent:
             facet_query = str(facet.get("query") or "").strip()
             if not facet_query:
                 continue
-            preferred_types = {
-                str(value).strip().lower()
-                for value in facet.get("preferredSectionTypes") or facet.get("preferred_section_types") or []
-                if str(value).strip()
-            }
+            preferred_types = set(normalize_section_types(
+                facet.get("preferredSectionTypes") or facet.get("preferred_section_types") or []
+            ))
+            compiled_query = compile_tfidf_query(facet) or facet_query
             expanded_facet_query = self._expand_facet_query(
-                facet_query,
+                compiled_query,
                 question_type=question_type,
                 preferred_types=preferred_types,
             )
@@ -294,7 +294,14 @@ class ResearchChatAgent:
                 ),
             )
             run_diagnostics = dict(self.retriever.last_diagnostics)
-            run_diagnostics.update({"facetId": facet_id, "query": facet_query, "expandedQuery": expanded_facet_query})
+            run_diagnostics.update(
+                {
+                    "facetId": facet_id,
+                    "sourceQuery": facet_query,
+                    "compiledQuery": compiled_query,
+                    "expandedQuery": expanded_facet_query,
+                }
+            )
             retrieval_runs.append(run_diagnostics)
             for rank, raw_item in enumerate(results[:per_facet_limit], start=1):
                 item = dict(raw_item)
@@ -412,6 +419,8 @@ class ResearchChatAgent:
             "topScore": round(max((float(item.get("score") or 0) for item in selected), default=0), 4),
             "facetCount": len(requested_facet_ids),
             "coveredFacetCount": len(requested_facet_ids & selected_facet_ids),
+            # 这里只表示每条检索支路是否返回候选，不代表候选在语义上支持该 facet。
+            "retrievalFacetCoverage": round(len(requested_facet_ids & selected_facet_ids) / max(1, len(requested_facet_ids)), 4),
             "facetCoverage": round(len(requested_facet_ids & selected_facet_ids) / max(1, len(requested_facet_ids)), 4),
             "coveredFacetIds": sorted(requested_facet_ids & selected_facet_ids),
             "missingFacetIds": sorted(requested_facet_ids - selected_facet_ids),
@@ -454,6 +463,9 @@ class ResearchChatAgent:
         relevant_path = " > ".join(parts[1:]) if len(parts) > 1 else section_path
         lowered = relevant_path.casefold()
         patterns = (
+            ("contribution", ("contribution", "novelty", "创新", "贡献")),
+            ("abstract", ("abstract", "摘要")),
+            ("conclusion", ("conclusion", "concluding", "结论")),
             ("experiment", ("experiment", "evaluation", "effectiveness", "benchmark", "实验", "评估")),
             ("result", ("result", "finding", "结果")),
             ("comparison", ("comparison", "compare", "related work", "比较", "相关工作")),
@@ -464,7 +476,8 @@ class ResearchChatAgent:
             ("overview", ("overview", "putting everything together", "complete workflow", "end-to-end", "概述", "完整流程", "整体流程")),
             ("method", ("method", "approach", "training", "optimization", "方法", "训练", "优化")),
             ("discussion", ("discussion", "limitation", "讨论", "局限")),
-            ("background", ("background", "preliminar", "introduction", "背景", "预备", "引言")),
+            ("introduction", ("introduction", "引言")),
+            ("background", ("background", "preliminar", "背景", "预备")),
         )
         for section_type, keywords in patterns:
             if any(keyword in lowered for keyword in keywords):
@@ -594,7 +607,9 @@ class ResearchChatAgent:
             "evidenceCount": int(retrieval_state.get("evidenceCount") or len(evidence)),
             "candidateCount": int(retrieval_state.get("candidateCount") or 0),
             "missingFacetIds": list(retrieval_state.get("missingFacetIds") or [])[:12],
+            "missingRequirementIds": list(retrieval_state.get("missingRequirementIds") or [])[:12],
             "sectionMetadataDegraded": bool(retrieval_state.get("sectionMetadataDegraded")),
+            "requirementClaims": list(retrieval_state.get("requirementClaims") or [])[:12],
         }
         system_prompt = (
             f"{system_prompt}\n\n# 当前检索状态\n"
@@ -643,6 +658,10 @@ class ResearchChatAgent:
             pattern.search(answer) for pattern in self._FULL_TEXT_CONFLICT_PATTERNS
         ):
             reasons.append("回答声称全文不可用，但检索状态显示全文已经解析")
+        for citation_group in retrieval_state.get("requiredCitationGroups") or []:
+            valid_group = {int(value) for value in citation_group if str(value).isdigit()}
+            if valid_group and not (valid_group & cited_indices):
+                reasons.append(f"回答未引用核心要求对应的直接证据 {sorted(valid_group)}")
         return reasons
 
     def _load_prompt(self) -> str:

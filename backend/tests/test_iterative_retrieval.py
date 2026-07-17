@@ -14,8 +14,10 @@ if str(BACKEND_DIR) not in sys.path:
 
 from app.agents.evidence_evaluator import EvidenceEvaluator
 from app.agents.orchestrator_agent import OrchestratorAgent
+from app.agents.query_planning_agent import QueryPlanningAgent
 from app.agents.research_chat_agent import ResearchAgentConfig, ResearchChatAgent
 from app.services.rag_retriever import EvidenceChunk
+from app.services.retrieval_contracts import compile_tfidf_query
 
 
 class QueryPlanningAndRetrievalTest(unittest.TestCase):
@@ -71,6 +73,59 @@ class QueryPlanningAndRetrievalTest(unittest.TestCase):
         self.assertGreater(plan["targetEvidenceCount"], 2)
         self.assertEqual(plan["coreRequirements"], ["整体流程", "关键协议"])
         self.assertEqual(plan["optionalDetails"], ["精确通信轮次"])
+
+    def test_synthesis_plan_repairs_complexity_and_preserves_contribution_sections(self) -> None:
+        """综合任务不能因模型错误标成 simple 而跳过需求级校验。"""
+        planner = QueryPlanningAgent(completion=Mock(), model={"model": "test"}, timeout=30)
+        plan = planner._normalize_plan(
+            {
+                "standalone_question": "论文的创新点有哪些？",
+                "question_type": "synthesis",
+                "complexity": "simple",
+                "target_paper_ids": ["paper-1"],
+                "retrieval_facets": [
+                    {
+                        "id": "contributions",
+                        "goal": "归纳论文贡献",
+                        "query": "innovation OR contribution OR novelty",
+                        "preferred_section_types": ["abstract", "contribution", "conclusion"],
+                    }
+                ],
+                "core_requirements": [
+                    {
+                        "id": "req-contribution",
+                        "description": "列出论文直接声明的独创方法或架构",
+                        "evidence_intent": "synthesis",
+                        "preferred_section_types": ["contribution", "introduction"],
+                    }
+                ],
+            },
+            normalized_question="创新点有哪些？",
+            candidate_sources=[{"record_id": "paper-1", "chunk_index": 0}],
+            explicit_paper_ids=[],
+        )
+
+        self.assertEqual(plan["complexity"], "complex")
+        self.assertTrue(plan["requiresIterativeRetrieval"])
+        self.assertEqual(
+            plan["retrievalFacets"][0]["preferredSectionTypes"],
+            ["abstract", "contribution", "conclusion"],
+        )
+        self.assertEqual(plan["requirementSpecs"][0]["id"], "req-contribution")
+
+    def test_tfidf_query_compiler_removes_boolean_syntax(self) -> None:
+        compiled = compile_tfidf_query(
+            {
+                "query": "innovation OR contribution OR novelty",
+                "goal": "paper contribution",
+                "concepts": ["new framework"],
+            }
+        )
+
+        self.assertNotRegex(compiled, r"\b(?:AND|OR|NOT)\b")
+        self.assertIn("innovation", compiled)
+        self.assertIn("contribution", compiled)
+        self.assertIn("framework", compiled)
 
     def test_putting_everything_together_is_classified_as_overview(self) -> None:
         section_type = self.agent._classify_section_type("Paper Title > 4.6 Putting Everything Together")
@@ -230,6 +285,66 @@ Figure 7: Private GBDT Training Framework.
 
 
 class IterativeOrchestratorTest(unittest.IsolatedAsyncioTestCase):
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_simple_labeled_synthesis_still_runs_semantic_validation(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        build_model_payload.return_value = {"model": "test-model"}
+        completion.return_value = json.dumps(
+            {
+                "facets": [{"id": "contribution", "status": "partial", "supporting_refs": ["paper-1:1"]}],
+                "requirements": [
+                    {
+                        "id": "req-1",
+                        "status": "partial",
+                        "supporting_refs": ["paper-1:1"],
+                        "missing_detail": "只有背景介绍，没有直接贡献声明",
+                        "refinement_query": "our contribution proposed framework",
+                    }
+                ],
+                "optional_details": [],
+            },
+            ensure_ascii=False,
+        )
+        agent = OrchestratorAgent()
+        agent.run_logger = Mock()
+
+        evaluation = await agent._evaluate_retrieved_evidence(
+            {
+                "evidenceCount": 2,
+                "distinctPaperCount": 1,
+                "selectedPaperIds": ["paper-1"],
+                "queryCoverage": 0.9,
+                "facetCount": 1,
+                "retrievalFacetCoverage": 1.0,
+                "methodEvidenceCount": 0,
+            },
+            evidence=[
+                {
+                    "record_id": "paper-1",
+                    "chunk_index": 1,
+                    "title": "Paper",
+                    "section": "Preliminaries",
+                    "text": "Background techniques are introduced.",
+                }
+            ],
+            plan={
+                "standaloneQuestion": "论文创新点有哪些？",
+                "complexity": "simple",
+                "questionType": "synthesis",
+                "retrievalFacets": [{"id": "contribution", "goal": "论文贡献", "query": "contribution"}],
+                "coreRequirements": ["论文直接声明的贡献"],
+            },
+            required_paper_ids=["paper-1"],
+        )
+
+        self.assertFalse(evaluation["sufficient"])
+        self.assertTrue(evaluation["semanticValidated"])
+        self.assertTrue(evaluation["refinementFacets"])
+
     @patch("app.agents.orchestrator_agent.chat_completion")
     @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
     async def test_semantic_support_overrides_only_lexical_coverage_warning(

@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from app.core.config import settings
 from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT
+from app.services.retrieval_contracts import normalize_requirement
 
 
 class EvidenceEvaluator:
@@ -75,11 +76,14 @@ class EvidenceEvaluator:
         complexity = str(normalized_plan.get("complexity") or "simple")
         question_type = str(normalized_plan.get("questionType") or "simple_fact")
         facet_count = int(diagnostics.get("facetCount") or 0)
-        facet_coverage = float(diagnostics.get("facetCoverage") or (1.0 if facet_count == 0 else 0.0))
+        retrieval_facet_coverage = float(
+            diagnostics.get("retrievalFacetCoverage")
+            or diagnostics.get("facetCoverage")
+            or (1.0 if facet_count == 0 else 0.0)
+        )
         method_evidence_count = int(diagnostics.get("methodEvidenceCount") or 0)
-        if complexity == "complex" and facet_count and facet_coverage < settings.orchestrator_min_facet_coverage:
-            reasons.append(f"检索子问题覆盖率仅 {facet_coverage:.0%}")
-        if complexity == "complex" and question_type == "mechanism":
+        # retrievalFacetCoverage 只描述检索支路是否返回候选，不能替代语义支持度。
+        if complexity == "complex" and question_type == "mechanism" and not normalized_plan.get("requirementSpecs"):
             minimum_method_evidence = min(
                 settings.orchestrator_min_method_evidence,
                 max(1, int(normalized_plan.get("targetEvidenceCount") or settings.orchestrator_min_method_evidence)),
@@ -91,7 +95,8 @@ class EvidenceEvaluator:
             "sufficient": not reasons,
             "reasons": reasons,
             "missingFacetIds": list(diagnostics.get("missingFacetIds") or []),
-            "facetCoverage": facet_coverage,
+            "facetCoverage": retrieval_facet_coverage,
+            "retrievalFacetCoverage": retrieval_facet_coverage,
             "methodEvidenceCount": method_evidence_count,
         }
 
@@ -129,10 +134,18 @@ class EvidenceEvaluator:
             for item in plan.get("retrievalFacets") or []
             if isinstance(item, dict) and str(item.get("id") or "")
         ]
+        raw_requirements = plan.get("requirementSpecs") or plan.get("coreRequirements") or plan.get("answerRequirements") or []
         core_requirements = [
-            {"id": f"req-{index}", "requirement": str(value)[:800]}
-            for index, value in enumerate(plan.get("coreRequirements") or plan.get("answerRequirements") or [], start=1)
-            if str(value).strip()
+            normalized
+            for index, value in enumerate(raw_requirements, start=1)
+            if (
+                normalized := normalize_requirement(
+                    value,
+                    index,
+                    question_type=str(plan.get("questionType") or "simple_fact"),
+                )
+            ) is not None
+            and normalized.get("required")
         ]
         optional_details = [
             {"id": f"optional-{index}", "detail": str(value)[:800]}
@@ -149,7 +162,16 @@ class EvidenceEvaluator:
                         {
                             "question": str(plan.get("standaloneQuestion") or ""),
                             "facets": facets,
-                            "core_requirements": core_requirements,
+                            "core_requirements": [
+                                {
+                                    "id": item["id"],
+                                    "requirement": item["description"],
+                                    "evidence_intent": item["evidenceIntent"],
+                                    "preferred_section_types": item["preferredSectionTypes"],
+                                    "minimum_direct_evidence": item["minimumDirectEvidence"],
+                                }
+                                for item in core_requirements
+                            ],
                             "optional_details": optional_details,
                             "evidence": evidence_payload,
                         },
@@ -176,6 +198,15 @@ class EvidenceEvaluator:
             allowed_ids={item["id"] for item in core_requirements},
             known_refs=known_refs,
         )
+        requirement_specs = {item["id"]: item for item in core_requirements}
+        for assessment in requirement_assessments:
+            minimum_refs = int(requirement_specs[assessment["id"]]["minimumDirectEvidence"])
+            if assessment["status"] == "supported" and len(assessment["supportingRefs"]) < minimum_refs:
+                assessment["status"] = "partial"
+                assessment["missingDetail"] = (
+                    assessment.get("missingDetail")
+                    or f"直接支持证据少于要求的 {minimum_refs} 条"
+                )
         optional_assessments = self._normalize_assessments(
             payload.get("optional_details"),
             allowed_ids={item["id"] for item in optional_details},
@@ -192,7 +223,7 @@ class EvidenceEvaluator:
         for item in core_requirements:
             requirement_status.setdefault(
                 item["id"],
-                {"id": item["id"], "status": "unsupported", "supportingRefs": [], "missingDetail": "验证器未找到直接支持证据", "refinementQuery": item["requirement"]},
+                {"id": item["id"], "status": "unsupported", "supportingRefs": [], "missingDetail": "验证器未找到直接支持证据", "refinementQuery": item["description"]},
             )
         facet_assessments = list(facet_status.values())
         requirement_assessments = list(requirement_status.values())
@@ -217,20 +248,22 @@ class EvidenceEvaluator:
                     "preferredSectionTypes": list(original.get("preferredSectionTypes") or []),
                 }
             )
-        original_requirements = {item["id"]: item["requirement"] for item in core_requirements}
+        original_requirements = {item["id"]: item for item in core_requirements}
         for assessment in requirement_assessments:
             if assessment["status"] == "supported":
                 continue
-            requirement = original_requirements.get(assessment["id"], "")
-            query = str(assessment.get("refinementQuery") or requirement).strip()
+            requirement = original_requirements.get(assessment["id"], {})
+            description = str(requirement.get("description") or "")
+            query = str(assessment.get("refinementQuery") or description).strip()
             if not query:
                 continue
             refinement_facets.append(
                 {
                     "id": f"requirement-{assessment['id']}",
-                    "goal": requirement or assessment.get("missingDetail") or query,
+                    "goal": description or assessment.get("missingDetail") or query,
                     "query": query,
-                    "preferredSectionTypes": ["method", "framework", "protocol", "algorithm", "implementation", "overview"],
+                    "evidenceIntent": str(requirement.get("evidenceIntent") or "fact"),
+                    "preferredSectionTypes": list(requirement.get("preferredSectionTypes") or []),
                 }
             )
         return (
@@ -244,6 +277,11 @@ class EvidenceEvaluator:
                 "missingRequirementIds": [
                     item["id"] for item in requirement_assessments if item["status"] != "supported"
                 ],
+                "facetCoverage": round(
+                    sum(item["status"] == "supported" for item in facet_assessments)
+                    / max(1, len(facet_assessments)),
+                    4,
+                ),
                 "refinementFacets": refinement_facets,
             },
             str(raw_response or ""),

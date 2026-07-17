@@ -7,6 +7,12 @@ from typing import Any, Callable
 
 from app.core.config import settings
 from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT
+from app.services.retrieval_contracts import (
+    SECTION_TYPES,
+    normalize_execution_complexity,
+    normalize_requirement,
+    normalize_section_types,
+)
 
 
 CompletionCallable = Callable[..., str]
@@ -25,9 +31,9 @@ class QueryPlanningAgent:
 4. question_type 从 simple_fact、mechanism、comparison、evaluation、synthesis 中选择。
 5. complexity 从 simple、complex 中选择。单一事实查询通常为 simple；机制、比较、综合、多维分析通常为 complex。
 6. complex 问题应动态拆成 2 至 5 个互补 retrieval_facets。每个 facet 描述一个回答所需的信息缺口，不能针对某篇固定论文套用预设关键词。
-7. preferred_section_types 使用通用语义类型，例如 method、framework、protocol、algorithm、experiment、result、background、comparison。
+7. preferred_section_types 使用通用语义类型，例如 abstract、introduction、contribution、method、framework、experiment、result、conclusion。
 8. 必须保持用户原问题的粒度，不得把“介绍、怎么做、主要流程”等概述问题擅自扩大成完整协议复现、精确通信轮次或全部安全性证明。
-9. core_requirements 只列出回答用户原问题不可缺少的要点；optional_details 可列出有则更好的深入细节。可选细节缺失不能导致整个问题不可回答。
+9. core_requirements 只列出回答用户原问题不可缺少的要点，并为每项声明 evidence_intent、preferred_section_types 和 minimum_direct_evidence；optional_details 可列出有则更好的深入细节。可选细节缺失不能导致整个问题不可回答。
 10. 不要回答用户问题，不要调用工具，不要输出 Markdown 或额外文字。
 
 只输出一个 JSON 对象：
@@ -37,8 +43,8 @@ class QueryPlanningAgent:
   "complexity":"simple|complex",
   "target_paper_ids":[],
   "target_chunks":[{"record_id":"...","chunk_index":0}],
-  "retrieval_facets":[{"id":"facet-1","goal":"...","query":"...","preferred_section_types":[]}],
-  "core_requirements":[],
+  "retrieval_facets":[{"id":"facet-1","goal":"...","query":"...","concepts":[],"phrases":[],"preferred_section_types":[]}],
+  "core_requirements":[{"id":"req-1","description":"...","evidence_intent":"fact|mechanism|comparison|evaluation|synthesis","preferred_section_types":[],"minimum_direct_evidence":1}],
   "optional_details":[],
   "needs_clarification":false,
   "clarification_question":""
@@ -47,10 +53,7 @@ class QueryPlanningAgent:
 
     ALLOWED_QUESTION_TYPES = {"simple_fact", "mechanism", "comparison", "evaluation", "synthesis"}
     ALLOWED_COMPLEXITIES = {"simple", "complex"}
-    ALLOWED_SECTION_TYPES = {
-        "method", "framework", "protocol", "algorithm", "implementation", "overview",
-        "experiment", "result", "evaluation", "background", "comparison", "discussion",
-    }
+    ALLOWED_SECTION_TYPES = SECTION_TYPES
 
     def __init__(
         self,
@@ -201,18 +204,18 @@ class QueryPlanningAgent:
             if not query or query.casefold() in seen_facet_queries:
                 continue
             seen_facet_queries.add(query.casefold())
-            preferred = item.get("preferred_section_types")
-            preferred = preferred if isinstance(preferred, list) else []
-            section_types = [
-                str(value).strip().lower()
-                for value in preferred
-                if str(value).strip().lower() in self.ALLOWED_SECTION_TYPES
-            ]
+            section_types = normalize_section_types(
+                item.get("preferred_section_types") or item.get("preferredSectionTypes") or []
+            )
+            concepts = item.get("concepts") if isinstance(item.get("concepts"), list) else []
+            phrases = item.get("phrases") if isinstance(item.get("phrases"), list) else []
             facets.append(
                 {
                     "id": str(item.get("id") or f"facet-{index}")[:80],
                     "goal": str(item.get("goal") or query)[:500],
                     "query": query[:2000],
+                    "concepts": [str(value).strip()[:200] for value in concepts if str(value).strip()][:16],
+                    "phrases": [str(value).strip()[:300] for value in phrases if str(value).strip()][:12],
                     "preferredSectionTypes": list(dict.fromkeys(section_types)),
                 }
             )
@@ -223,7 +226,12 @@ class QueryPlanningAgent:
         if not isinstance(requirements, list):
             requirements = payload.get("answer_requirements")
         requirements = requirements if isinstance(requirements, list) else []
-        core_requirements = [str(value).strip()[:500] for value in requirements if str(value).strip()][:8]
+        requirement_specs = [
+            normalized
+            for index, value in enumerate(requirements[:8], start=1)
+            if (normalized := normalize_requirement(value, index, question_type=question_type)) is not None
+        ]
+        core_requirements = [item["description"] for item in requirement_specs if item.get("required")]
         optional_values = payload.get("optional_details")
         optional_values = optional_values if isinstance(optional_values, list) else []
         optional_details = [str(value).strip()[:500] for value in optional_values if str(value).strip()][:8]
@@ -234,6 +242,12 @@ class QueryPlanningAgent:
         if needs_clarification and not clarification:
             clarification = "我无法唯一确定你指的是哪篇文献或哪个片段，请补充论文标题、章节或引用内容。"
 
+        complexity = normalize_execution_complexity(
+            complexity,
+            question_type=question_type,
+            facet_count=len(facets),
+            requirement_count=len(core_requirements),
+        )
         is_complex = complexity == "complex"
         target_evidence_count = (
             max(settings.orchestrator_min_evidence, settings.rag_complex_target_evidence)
@@ -248,9 +262,10 @@ class QueryPlanningAgent:
             "targetChunks": target_chunks,
             "retrievalFacets": facets,
             "coreRequirements": core_requirements,
+            "requirementSpecs": requirement_specs,
             "optionalDetails": optional_details,
             "answerRequirements": core_requirements,
-            "requiresIterativeRetrieval": is_complex and len(facets) > 1,
+            "requiresIterativeRetrieval": is_complex and bool(facets or requirement_specs),
             "targetEvidenceCount": max(1, min(int(target_evidence_count), 12)),
             "needsClarification": needs_clarification,
             "clarificationQuestion": clarification,

@@ -18,6 +18,7 @@ from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
 from app.services.run_logger import RunLogger
 from app.services.task_control import TaskCancelled, raise_if_task_cancelled
+from app.services.retrieval_contracts import requires_semantic_validation
 from app.tools import ToolRegistry, build_research_tool_registry
 
 
@@ -1138,9 +1139,8 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         )
 
         max_retrieval_rounds = max(1, min(settings.orchestrator_max_retrieval_rounds, 3))
-        if not sufficient and max_retrieval_rounds > 1 and plan.get("requiresIterativeRetrieval"):
-            refinement_facets = self.evidence_evaluator.refinement_facets(plan, evaluation)
-            if refinement_facets:
+        refinement_facets = self.evidence_evaluator.refinement_facets(plan, evaluation) if not sufficient else []
+        if not sufficient and max_retrieval_rounds > 1 and refinement_facets:
                 self._log("首轮证据存在覆盖缺口，正在执行一次补偿检索")
                 raise_if_task_cancelled(cancel_event)
                 evidence, diagnostics = await asyncio.to_thread(
@@ -1326,7 +1326,48 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 },
             }
 
-        self._log("证据充分，正在交给 ResearchChatAgent 生成最终回答")
+        self._log(
+            "证据充分，正在交给 ResearchChatAgent 生成最终回答"
+            if sufficient
+            else "将基于已验证证据生成有边界的回答"
+        )
+        evidence_indices = {
+            f"{str(item.get('record_id') or '')}:{int(item.get('chunk_index') or 0)}": index
+            for index, item in enumerate(evidence, start=1)
+        }
+        requirement_specs = {
+            str(item.get("id") or ""): item
+            for item in plan.get("requirementSpecs") or []
+            if isinstance(item, dict)
+        }
+        requirement_claims = [
+            {
+                **item,
+                "description": str(requirement_specs.get(str(item.get("id") or ""), {}).get("description") or ""),
+                "citationIndices": [
+                    evidence_indices[ref]
+                    for ref in item.get("supportingRefs") or []
+                    if ref in evidence_indices
+                ],
+            }
+            for item in evaluation.get("requirementAssessments") or []
+            if isinstance(item, dict)
+        ]
+        retrieval_state = {
+            "fullTextAvailable": bool(diagnostics.get("fullTextAvailable")),
+            "evidenceSufficient": sufficient,
+            "evidenceCount": len(evidence),
+            "candidateCount": int(diagnostics.get("candidateCount") or 0),
+            "missingFacetIds": list(evaluation.get("missingFacetIds") or []),
+            "missingRequirementIds": list(evaluation.get("missingRequirementIds") or []),
+            "sectionMetadataDegraded": bool(diagnostics.get("sectionMetadataDegraded")),
+            "requirementClaims": requirement_claims,
+            "requiredCitationGroups": [
+                item["citationIndices"]
+                for item in requirement_claims
+                if item.get("status") == "supported" and item.get("citationIndices")
+            ],
+        }
         try:
             result, recovery_trace = await self.recovery.execute(
                 "ResearchChatAgent 回答生成",
@@ -1338,6 +1379,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                     retrieval_query=retrieval_query,
                     evidence=evidence,
                     answer_requirements=list(plan.get("coreRequirements") or plan.get("answerRequirements") or []),
+                    retrieval_state=retrieval_state,
                 ),
                 cancel_event=cancel_event,
             )
@@ -1412,14 +1454,14 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         required_paper_ids: list[str] | None = None,
         required_chunk_refs: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """先做确定性检查，再对复杂问题执行逐 facet 的语义证据验证。"""
+        """先做确定性检查，再按回答契约执行逐项语义证据验证。"""
         evaluation = self._evaluate_evidence(
             diagnostics,
             plan=plan,
             required_paper_ids=required_paper_ids,
             required_chunk_refs=required_chunk_refs,
         )
-        if str(plan.get("complexity") or "simple") != "complex" or not evidence:
+        if not requires_semantic_validation(plan) or not evidence:
             return evaluation
         model = ModelConfigStore().build_model_payload()
         if not model:
@@ -1461,19 +1503,23 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 },
             )
             fallback_refinements = []
-            for item in plan.get("retrievalFacets") or []:
+            candidates = [
+                *list(plan.get("retrievalFacets") or []),
+                *[
+                    {
+                        "id": f"requirement-{item.get('id')}",
+                        "goal": item.get("description"),
+                        "query": item.get("description"),
+                        "preferredSectionTypes": item.get("preferredSectionTypes") or [],
+                    }
+                    for item in plan.get("requirementSpecs") or []
+                    if isinstance(item, dict)
+                ],
+            ]
+            for item in candidates:
                 if not isinstance(item, dict) or not str(item.get("query") or "").strip():
                     continue
-                fallback_refinements.append(
-                    {
-                        **item,
-                        "query": (
-                            f"{str(item.get('query') or '').strip()}\n"
-                            f"{str(item.get('goal') or '').strip()}\n"
-                            "direct evidence detailed steps complete workflow"
-                        ).strip(),
-                    }
-                )
+                fallback_refinements.append(dict(item))
             return {
                 **evaluation,
                 "sufficient": False,
