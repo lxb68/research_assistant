@@ -15,8 +15,6 @@ import os
 import re
 import shutil
 import sqlite3
-import subprocess
-import tempfile
 import time
 
 from app.core.config import settings
@@ -25,6 +23,7 @@ from app.services.paper_search import SUPPORTED_SOURCES
 from app.services.paper_repository import PaperRepository
 from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore
+from app.services.mineru import mineru_processing
 from app.services.providers.arxiv import ARXIV_API_URL
 from app.services.providers.ieee import IEEE_API_URL
 from app.services.split import (
@@ -929,18 +928,6 @@ class HunterAgent:
         extracted = self._extract_pdf_text(pdf_path, cancel_event=cancel_event)
         raise_if_task_cancelled(cancel_event)
         parsed = self._parse_pdf_metadata(extracted["text"], extracted["metadata"])
-        if extracted["parser"] == "pymupdf" and self._parsed_pdf_metadata_is_sparse(parsed):
-            self._log("PyMuPDF 解析的元数据较少，尝试使用 MinerU 精细解析")
-            mineru_text = self._extract_pdf_text_with_mineru(pdf_path, cancel_event=cancel_event)
-            raise_if_task_cancelled(cancel_event)
-            if mineru_text:
-                parsed = self._parse_pdf_metadata(mineru_text, extracted["metadata"])
-                extracted = {
-                    **extracted,
-                    "text": mineru_text,
-                    "parser": "mineru",
-                    "warning": "PyMuPDF 解析的元数据较少，尝试使用 MinerU 精细解析",
-                }
         clean_tags = [tag.strip() for tag in (custom_tags or []) if tag.strip()]
         clean_authors = [author.strip() for author in (authors or []) if author.strip()]
         manual_override_fields = self._collect_manual_override_fields(
@@ -986,11 +973,20 @@ class HunterAgent:
         raise_if_task_cancelled(cancel_event)
         saved_paper = self._save_paper_to_db(enriched_paper)
         try:
-            saved_paper = self.index_saved_pdf_text(
-                str(saved_paper.get("id") or ""),
-                extracted_text=str(extracted.get("text") or ""),
-                parser=str(extracted.get("parser") or "pymupdf"),
-            )
+            if str(extracted.get("parser") or "") == "mineru" and extracted.get("markdownPath"):
+                saved_paper = self.index_saved_structured_markdown(
+                    str(saved_paper.get("id") or ""),
+                    markdown_path=str(extracted.get("markdownPath") or ""),
+                    output_dir=str(extracted.get("outputDir") or ""),
+                    parser="mineru",
+                    conversion_result=dict(extracted.get("mineruResult") or {}),
+                )
+            else:
+                saved_paper = self.index_saved_pdf_text(
+                    str(saved_paper.get("id") or ""),
+                    extracted_text=str(extracted.get("text") or ""),
+                    parser=str(extracted.get("parser") or "pymupdf"),
+                )
         except Exception as error:
             warning = f"PDF 已导入，但本地全文索引失败：{error}"
             self._log(warning)
@@ -1000,6 +996,54 @@ class HunterAgent:
             )
         self._log(f"PDF 导入论文元数据: {saved_paper.get('id')} parser={extracted['parser']}")
         return saved_paper
+
+    def index_saved_structured_markdown(
+        self,
+        record_id: str,
+        *,
+        markdown_path: str | Path,
+        output_dir: str | Path | None = None,
+        parser: str = "mineru",
+        conversion_result: dict[str, object] | None = None,
+        min_split_length: int | None = None,
+        max_split_length: int | None = None,
+    ) -> Paper:
+        """登记解析器生成的结构化 Markdown，并直接基于原文件建立全文分块。"""
+        normalized_id = str(record_id or "").strip()
+        if not normalized_id:
+            raise ValueError("record_id is required")
+        if not self.get_saved_paper(normalized_id):
+            raise ValueError(f"Paper record not found: {normalized_id}")
+
+        resolved_markdown = self._resolve_managed_markdown_path(markdown_path)
+        if not resolved_markdown or not resolved_markdown.exists() or not resolved_markdown.is_file():
+            raise ValueError("Managed markdown file not found for this paper")
+        resolved_output_dir = self._resolve_managed_markdown_path(
+            output_dir or resolved_markdown.parent,
+            expect_dir=True,
+        )
+        indexed_at = datetime.now(timezone.utc).isoformat()
+        updates: dict[str, object] = {
+            "markdownPath": str(resolved_markdown),
+            "markdownOutputDir": str(resolved_output_dir or resolved_markdown.parent),
+            "fullTextIndexedBy": str(parser or "mineru").strip() or "mineru",
+            "fullTextIndexedAt": indexed_at,
+            "fullTextIndexWarning": "",
+        }
+        if conversion_result:
+            updates["mineruResult"] = conversion_result
+        self.update_saved_paper(normalized_id, updates)
+        indexed = self.split_saved_paper_from_markdown(
+            normalized_id,
+            markdown_path=resolved_markdown,
+            min_split_length=min_split_length,
+            max_split_length=max_split_length,
+        )
+        self._log(
+            f"结构化 Markdown 全文索引完成：record_id={normalized_id}, "
+            f"parser={updates['fullTextIndexedBy']}, markdown={resolved_markdown}"
+        )
+        return indexed
 
     def index_saved_pdf_text(
         self,
@@ -1064,10 +1108,38 @@ class HunterAgent:
         return indexed
 
     def _extract_pdf_text(self, pdf_path: Path, *, cancel_event=None) -> dict[str, object]:
-        """用 PyMuPDF 快速提取 PDF 文本；文本不足时尝试 MinerU。"""
+        """优先用 MinerU 生成结构化 Markdown；失败后降级为 PyMuPDF 纯文本。"""
+        raise_if_task_cancelled(cancel_event)
+        try:
+            mineru_result = mineru_processing(
+                pdf_path=str(pdf_path),
+                output_name=pdf_path.stem,
+            )
+            raise_if_task_cancelled(cancel_event)
+            markdown_path = Path(str(mineru_result.get("markdownPath") or ""))
+            markdown_text = markdown_path.read_text(encoding="utf-8", errors="ignore")
+            if not self._pdf_text_looks_usable(markdown_text):
+                raise RuntimeError("MinerU 生成的 Markdown 文本不足")
+            self._log(
+                f"MinerU 结构化解析完成：markdown={markdown_path}, 文本长度={len(markdown_text)}"
+            )
+            return {
+                "text": markdown_text,
+                "metadata": {},
+                "parser": "mineru",
+                "warning": "",
+                "markdownPath": str(markdown_path),
+                "outputDir": str(mineru_result.get("outputDir") or markdown_path.parent),
+                "mineruResult": mineru_result,
+            }
+        except TaskCancelled:
+            raise
+        except Exception as error:
+            warning = f"MinerU 解析失败，已降级使用 PyMuPDF：{error}"
+            self._log(warning)
+
         metadata: dict[str, object] = {}
         text = ""
-        warning = ""
 
         try:
             import fitz  # type: ignore[import-not-found]
@@ -1089,77 +1161,16 @@ class HunterAgent:
             self._log(warning)
 
         if self._pdf_text_looks_usable(text):
-            self._log(f"PDF 元数据={metadata}，文本长度={len(text)}")
+            self._log(f"PyMuPDF 降级解析完成：PDF 元数据={metadata}，文本长度={len(text)}")
             return {"text": text, "metadata": metadata, "parser": "pymupdf", "warning": warning}
 
-        mineru_text = self._extract_pdf_text_with_mineru(pdf_path, cancel_event=cancel_event)
-        if mineru_text:
-            combined_warning = warning or "PyMuPDF 提取文本较少，已使用 MinerU 精细解析"
-            self._log(f"PDF 元数据={metadata}，MinerU 文本长度={len(mineru_text)}")
-            return {"text": mineru_text, "metadata": metadata, "parser": "mineru", "warning": combined_warning}
-
-        fallback_warning = warning or "PyMuPDF 提取文本较少，且 MinerU 不可用"
+        fallback_warning = f"{warning}；PyMuPDF 提取文本不足"
         return {"text": text, "metadata": metadata, "parser": "pymupdf", "warning": fallback_warning}
 
     def _pdf_text_looks_usable(self, text: str) -> bool:
         """判断 PDF 提取文本是否达到可用质量。"""
         compact = re.sub(r"\s+", "", text)
         return len(compact) >= 800
-
-    def _parsed_pdf_metadata_is_sparse(self, parsed: Paper) -> bool:
-        """判断 PDF 解析得到的元数据是否过少。"""
-        filled_count = 0
-        for value in (
-            str(parsed.get("title", "")).strip(),
-            str(parsed.get("abstract", "")).strip(),
-            str(parsed.get("year", "")).strip(),
-            str(parsed.get("venue", "")).strip(),
-            str(parsed.get("journal", "")).strip(),
-        ):
-            if value:
-                self._log(f"PDF 元数据字段已填充: {value[:80]}")
-                filled_count += 1
-
-        authors = parsed.get("authors", [])
-        if isinstance(authors, list) and any(str(author).strip() for author in authors):
-            self._log(f"PDF 元数据字段已填充: authors={authors}")
-            filled_count += 1
-        self._log(f"PDF 元数据解析字段填充数: {filled_count}/6")
-        return filled_count < 3
-
-    def _extract_pdf_text_with_mineru(self, pdf_path: Path, *, cancel_event=None) -> str:
-        """如果本机安装了 MinerU/magic-pdf CLI，则调用它生成 markdown/text 后读取。"""
-        command = shutil.which("mineru") or shutil.which("magic-pdf")
-        if not command:
-            self._log("MinerU 未安装，跳过精细 PDF 解析")
-            return ""
-
-        with tempfile.TemporaryDirectory(prefix="mineru_") as output_dir:
-            candidates = [
-                [command, "-p", str(pdf_path), "-o", output_dir],
-                [command, "-i", str(pdf_path), "-o", output_dir],
-                [command, str(pdf_path), "-o", output_dir],
-            ]
-            for args in candidates:
-                try:
-                    raise_if_task_cancelled(cancel_event)
-                    subprocess.run(args, check=True, capture_output=True, text=True, timeout=120)
-                    raise_if_task_cancelled(cancel_event)
-                    output_path = Path(output_dir)
-                    text_parts = [
-                        path.read_text(encoding="utf-8", errors="ignore")
-                        for path in output_path.rglob("*")
-                        if path.suffix.lower() in {".md", ".txt"} and path.is_file()
-                    ]
-                    extracted = "\n".join(part.strip() for part in text_parts if part.strip())
-                    if extracted:
-                        return extracted
-                except TaskCancelled:
-                    raise
-                except Exception as error:
-                    self._log(f"MinerU 命令尝试失败 ({' '.join(args)}): {error}")
-
-        return ""
 
     def _parse_pdf_metadata(self, text: str, metadata: dict[str, object]) -> Paper:
         """从 PDF 文本和元数据中提取论文常见字段。"""

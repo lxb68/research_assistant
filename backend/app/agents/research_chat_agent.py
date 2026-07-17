@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,12 @@ class ResearchAgentConfig:
 class ResearchChatAgent:
     """基于本地论文知识库进行检索增强研究问答。"""
 
+    _FULL_TEXT_CONFLICT_PATTERNS = (
+        re.compile(r"(?:只能|仅能|只能够).{0,20}(?:摘要|abstract)", re.IGNORECASE),
+        re.compile(r"(?:无法|不能|未能).{0,20}(?:获取|访问|读取|检索).{0,12}(?:全文|full[ -]?text)", re.IGNORECASE),
+        re.compile(r"(?:全文|full[ -]?text).{0,12}(?:不可用|不存在|unavailable|not available)", re.IGNORECASE),
+    )
+
     def __init__(
         self,
         *,
@@ -61,6 +68,7 @@ class ResearchChatAgent:
         retrieval_query: str | None = None,
         evidence: list[dict[str, Any]] | None = None,
         answer_requirements: list[str] | None = None,
+        retrieval_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """执行当前代理的主要业务流程并返回结构化结果。"""
         normalized_question = str(question).strip()
@@ -99,9 +107,10 @@ class ResearchChatAgent:
         answer = self._complete(
             model=model,
             question=normalized_question,
-            history=history or [],
+            resolved_question=str(retrieval_query or normalized_question).strip(),
             evidence=evidence,
             answer_requirements=answer_requirements or [],
+            retrieval_state=retrieval_state or {},
         )
         retrieved_sources = [
             {
@@ -121,6 +130,28 @@ class ResearchChatAgent:
             for index, item in enumerate(evidence, start=1)
         ]
         cited_indices = self._extract_citation_indices(answer, len(retrieved_sources))
+        retry_reasons = self._answer_retry_reasons(
+            answer,
+            source_count=len(retrieved_sources),
+            cited_indices=cited_indices,
+            retrieval_state=retrieval_state or {},
+        )
+        if retry_reasons:
+            self._log(f"回答一致性校验未通过，正在重试：{'；'.join(retry_reasons)}")
+            answer = self._complete(
+                model=model,
+                question=normalized_question,
+                resolved_question=str(retrieval_query or normalized_question).strip(),
+                evidence=evidence,
+                answer_requirements=answer_requirements or [],
+                retrieval_state=retrieval_state or {},
+                revision_instruction=(
+                    "上一次草稿未通过一致性校验。请重新回答，并修正以下问题："
+                    + "；".join(retry_reasons)
+                    + "。当前检索状态优先于历史对话中的旧判断。"
+                ),
+            )
+            cited_indices = self._extract_citation_indices(answer, len(retrieved_sources))
         sources = [source for source in retrieved_sources if source["index"] in cited_indices]
         self._log("研究回答生成完成")
         return {
@@ -311,6 +342,15 @@ class ResearchChatAgent:
         selected_keys: set[tuple[str, int]] = set()
         per_section: dict[tuple[str, str], int] = {}
         context_chars = 0
+        meaningful_sections = {
+            (str(item.get("record_id") or ""), str(item.get("section") or "").strip().casefold())
+            for item in ranked
+            if str(item.get("section") or "").strip()
+            and str(item.get("section") or "").strip().casefold()
+            != str(item.get("title") or "").strip().casefold()
+        }
+        section_metadata_degraded = len(ranked) > 2 and not meaningful_sections
+        per_section_limit = target_evidence_count if section_metadata_degraded else 2
 
         def try_select(item: dict[str, Any]) -> bool:
             nonlocal context_chars
@@ -318,7 +358,7 @@ class ResearchChatAgent:
             if key in selected_keys:
                 return False
             section_key = (str(item.get("record_id") or ""), str(item.get("section") or ""))
-            if per_section.get(section_key, 0) >= 2:
+            if per_section.get(section_key, 0) >= per_section_limit:
                 return False
             text_size = len(str(item.get("text") or ""))
             if context_chars + text_size > self.config.max_context_chars:
@@ -377,6 +417,8 @@ class ResearchChatAgent:
             "missingFacetIds": sorted(requested_facet_ids - selected_facet_ids),
             "coveredSectionTypes": sorted(section_types),
             "methodEvidenceCount": sum(str(item.get("section_type") or "") in method_types for item in selected),
+            "sectionMetadataDegraded": section_metadata_degraded,
+            "perSectionEvidenceLimit": per_section_limit,
             "targetEvidenceCount": target_evidence_count,
             "retrievalRuns": retrieval_runs,
         }
@@ -531,9 +573,11 @@ class ResearchChatAgent:
         *,
         model: dict[str, Any],
         question: str,
-        history: list[dict[str, str]],
+        resolved_question: str,
         evidence: list[dict[str, Any]],
         answer_requirements: list[str],
+        retrieval_state: dict[str, Any],
+        revision_instruction: str = "",
     ) -> str:
         """调用已配置模型，根据证据上下文生成研究回答。"""
         context = self.retriever.build_context(evidence)
@@ -544,14 +588,36 @@ class ResearchChatAgent:
                 f"{system_prompt}\n\n# 本次回答的核心覆盖目标\n{requirements_text}\n"
                 "这些目标用于组织回答；个别非核心实现细节缺失时应明确边界，但不要因此否定已有证据能够支持的整体回答。"
             )
+        normalized_state = {
+            "fullTextAvailable": bool(retrieval_state.get("fullTextAvailable")),
+            "evidenceSufficient": bool(retrieval_state.get("evidenceSufficient")),
+            "evidenceCount": int(retrieval_state.get("evidenceCount") or len(evidence)),
+            "candidateCount": int(retrieval_state.get("candidateCount") or 0),
+            "missingFacetIds": list(retrieval_state.get("missingFacetIds") or [])[:12],
+            "sectionMetadataDegraded": bool(retrieval_state.get("sectionMetadataDegraded")),
+        }
+        system_prompt = (
+            f"{system_prompt}\n\n# 当前检索状态\n"
+            f"{json.dumps(normalized_state, ensure_ascii=False)}\n"
+            "该状态由检索管线产生，优先于对话历史中的旧判断。fullTextAvailable=true 表示当前论文全文已完成解析并可供检索；"
+            "证据片段没有覆盖某项细节时，只能说明当前片段未覆盖，不能推断全文不存在。"
+        )
+        if revision_instruction:
+            system_prompt = f"{system_prompt}\n\n# 修订要求\n{revision_instruction}"
         system_prompt = f"{system_prompt}\n\n{SYSTEM_SECURITY_CONSTRAINT}"
-        messages = [{"role": "system", "content": system_prompt}]
-        for message in history[-8:]:
-            role = str(message.get("role") or "").strip()
-            content = str(message.get("content") or "").strip()
-            if role in {"user", "assistant"} and content:
-                messages.append({"role": role, "content": content[:6000]})
-        messages.append({"role": "user", "content": question})
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "currentQuestion": question,
+                        "resolvedResearchQuestion": resolved_question,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
 
         # 供应商协议差异统一由适配器处理，Agent 只维护通用消息结构。
         return chat_completion(
@@ -560,6 +626,24 @@ class ResearchChatAgent:
             temperature=0.2,
             timeout=self.config.request_timeout,
         )
+
+    def _answer_retry_reasons(
+        self,
+        answer: str,
+        *,
+        source_count: int,
+        cited_indices: set[int],
+        retrieval_state: dict[str, Any],
+    ) -> list[str]:
+        """根据结构化检索状态校验回答，不让模型自行猜测全文可用性。"""
+        reasons: list[str] = []
+        if source_count > 0 and not cited_indices:
+            reasons.append("回答没有引用任何已提供证据")
+        if bool(retrieval_state.get("fullTextAvailable")) and any(
+            pattern.search(answer) for pattern in self._FULL_TEXT_CONFLICT_PATTERNS
+        ):
+            reasons.append("回答声称全文不可用，但检索状态显示全文已经解析")
+        return reasons
 
     def _load_prompt(self) -> str:
         """加载提示词。"""

@@ -157,6 +157,38 @@ class MinerUCloudTest(unittest.TestCase):
         self.assertTrue(result["success"])
         local.assert_called_once()
 
+    @patch("app.api.routes.mineru.mineru_processing")
+    @patch("app.api.routes.mineru.HunterAgent")
+    def test_endpoint_uses_record_id_and_keyword_pdf_path(self, agent_type: Mock, processing: Mock) -> None:
+        """前端 record_id 必须贯穿到论文定位、MinerU 输出名和结构化索引。"""
+        from app.api.routes.mineru import _process_mineru_sync
+        from app.services.mineru import MinerURequest
+
+        agent = agent_type.return_value
+        agent.get_saved_paper.return_value = {"id": "paper-1"}
+        agent.find_local_pdf_for_paper.return_value = Path("C:/papers/paper.pdf")
+        processing.return_value = {
+            "success": True,
+            "markdownPath": "C:/markdown/paper/full.md",
+            "outputDir": "C:/markdown/paper",
+        }
+        agent.index_saved_structured_markdown.return_value = {"id": "paper-1", "splitChunkCount": 4}
+
+        result = _process_mineru_sync(
+            MinerURequest(record_id="paper-1", output_name="paper-output", mineru_token="token"),
+        )
+
+        agent.get_saved_paper.assert_called_once_with("paper-1")
+        processing.assert_called_once_with(
+            project_id="paper-1",
+            file_name=None,
+            pdf_path=str(Path("C:/papers/paper.pdf")),
+            output_name="paper-output",
+            mineru_token="token",
+        )
+        agent.index_saved_structured_markdown.assert_called_once()
+        self.assertEqual(result["paper"]["splitChunkCount"], 4)
+
 
 @unittest.skipIf(sys.version_info < (3, 10), "FastAPI app requires the project's Python 3.10+ runtime")
 class MinerUEndpointConcurrencyTest(unittest.IsolatedAsyncioTestCase):

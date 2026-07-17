@@ -230,7 +230,7 @@ async def import_pdf_paper_stream(
     def produce(emit, cancel_event) -> None:
         push_log = lambda message: emit({"type": "log", "message": message})
         push_log(f"已接收 PDF 文件：{filename}，大小 {len(content)} bytes")
-        push_log("开始解析 PDF：优先使用 PyMuPDF，必要时尝试 MinerU")
+        push_log("开始解析 PDF：优先使用 MinerU，失败后降级使用 PyMuPDF")
         paper = _import_pdf(
             HunterAgent(log_callback=push_log), content, filename,
             title=title, authors=authors, abstract=abstract, year=year, doi=doi, url=url, custom_tags=custom_tags,

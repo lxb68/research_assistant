@@ -414,7 +414,7 @@ export default function DatasetBrowserView() {
               />
             </label>
             <div className="dataset-import-actions">
-              <span>{pdfFile ? pdfFile.name : "后端会流式返回导入进度，复杂 PDF 会自动尝试 MinerU。"}</span>
+              <span>{pdfFile ? pdfFile.name : "后端会优先使用 MinerU 转换，失败后自动降级为 PyMuPDF。"}</span>
               <button type="submit" disabled={!pdfFile || isImporting}>
                 {isImporting ? "导入中..." : "保存导入"}
               </button>

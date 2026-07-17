@@ -109,6 +109,51 @@ BACK_MATTER_HEADINGS = {
 }
 KEEP_WHOLE_CATEGORIES = {"front_matter", "references", "back_matter"}
 
+# PDF 文本提取器经常保留章节文字，却丢失 Markdown 标题标记。这里仅维护跨领域
+# 通用的论文结构词，用于结构退化时的保守恢复，不绑定论文标题或固定章节编号。
+COMMON_SECTION_HEADINGS = {
+    *ABSTRACT_HEADINGS,
+    *INTRODUCTION_HEADINGS,
+    *REFERENCE_HEADINGS,
+    *BACK_MATTER_HEADINGS,
+    "related work",
+    "related works",
+    "preliminaries",
+    "preliminary",
+    "method",
+    "methods",
+    "methodology",
+    "materials and methods",
+    "technical overview",
+    "implementation",
+    "experimental setup",
+    "experimental results",
+    "experiments",
+    "evaluation",
+    "results",
+    "discussion",
+    "conclusion",
+    "conclusions",
+    "limitations",
+    "security analysis",
+    "security estimation",
+    "相关工作",
+    "预备知识",
+    "方法",
+    "实验设置",
+    "实验结果",
+    "实验",
+    "评估",
+    "结果",
+    "讨论",
+    "结论",
+    "局限性",
+    "安全性分析",
+}
+_NUMBERED_HEADING_PATTERN = re.compile(r"^(\d{1,2}(?:\.\d{1,3}){0,4})\s+(.+?)\s*$")
+_NUMBER_ONLY_HEADING_PATTERN = re.compile(r"^\d{1,2}(?:\.\d{1,3}){0,4}$")
+_ABSTRACT_PREFIX_PATTERN = re.compile(r"^(abstract|summary|摘要)\s*[.:：]\s*(.+)$", re.IGNORECASE)
+
 
 def split_long_section(section: dict[str, Any], max_split_length: int) -> list[str]:
     """切分过长章节，并优先保持段落和句子边界完整。"""
@@ -247,6 +292,8 @@ def parse_markdown_sections(markdown_text: str) -> tuple[list[dict[str, Any]], l
     """把 Markdown 转换为结构化大纲和章节记录。"""
     lines = markdown_text.replace("\r\n", "\n").split("\n")
     heading_pattern = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+    explicit_heading_count = sum(bool(heading_pattern.match(line)) for line in lines)
+    recover_plain_headings = _should_recover_plain_text_headings(markdown_text, explicit_heading_count)
     outline: list[dict[str, Any]] = []
     sections: list[dict[str, Any]] = []
 
@@ -280,7 +327,10 @@ def parse_markdown_sections(markdown_text: str) -> tuple[list[dict[str, Any]], l
         sections.append(section)
         current_content_lines = []
 
-    for line_number, line in enumerate(lines, start=1):
+    line_index = 0
+    while line_index < len(lines):
+        line = lines[line_index]
+        line_number = line_index + 1
         match = heading_pattern.match(line)
         if match:
             flush_current_section()
@@ -294,12 +344,115 @@ def parse_markdown_sections(markdown_text: str) -> tuple[list[dict[str, Any]], l
                     "position": current_position,
                 }
             )
+            line_index += 1
+            continue
+
+        recovered = (
+            _match_plain_text_heading(lines, line_index)
+            if recover_plain_headings
+            else None
+        )
+        if recovered:
+            flush_current_section()
+            current_heading = recovered["title"]
+            current_level = recovered["level"]
+            current_position = line_number
+            outline.append(
+                {
+                    "title": current_heading,
+                    "level": current_level,
+                    "position": current_position,
+                    "recovered": True,
+                }
+            )
+            remainder = str(recovered.get("remainder") or "").strip()
+            if remainder:
+                current_content_lines.append(remainder)
+            line_index += int(recovered["consumed"])
             continue
 
         current_content_lines.append(line)
+        line_index += 1
 
     flush_current_section()
     return outline, sections
+
+
+def _should_recover_plain_text_headings(markdown_text: str, explicit_heading_count: int) -> bool:
+    """仅在长文档标题结构明显退化时启用普通文本标题恢复。"""
+    return explicit_heading_count <= 1 and len(markdown_text.strip()) >= 2000
+
+
+def _match_plain_text_heading(lines: list[str], index: int) -> dict[str, Any] | None:
+    """保守识别 PDF 提取文本中的编号标题、标准章节标题和摘要前缀。"""
+    value = lines[index].strip()
+    if not value or value.startswith("#"):
+        return None
+
+    abstract_match = _ABSTRACT_PREFIX_PATTERN.match(value)
+    if abstract_match:
+        return {
+            "title": abstract_match.group(1).strip().title(),
+            "level": 2,
+            "consumed": 1,
+            "remainder": abstract_match.group(2).strip(),
+        }
+
+    numbered_match = _NUMBERED_HEADING_PATTERN.match(value)
+    if numbered_match and _looks_like_plain_heading_title(numbered_match.group(2)):
+        number = numbered_match.group(1)
+        return {
+            "title": f"{number} {numbered_match.group(2).strip()}",
+            "level": min(6, 2 + number.count(".")),
+            "consumed": 1,
+        }
+
+    if _NUMBER_ONLY_HEADING_PATTERN.match(value):
+        next_index = _next_nonempty_line_index(lines, index + 1, max_lookahead=2)
+        if next_index is not None:
+            title = lines[next_index].strip()
+            if _looks_like_plain_heading_title(title):
+                return {
+                    "title": f"{value} {title}",
+                    "level": min(6, 2 + value.count(".")),
+                    "consumed": next_index - index + 1,
+                }
+
+    if _normalize_heading_key(value) in COMMON_SECTION_HEADINGS:
+        return {"title": value, "level": 2, "consumed": 1}
+    return None
+
+
+def _next_nonempty_line_index(lines: list[str], start: int, *, max_lookahead: int) -> int | None:
+    """在很小的窗口内查找下一行，避免跨正文误拼章节标题。"""
+    end = min(len(lines), start + max_lookahead)
+    for index in range(start, end):
+        if lines[index].strip():
+            return index
+    return None
+
+
+def _looks_like_plain_heading_title(value: str) -> bool:
+    """判断短文本是否具备章节标题形态，过滤页眉、公式、作者与正文句子。"""
+    text = str(value or "").strip()
+    if not text or len(text) > 120 or len(text.split()) > 16:
+        return False
+    if re.search(r"https?://|@|[,;；。！？!?]$", text, flags=re.IGNORECASE):
+        return False
+    normalized = _normalize_heading_key(text)
+    if normalized in COMMON_SECTION_HEADINGS:
+        return True
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return not bool(re.search(r"[。！？；]", text)) and len(text) <= 40
+
+    words = re.findall(r"[A-Za-z][A-Za-z'\-]*", text)
+    if not words:
+        return False
+    significant = [word for word in words if word.casefold() not in {"a", "an", "and", "for", "in", "of", "on", "the", "to", "with"}]
+    if not significant:
+        return False
+    title_case_count = sum(word[0].isupper() or word.isupper() for word in significant)
+    return title_case_count / len(significant) >= 0.6
 
 
 def _normalize_section(section: dict[str, Any], index: int) -> dict[str, Any]:

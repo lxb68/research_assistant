@@ -20,6 +20,7 @@ class QueryPlanningAgent:
 要求：
 1. standalone_question 必须脱离历史后仍语义完整，不得机械拼接无关历史。
 2. target_paper_ids 和 target_chunks 只能使用 candidate_sources 或 explicit_paper_ids 中真实存在的值。
+   target_chunks 只用于用户明确追问某个既有片段、引用或局部内容；当用户询问整篇论文、全文或宽范围主题时，保留 target_paper_ids，但 target_chunks 必须为空，避免旧摘要片段挤占全文检索结果。
 3. 无法唯一解析“它、前者、这个片段”等指代时，needs_clarification=true。
 4. question_type 从 simple_fact、mechanism、comparison、evaluation、synthesis 中选择。
 5. complexity 从 simple、complex 中选择。单一事实查询通常为 simple；机制、比较、综合、多维分析通常为 complex。
