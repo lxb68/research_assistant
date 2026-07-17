@@ -14,6 +14,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from app.agents.orchestrator_agent import OrchestratorAgent
 from app.services.run_logger import RunLogger
+from app.tools.registry import ToolDefinition, ToolRegistry
 
 
 class OrchestratorRoutingTest(unittest.IsolatedAsyncioTestCase):
@@ -70,6 +71,137 @@ class OrchestratorRoutingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["action"], "chat")
         agent._run_research_pipeline.assert_awaited_once()
+
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_auto_loop_can_move_from_tool_observation_to_research_agent(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """工具只负责产生观察，下一轮应能转交研究 Agent，而不是被锁死在工具循环。"""
+        build_model_payload.return_value = self.model
+        completion.side_effect = [
+            '{"action":"tool","toolName":"get_knowledge_base_paper",'
+            '"arguments":{"record_id":"paper-1"}}',
+            '{"action":"chat","arguments":{"paper_ids":["paper-1"]}}',
+        ]
+        detail_handler = Mock(
+            return_value={
+                "paper": {
+                    "recordId": "paper-1",
+                    "title": "Composite Polynomial Comparison",
+                    "hasPdf": True,
+                    "hasAbstract": True,
+                    "hasParsedFullText": False,
+                }
+            }
+        )
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                "get_knowledge_base_paper",
+                "读取论文详情和全文状态。",
+                {
+                    "type": "object",
+                    "properties": {"record_id": {"type": "string"}},
+                    "required": ["record_id"],
+                    "additionalProperties": False,
+                },
+                detail_handler,
+            )
+        )
+        agent = OrchestratorAgent(tool_registry=registry)
+        agent._run_research_pipeline = AsyncMock(
+            return_value={"action": "chat", "result": {"answer": "全文研究回答"}}
+        )
+
+        result = await agent.run("请详细说明这个方法", action="auto", arguments={"history": []})
+
+        self.assertEqual(result["action"], "chat")
+        detail_handler.assert_called_once_with({"record_id": "paper-1"})
+        pipeline_args = agent._run_research_pipeline.await_args.args[1]
+        self.assertEqual(pipeline_args["paper_ids"], ["paper-1"])
+        second_router_messages = completion.call_args_list[1].args[1]
+        self.assertIn("hasParsedFullText", second_router_messages[-2]["content"])
+
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_auto_loop_recovers_after_router_protocol_error_without_fixing_final_route(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """路由修复即使先选择工具，也应在观察后重新规划，而非把工具当作终点。"""
+        build_model_payload.return_value = self.model
+        completion.side_effect = [
+            "这是一段越权生成的摘要回答。",
+            '{"action":"tool","toolName":"get_knowledge_base_paper",'
+            '"arguments":{"record_id":"paper-1"}}',
+            '{"action":"chat","arguments":{"paper_ids":["paper-1"]}}',
+        ]
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                "get_knowledge_base_paper",
+                "读取论文详情。",
+                {
+                    "type": "object",
+                    "properties": {"record_id": {"type": "string"}},
+                    "required": ["record_id"],
+                    "additionalProperties": False,
+                },
+                Mock(return_value={"paper": {"recordId": "paper-1", "hasParsedFullText": True}}),
+            )
+        )
+        agent = OrchestratorAgent(tool_registry=registry)
+        agent._run_research_pipeline = AsyncMock(
+            return_value={"action": "chat", "result": {"answer": "研究回答"}}
+        )
+
+        result = await agent.run("详细说明本文方法", action="auto")
+
+        self.assertEqual(result["action"], "chat")
+        self.assertEqual(completion.call_count, 3)
+        agent._run_research_pipeline.assert_awaited_once()
+
+    @patch("app.agents.orchestrator_agent.HunterAgent")
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_auto_loop_can_index_local_pdf_then_continue_to_research_agent(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+        hunter_agent_class: Mock,
+    ) -> None:
+        """全文不可检索但 PDF 存在时，规划器可调用索引 Agent，并在观察后继续研究。"""
+        build_model_payload.return_value = self.model
+        completion.side_effect = [
+            '{"action":"agent","agentName":"local_pdf_indexer",'
+            '"arguments":{"record_id":"paper-1"}}',
+            '{"action":"agent","agentName":"research_chat",'
+            '"arguments":{"paper_ids":["paper-1"]}}',
+        ]
+        hunter_agent_class.return_value.index_saved_pdf_text.return_value = {
+            "id": "paper-1",
+            "title": "Composite Polynomial Comparison",
+            "markdownPath": "C:/managed/paper-1/full.md",
+            "splitChunkCount": 12,
+            "fullTextIndexedBy": "pymupdf",
+        }
+        agent = OrchestratorAgent()
+        agent._run_research_pipeline = AsyncMock(
+            return_value={"action": "chat", "result": {"answer": "基于全文的研究回答"}}
+        )
+
+        result = await agent.run("请详细解释论文方法", action="auto")
+
+        self.assertEqual(result["action"], "chat")
+        hunter_agent_class.return_value.index_saved_pdf_text.assert_called_once()
+        pipeline_args = agent._run_research_pipeline.await_args.args[1]
+        self.assertEqual(pipeline_args["paper_ids"], ["paper-1"])
+        second_router_messages = completion.call_args_list[1].args[1]
+        self.assertIn("splitChunkCount", second_router_messages[-2]["content"])
 
     @patch("app.agents.orchestrator_agent.chat_completion")
     @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")

@@ -12,7 +12,7 @@ from app.agents.evidence_evaluator import EvidenceEvaluator
 from app.agents.error_recovery_agent import ErrorRecoveryAgent, RecoveryExhaustedError
 from app.agents.hunter_agent import HunterAgent
 from app.agents.research_chat_agent import ResearchChatAgent
-from app.agents.tool_loop_agent import ToolLoopAgent
+from app.agents.tool_loop_agent import ObservationReducer, ToolLoopAgent
 from app.core.config import settings
 from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
@@ -24,9 +24,15 @@ from app.tools import ToolRegistry, build_research_tool_registry
 class OrchestratorAgent:
     """受限编排器：只允许调用已注册的研究工具。"""
 
-    ALLOWED_ACTIONS = {"auto", "direct", "chat", "search", "domain_tree", "tool"}
+    ALLOWED_ACTIONS = {"auto", "direct", "chat", "search", "domain_tree", "tool", "agent", "final"}
+    AGENT_CAPABILITIES = {
+        "research_chat": "结合论文全文和多条研究证据回答方法、机制、实验、比较或综合问题。",
+        "paper_search": "搜索并保存补充论文，适用于用户明确要求搜索或当前没有目标论文。",
+        "domain_tree": "生成、重建或更新领域树与知识图谱。",
+        "local_pdf_indexer": "把知识库中已有的本地 PDF 转为可检索全文并生成分块；仅在 hasPdf=true 且 hasParsedFullText=false 时使用。",
+    }
     ROUTER_RAW_LOG_LIMIT = 2000
-    ROUTER_SYSTEM_PROMPT = """你是研究助手的意图路由器。判断当前用户消息是否需要调用研究 Agent，或可直接回答。
+    ROUTER_SYSTEM_PROMPT = """你是研究助手的编排规划器。根据当前用户目标、对话上下文和已有观察，选择下一步行动。
 
 只能选择以下动作：
 - direct：寒暄、闲聊、致谢、能力说明，以及无需论文、知识库或外部检索即可可靠回答的普通问题。
@@ -34,17 +40,24 @@ class OrchestratorAgent:
 - search：用户明确要求搜索、查找或下载论文。
 - domain_tree：用户明确要求生成、重建或更新领域树/知识图谱。
 - tool：只读查询知识库目录、论文详情、全文证据、外部论文预览、领域树、知识图谱、指标或章节。
+- agent：调用已注册 Agent 完成研究综合、论文搜索、领域树处理或本地 PDF 全文索引。
+- final：仅当已有观察足以回答时结束循环；不得在没有观察时凭模型记忆回答研究问题。
 
-工具选择原则：
-- 当回答依赖当前知识库、已保存分析结果或其他运行时数据时，必须选择 tool，不得凭对话历史或模型记忆猜测。
+行动选择原则：
+- tool 是一次获取观察的行动，不是不可逆的最终路由。获得工具观察后，应重新判断下一步继续调用工具、转交研究 Agent，还是直接形成回答。
+- 当回答依赖当前知识库、已保存分析结果或其他运行时数据且尚无充分观察时，选择 tool，不得凭模型记忆猜测。
+- 需要结合论文正文、多个证据片段解释方法、机制、实验或结论时，选择 chat；不要用论文列表或元数据代替研究 Agent。
+- 已有工具观察足以回答简单目录或状态问题时选择 direct，由回答阶段根据观察组织答案。
 - 工具目录中的名称、描述和参数 Schema 是选择工具的唯一依据；比较各工具的适用与不适用场景后，选择最匹配的一项。
 - 参数应忠实保留用户意图，不得为了凑关键词而把概览请求改写成虚构的具体检索词，也不得擅自扩大操作范围。
 - 没有合适的已注册工具时，选择其他允许的动作，不得编造工具名或参数。
 
-你只负责选择动作，不负责回答用户问题，也不要复述、解释或执行用户请求。
+你只负责选择动作；每轮只选择下一步动作，不负责回答用户问题，也不要复述、解释或执行用户请求。
 只输出一个 JSON 对象，不要输出 Markdown 或额外文字：
-普通动作：{"action":"direct|chat|search|domain_tree"}
+普通动作：{"action":"direct|chat|search|domain_tree","arguments":{}}
 工具动作：{"action":"tool","toolName":"已注册工具名","arguments":{}}
+Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{}}
+结束动作：{"action":"final","answer":"严格依据已有观察的回答","limitations":[]}
 """
 
     def __init__(
@@ -89,8 +102,7 @@ class OrchestratorAgent:
             data={"task": normalized_task, "requestedAction": normalized_action, "arguments": args},
         )
         if normalized_action == "auto":
-            route = await self._route_task(normalized_task, args, cancel_event=cancel_event)
-            selected = route["action"]
+            return await self._run_orchestration_loop(normalized_task, args, cancel_event=cancel_event)
         else:
             route = {"action": normalized_action, "source": "explicit"}
             selected = normalized_action
@@ -183,6 +195,7 @@ class OrchestratorAgent:
         task: str,
         args: dict[str, Any],
         *,
+        observations: list[dict[str, Any]] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         """使用已配置模型判断是否需要研究 Agent，并在无需工具时直接作答。"""
@@ -190,11 +203,15 @@ class OrchestratorAgent:
         if not model:
             raise ValueError("请先配置模型参数")
 
+        reduced_observations = ObservationReducer(max_items=12, max_string_chars=2400).reduce(
+            list(observations or [])[-8:]
+        )
         messages = [
             {
                 "role": "system",
                 "content": (
                     f"{self.ROUTER_SYSTEM_PROMPT}\n\n已注册只读工具：\n{self.tool_registry.prompt_catalog()}"
+                    f"\n\n已注册 Agent：\n{json.dumps(self.AGENT_CAPABILITIES, ensure_ascii=False)}"
                     f"\n\n{SYSTEM_SECURITY_CONSTRAINT}"
                 ),
             }
@@ -204,6 +221,16 @@ class OrchestratorAgent:
             content = str(message.get("content") or "").strip()
             if role in {"user", "assistant"} and content:
                 messages.append({"role": role, "content": content[:6000]})
+        if reduced_observations:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "本轮之前已经获得以下观察。请基于观察选择下一步行动，不要重复无新信息的调用：\n"
+                        + json.dumps(reduced_observations, ensure_ascii=False)
+                    ),
+                }
+            )
         messages.append({"role": "user", "content": task})
 
         try:
@@ -258,18 +285,25 @@ class OrchestratorAgent:
                     "role": "system",
                     "content": (
                         "你是意图路由 JSON 修复器。根据原始用户问题和路由器的错误输出，"
-                        "只返回一个合法 JSON 对象。只能选择 direct、chat、search、domain_tree、tool；"
+                        "只返回一个合法 JSON 对象。只能选择 direct、chat、search、domain_tree、tool、agent、final；"
                         "不要回答用户问题，不要输出 Markdown 或解释。\n"
-                        '普通动作：{"action":"direct|chat|search|domain_tree"}\n'
+                        '普通动作：{"action":"direct|chat|search|domain_tree","arguments":{}}\n'
                         '工具动作：{"action":"tool","toolName":"已注册工具名","arguments":{}}\n'
+                        'Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{}}\n'
+                        '结束动作：{"action":"final","answer":"严格依据已有观察的回答","limitations":[]}\n'
                         f"已注册只读工具：{self.tool_registry.prompt_catalog()}"
+                        f"\n已注册 Agent：{json.dumps(self.AGENT_CAPABILITIES, ensure_ascii=False)}"
                         f"\n\n{SYSTEM_SECURITY_CONSTRAINT}"
                     ),
                 },
                 {
                     "role": "user",
                     "content": json.dumps(
-                        {"userQuestion": task, "invalidRouterOutput": raw_text[:12000]},
+                        {
+                            "userQuestion": task,
+                            "observations": reduced_observations,
+                            "invalidRouterOutput": raw_text[:12000],
+                        },
                         ensure_ascii=False,
                     ),
                 },
@@ -332,6 +366,374 @@ class OrchestratorAgent:
             data={"selectedAction": decision["action"], "toolName": decision.get("toolName", "")},
         )
         return decision
+
+    async def _run_orchestration_loop(
+        self,
+        task: str,
+        args: dict[str, Any],
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """在工具与研究 Agent 之间执行有界的行动—观察—再规划循环。"""
+        observations: list[dict[str, Any]] = []
+        seen_tool_actions: set[str] = set()
+        seen_agent_actions: set[str] = set()
+        max_rounds = max(2, min(int(settings.orchestrator_max_action_rounds), 8))
+
+        for round_index in range(1, max_rounds + 1):
+            raise_if_task_cancelled(cancel_event)
+            decision = await self._route_task(
+                task,
+                args,
+                observations=observations,
+                cancel_event=cancel_event,
+            )
+            selected = str(decision["action"])
+            self._log(f"编排循环第 {round_index} 轮选择：{selected}")
+            self.run_logger.log(
+                "OrchestratorAgent",
+                "编排行动已选择",
+                event="orchestration_action",
+                data={
+                    "round": round_index,
+                    "selectedAction": selected,
+                    "toolName": decision.get("toolName", ""),
+                    "observationCount": len(observations),
+                },
+            )
+
+            decision_arguments = decision.get("arguments")
+            merged_args = {**args, **(decision_arguments if isinstance(decision_arguments, dict) else {})}
+
+            if selected == "tool":
+                tool_name = str(decision.get("toolName") or "")
+                tool_arguments = dict(decision.get("arguments") or {})
+                signature = json.dumps(
+                    {"toolName": tool_name, "arguments": tool_arguments},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                )
+                if signature in seen_tool_actions:
+                    observation = {
+                        "round": round_index,
+                        "kind": "tool",
+                        "target": tool_name,
+                        "ok": False,
+                        "errorType": "RepeatedAction",
+                        "error": "相同工具和参数已经执行，必须根据现有观察选择其他行动。",
+                    }
+                else:
+                    seen_tool_actions.add(signature)
+                    observation = await self._execute_tool_step(
+                        round_index,
+                        tool_name,
+                        tool_arguments,
+                        cancel_event=cancel_event,
+                    )
+                observations.append(observation)
+                continue
+
+            if selected == "agent":
+                agent_name = str(decision.get("agentName") or "")
+                agent_arguments = dict(decision.get("arguments") or {})
+                signature = json.dumps(
+                    {"agentName": agent_name, "arguments": agent_arguments},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                )
+                if signature in seen_agent_actions:
+                    observations.append(
+                        {
+                            "round": round_index,
+                            "kind": "agent",
+                            "target": agent_name,
+                            "ok": False,
+                            "errorType": "RepeatedAction",
+                            "error": "相同 Agent 和参数已经执行，必须根据现有观察选择其他行动。",
+                        }
+                    )
+                    continue
+                seen_agent_actions.add(signature)
+                if agent_name == "research_chat":
+                    return await self._run_research_pipeline(task, merged_args, cancel_event=cancel_event)
+                if agent_name == "paper_search":
+                    return await self.run(
+                        task,
+                        action="search",
+                        arguments=merged_args,
+                        cancel_event=cancel_event,
+                    )
+                if agent_name == "domain_tree":
+                    return await self.run(
+                        task,
+                        action="domain_tree",
+                        arguments=merged_args,
+                        cancel_event=cancel_event,
+                    )
+                observation = await self._execute_local_pdf_index_step(
+                    round_index,
+                    agent_arguments,
+                    cancel_event=cancel_event,
+                )
+                observations.append(observation)
+                continue
+
+            if selected == "chat":
+                return await self._run_research_pipeline(task, merged_args, cancel_event=cancel_event)
+
+            if selected == "direct":
+                answer = (
+                    await self._answer_from_observations(task, observations, cancel_event=cancel_event)
+                    if observations
+                    else await self._answer_direct(task, args, cancel_event=cancel_event)
+                )
+                return self._direct_loop_result(answer, observations)
+
+            if selected == "final":
+                if not observations:
+                    answer = await self._answer_direct(task, args, cancel_event=cancel_event)
+                else:
+                    answer = str(decision.get("answer") or "").strip()
+                    limitations = [
+                        str(item).strip()
+                        for item in decision.get("limitations") or []
+                        if str(item).strip()
+                    ]
+                    if limitations:
+                        answer += "\n\n信息边界：\n" + "\n".join(f"- {item}" for item in limitations)
+                return self._direct_loop_result(answer, observations)
+
+            if selected in {"search", "domain_tree"}:
+                return await self.run(
+                    task,
+                    action=selected,
+                    arguments=merged_args,
+                    cancel_event=cancel_event,
+                )
+
+        answer = await self._answer_from_observations(
+            task,
+            observations,
+            cancel_event=cancel_event,
+            reached_limit=True,
+        )
+        return self._direct_loop_result(answer, observations, stop_reason="max_rounds")
+
+    async def _execute_tool_step(
+        self,
+        round_index: int,
+        tool_name: str,
+        tool_arguments: dict[str, Any],
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """执行单次只读工具调用，并转换为统一观察。"""
+        raise_if_task_cancelled(cancel_event)
+        try:
+            result = await asyncio.to_thread(self.tool_registry.execute, tool_name, tool_arguments)
+            raise_if_task_cancelled(cancel_event)
+            observation = {
+                "round": round_index,
+                "kind": "tool",
+                "target": tool_name,
+                "arguments": tool_arguments,
+                "ok": True,
+                "result": result,
+            }
+        except TaskCancelled:
+            raise
+        except Exception as error:
+            observation = {
+                "round": round_index,
+                "kind": "tool",
+                "target": tool_name,
+                "arguments": tool_arguments,
+                "ok": False,
+                "errorType": type(error).__name__,
+                "error": str(error)[:1000],
+            }
+        self.run_logger.log(
+            "OrchestratorAgent",
+            "编排行动观察已记录",
+            event="orchestration_observation",
+            data={
+                "round": round_index,
+                "kind": "tool",
+                "target": tool_name,
+                "ok": observation["ok"],
+            },
+        )
+        return observation
+
+    async def _execute_local_pdf_index_step(
+        self,
+        round_index: int,
+        arguments: dict[str, Any],
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """执行本地 PDF 全文索引 Agent，并把结果记录为可继续规划的观察。"""
+        record_id = str(arguments.get("record_id") or arguments.get("recordId") or "").strip()
+        try:
+            if not record_id:
+                raise ValueError("local_pdf_indexer 缺少 record_id")
+            indexed = await asyncio.to_thread(
+                HunterAgent(log_callback=self.log_callback).index_saved_pdf_text,
+                record_id,
+                cancel_event=cancel_event,
+            )
+            raise_if_task_cancelled(cancel_event)
+            observation = {
+                "round": round_index,
+                "kind": "agent",
+                "target": "local_pdf_indexer",
+                "arguments": {"record_id": record_id},
+                "ok": True,
+                "result": {
+                    "recordId": indexed.get("id", record_id),
+                    "title": indexed.get("title", ""),
+                    "hasParsedFullText": bool(indexed.get("markdownPath")),
+                    "splitChunkCount": indexed.get("splitChunkCount", 0),
+                    "fullTextIndexedBy": indexed.get("fullTextIndexedBy", ""),
+                },
+            }
+        except TaskCancelled:
+            raise
+        except Exception as error:
+            observation = {
+                "round": round_index,
+                "kind": "agent",
+                "target": "local_pdf_indexer",
+                "arguments": {"record_id": record_id},
+                "ok": False,
+                "errorType": type(error).__name__,
+                "error": str(error)[:1000],
+            }
+        self.run_logger.log(
+            "OrchestratorAgent",
+            "PDF 全文索引观察已记录",
+            event="orchestration_observation",
+            data={
+                "round": round_index,
+                "kind": "agent",
+                "target": "local_pdf_indexer",
+                "ok": observation["ok"],
+            },
+        )
+        return observation
+
+    async def _answer_from_observations(
+        self,
+        task: str,
+        observations: list[dict[str, Any]],
+        *,
+        cancel_event: threading.Event | None = None,
+        reached_limit: bool = False,
+    ) -> str:
+        """只依据编排循环的观察结果形成最终回答。"""
+        model = ModelConfigStore().build_model_payload()
+        if not model:
+            raise ValueError("请先配置模型参数")
+        reduced = ObservationReducer(max_items=16, max_string_chars=4000).reduce(observations)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是研究编排循环的回答器。只能使用提供的工具观察回答，不得补充模型记忆或猜测。"
+                    "如果观察不足，明确说明已有信息、缺口和下一步所需材料。"
+                    "不要声称 hasParsedFullText=false 等于没有 PDF。"
+                    + ("编排循环已达到轮数上限，必须给出有边界的结果。" if reached_limit else "")
+                    + f"\n\n{SYSTEM_SECURITY_CONSTRAINT}"
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps({"question": task, "observations": reduced}, ensure_ascii=False),
+            },
+        ]
+        raise_if_task_cancelled(cancel_event)
+        answer = await asyncio.to_thread(
+            chat_completion,
+            model,
+            messages,
+            temperature=0.1,
+            timeout=settings.research_agent_request_timeout,
+        )
+        raise_if_task_cancelled(cancel_event)
+        return answer
+
+    def _direct_loop_result(
+        self,
+        answer: str,
+        observations: list[dict[str, Any]],
+        *,
+        stop_reason: str = "completed",
+    ) -> dict[str, Any]:
+        """构造编排循环基于观察形成的终态结果。"""
+        sources = self._tool_sources_from_orchestration_observations(observations)
+        return {
+            "agent": "orchestrator",
+            "action": "direct" if not observations else "tool",
+            "result": {
+                "answer": answer,
+                "sources": sources,
+                "retrievedSources": sources,
+                "tool": self._first_tool_descriptor(observations),
+                "toolResult": self._first_tool_result(observations),
+                "orchestrationLoop": {
+                    "rounds": len(observations),
+                    "stopReason": stop_reason,
+                    "observations": ObservationReducer().reduce(observations),
+                },
+                "trace": [
+                    {
+                        "step": "orchestration_action",
+                        "agent": "orchestrator",
+                        "status": "completed" if item.get("ok") else "failed",
+                        "target": item.get("target", ""),
+                    }
+                    for item in observations
+                ],
+                "runLog": self.run_logger.public_info(),
+            },
+        }
+
+    @staticmethod
+    def _first_tool_descriptor(observations: list[dict[str, Any]]) -> dict[str, Any]:
+        """保留旧版工具响应字段，便于现有前端与调用方平滑迁移。"""
+        for item in observations:
+            if item.get("kind") == "tool":
+                return {"name": item.get("target", ""), "arguments": item.get("arguments", {})}
+        return {}
+
+    @staticmethod
+    def _first_tool_result(observations: list[dict[str, Any]]) -> dict[str, Any]:
+        """返回编排循环中第一条工具观察结果。"""
+        for item in observations:
+            if item.get("kind") == "tool":
+                return item.get("result", {}) if item.get("ok") else {
+                    "errorType": item.get("errorType", ""),
+                    "error": item.get("error", ""),
+                }
+        return {}
+
+    def _tool_sources_from_orchestration_observations(
+        self,
+        observations: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """适配统一编排观察到现有来源汇总协议。"""
+        legacy = [
+            {
+                "toolName": item.get("target", ""),
+                "ok": item.get("ok", False),
+                "result": item.get("result", {}),
+            }
+            for item in observations
+            if item.get("kind") == "tool"
+        ]
+        return self._tool_sources_from_observations(legacy)
 
     async def _run_read_only_tool(
         self,
@@ -524,6 +926,17 @@ class OrchestratorAgent:
         if action not in self.ALLOWED_ACTIONS - {"auto"}:
             raise ValueError(f"模型选择了未注册的编排动作：{action or '空'}")
         decision: dict[str, Any] = {"action": action, "source": "model"}
+        if action == "final":
+            answer = str(payload.get("answer") or "").strip()
+            if not answer:
+                raise ValueError("模型返回的编排终态回答不能为空")
+            decision["answer"] = answer
+            decision["limitations"] = [
+                str(item).strip()
+                for item in payload.get("limitations") or []
+                if str(item).strip()
+            ][:10]
+            return decision
         if action == "tool":
             tool_name = str(payload.get("toolName") or payload.get("tool_name") or "").strip()
             if not self.tool_registry.has(tool_name):
@@ -532,6 +945,16 @@ class OrchestratorAgent:
             if not isinstance(arguments, dict):
                 raise ValueError("模型返回的工具参数必须是对象")
             decision.update({"toolName": tool_name, "arguments": arguments})
+        elif action == "agent":
+            agent_name = str(payload.get("agentName") or payload.get("agent_name") or "").strip()
+            if agent_name not in self.AGENT_CAPABILITIES:
+                raise ValueError(f"模型选择了未注册 Agent：{agent_name or '空'}")
+            arguments = payload.get("arguments")
+            if not isinstance(arguments, dict):
+                raise ValueError("模型返回的 Agent 参数必须是对象")
+            decision.update({"agentName": agent_name, "arguments": arguments})
+        elif isinstance(payload.get("arguments"), dict):
+            decision["arguments"] = dict(payload["arguments"])
         return decision
 
     def _clean_history(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:

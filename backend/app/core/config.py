@@ -153,6 +153,7 @@ class Settings:
     query_planner_max_facets = int(os.getenv("QUERY_PLANNER_MAX_FACETS", "5"))
     rag_complex_target_evidence = int(os.getenv("RAG_COMPLEX_TARGET_EVIDENCE", "6"))
     orchestrator_max_retrieval_rounds = int(os.getenv("ORCHESTRATOR_MAX_RETRIEVAL_ROUNDS", "2"))
+    orchestrator_max_action_rounds = int(os.getenv("ORCHESTRATOR_MAX_ACTION_ROUNDS", "5"))
     orchestrator_min_facet_coverage = float(os.getenv("ORCHESTRATOR_MIN_FACET_COVERAGE", "0.6"))
     orchestrator_min_method_evidence = int(os.getenv("ORCHESTRATOR_MIN_METHOD_EVIDENCE", "2"))
     orchestrator_search_limit_per_source = int(os.getenv("ORCHESTRATOR_SEARCH_LIMIT_PER_SOURCE", "3"))

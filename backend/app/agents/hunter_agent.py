@@ -985,8 +985,83 @@ class HunterAgent:
         )
         raise_if_task_cancelled(cancel_event)
         saved_paper = self._save_paper_to_db(enriched_paper)
+        try:
+            saved_paper = self.index_saved_pdf_text(
+                str(saved_paper.get("id") or ""),
+                extracted_text=str(extracted.get("text") or ""),
+                parser=str(extracted.get("parser") or "pymupdf"),
+            )
+        except Exception as error:
+            warning = f"PDF 已导入，但本地全文索引失败：{error}"
+            self._log(warning)
+            saved_paper = self.update_saved_paper(
+                str(saved_paper.get("id") or ""),
+                {"fullTextIndexWarning": warning},
+            )
         self._log(f"PDF 导入论文元数据: {saved_paper.get('id')} parser={extracted['parser']}")
         return saved_paper
+
+    def index_saved_pdf_text(
+        self,
+        record_id: str,
+        *,
+        extracted_text: str | None = None,
+        parser: str = "pymupdf",
+        cancel_event=None,
+    ) -> Paper:
+        """把本地 PDF 文本持久化为受管理的 Markdown，并生成 RAG 分块。"""
+        normalized_id = str(record_id or "").strip()
+        if not normalized_id:
+            raise ValueError("record_id is required")
+        paper = self.get_saved_paper(normalized_id)
+        if not paper:
+            raise ValueError(f"Paper record not found: {normalized_id}")
+
+        raise_if_task_cancelled(cancel_event)
+        text = str(extracted_text or "").strip()
+        resolved_parser = str(parser or "pymupdf").strip() or "pymupdf"
+        if not text:
+            pdf_path = self.find_local_pdf_for_paper(paper)
+            if not pdf_path:
+                raise ValueError(f"Paper does not have a readable local PDF: {normalized_id}")
+            extracted = self._extract_pdf_text(pdf_path, cancel_event=cancel_event)
+            text = str(extracted.get("text") or "").strip()
+            resolved_parser = str(extracted.get("parser") or resolved_parser)
+        if not self._pdf_text_looks_usable(text):
+            raise ValueError("PDF 文本不足，无法建立全文索引")
+
+        markdown_root = Path(settings.mineru_output_dir).resolve()
+        safe_record_id = re.sub(r"[^A-Za-z0-9._-]+", "_", normalized_id).strip("._")
+        output_dir = (markdown_root / (safe_record_id or "paper")).resolve()
+        output_dir.relative_to(markdown_root)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        markdown_path = output_dir / "full.md"
+        temporary_path = output_dir / "full.md.tmp"
+        title = str(paper.get("title") or normalized_id).strip()
+        markdown_text = f"# {title}\n\n{text}\n"
+        temporary_path.write_text(markdown_text, encoding="utf-8")
+        temporary_path.replace(markdown_path)
+
+        indexed_at = datetime.now(timezone.utc).isoformat()
+        self.update_saved_paper(
+            normalized_id,
+            {
+                "markdownPath": str(markdown_path),
+                "markdownOutputDir": str(output_dir),
+                "fullTextIndexedBy": resolved_parser,
+                "fullTextIndexedAt": indexed_at,
+                "fullTextIndexWarning": "",
+            },
+        )
+        indexed = self.split_saved_paper_from_markdown(
+            normalized_id,
+            markdown_path=markdown_path,
+        )
+        self._log(
+            f"本地 PDF 全文索引完成：record_id={normalized_id}, "
+            f"parser={resolved_parser}, chars={len(text)}"
+        )
+        return indexed
 
     def _extract_pdf_text(self, pdf_path: Path, *, cancel_event=None) -> dict[str, object]:
         """用 PyMuPDF 快速提取 PDF 文本；文本不足时尝试 MinerU。"""
