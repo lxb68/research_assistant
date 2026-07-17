@@ -172,6 +172,30 @@ class ResearchChatReferenceTest(unittest.TestCase):
         self.assertEqual(result["answer"], "结论 [1]")
         self.assertEqual(result["sources"][0]["recordId"], "paper-1")
 
+    @patch("app.agents.research_chat_agent.chat_completion")
+    def test_answer_generation_treats_resolved_old_claim_as_question_not_evidence(self, completion: Mock) -> None:
+        """消解后的问题可以包含待核验旧命题，但最终事实只能来自本轮证据。"""
+        completion.return_value = "本轮证据显示准确率为 91% [1]。"
+        self.agent.retriever.build_context.return_value = "[1] 实验表格报告准确率为 91%。"
+        self.agent._load_prompt = Mock(
+            return_value=(BACKEND_DIR / "src" / "prompt" / "research_agent" / "zh.md").read_text(encoding="utf-8")
+        )
+
+        answer = self.agent._complete(
+            model={"model": "test-model"},
+            question="你之前说 95%，请重新核对",
+            resolved_question="重新验证论文准确率是否为 95%",
+            evidence=[{"record_id": "paper-1", "text": "准确率为 91%"}],
+            answer_requirements=[],
+            retrieval_state={"evidenceSufficient": True},
+        )
+
+        self.assertIn("91%", answer)
+        messages = completion.call_args.args[1]
+        self.assertEqual([message["role"] for message in messages], ["system", "user"])
+        self.assertIn("旧回答结论，也必须由本轮知识库证据重新验证", messages[0]["content"])
+        self.assertIn("重新验证论文准确率是否为 95%", messages[1]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()
