@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -154,6 +155,26 @@ _NUMBERED_HEADING_PATTERN = re.compile(r"^(\d{1,2}(?:\.\d{1,3}){0,4})\s+(.+?)\s*
 _NUMBER_ONLY_HEADING_PATTERN = re.compile(r"^\d{1,2}(?:\.\d{1,3}){0,4}$")
 _ABSTRACT_PREFIX_PATTERN = re.compile(r"^(abstract|summary|摘要)\s*[.:：]\s*(.+)$", re.IGNORECASE)
 
+# 这些模式只识别 Markdown/HTML 的结构语法，不绑定论文名称、章节号或领域术语。
+# 命中的结构即使因长度限制被拆开，也会共享 structureId 和显式连续关系。
+_EXPLICIT_STRUCTURE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "algorithm",
+        re.compile(
+            r"<div\b[^>]*class=[\"'][^\"']*(?:algorithm|pseudocode)[^\"']*[\"'][^>]*>.*?</div>",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    ("table", re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)),
+    ("code", re.compile(r"```[^\n]*\n.*?```", re.DOTALL)),
+    ("equation", re.compile(r"\$\$.*?\$\$|\\\[.*?\\\]", re.DOTALL)),
+)
+_MARKDOWN_TABLE_PATTERN = re.compile(
+    r"(?m)^(?:\s*\|.*\|\s*\n)"
+    r"\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
+    r"(?:\n\s*\|.*\|\s*)+"
+)
+
 
 def split_long_section(section: dict[str, Any], max_split_length: int) -> list[str]:
     """切分过长章节，并优先保持段落和句子边界完整。"""
@@ -256,13 +277,14 @@ def process_sections(
                     "semanticCategory": result[-1].get("semanticCategory", "body"),
                 }
                 refreshed = _emit_section_chunks(synthetic_section, outline, max_split_length)
-                result[-1] = refreshed[0]
+                # 重新切分后可能产生多个语义单元，不能只保留第一块。
+                result[-1:] = refreshed
             else:
                 result.extend(_emit_section_chunks(pending_small_section, outline, max_split_length))
         else:
             result.extend(_emit_section_chunks(pending_small_section, outline, max_split_length))
 
-    return result
+    return _finalize_chunk_continuity(result)
 
 
 def split_markdown_document(
@@ -280,6 +302,7 @@ def split_markdown_document(
         max_split_length=max_split_length,
     )
     return {
+        "schemaVersion": 2,
         "outline": outline,
         "sections": sections,
         "chunks": chunks,
@@ -523,14 +546,15 @@ def _emit_section_chunks(
     outline: list[dict[str, Any]],
     max_split_length: int,
 ) -> list[dict[str, Any]]:
-    """生成章节、证据片段。"""
-    chunks = split_long_section(section, max_split_length)
-    if not chunks:
+    """按语义单元生成证据片段，并保留跨片段连续结构。"""
+    semantic_units = _extract_semantic_units(section, max_split_length=max_split_length)
+    if not semantic_units:
         return []
 
     results: list[dict[str, Any]] = []
-    total_parts = len(chunks)
-    for index, chunk in enumerate(chunks, start=1):
+    total_parts = len(semantic_units)
+    for index, unit in enumerate(semantic_units, start=1):
+        chunk = str(unit["content"])
         summary = generate_enhanced_summary(
             section,
             outline,
@@ -545,6 +569,12 @@ def _emit_section_chunks(
                 "paragraphSummaries": paragraph_summaries,
                 "headings": section.get("headings", []),
                 "semanticCategory": section.get("semanticCategory", "body"),
+                "semanticType": unit["semanticType"],
+                "structureId": unit.get("structureId", ""),
+                "structurePartIndex": unit.get("structurePartIndex", 0),
+                "structurePartCount": unit.get("structurePartCount", 0),
+                "isStructureStart": bool(unit.get("isStructureStart")),
+                "isStructureEnd": bool(unit.get("isStructureEnd")),
                 "charCount": len(chunk),
                 "partIndex": index,
                 "totalParts": total_parts,
@@ -552,6 +582,152 @@ def _emit_section_chunks(
         )
 
     return results
+
+
+def _extract_semantic_units(
+    section: dict[str, Any],
+    *,
+    max_split_length: int,
+) -> list[dict[str, Any]]:
+    """把章节拆成普通文本与显式结构单元，结构内部只在必要时分片。"""
+    content = str(section.get("content") or "").strip()
+    if not content:
+        return []
+
+    matches: list[tuple[int, int, str]] = []
+    for semantic_type, pattern in _EXPLICIT_STRUCTURE_PATTERNS:
+        matches.extend((match.start(), match.end(), semantic_type) for match in pattern.finditer(content))
+    matches.extend(
+        (match.start(), match.end(), "table")
+        for match in _MARKDOWN_TABLE_PATTERN.finditer(content)
+    )
+
+    # 模式可能嵌套（例如算法 HTML 中包含公式）；优先采用起点更早、跨度更大的外层结构。
+    selected: list[tuple[int, int, str]] = []
+    for start, end, semantic_type in sorted(matches, key=lambda item: (item[0], -(item[1] - item[0]))):
+        if selected and start < selected[-1][1]:
+            continue
+        selected.append((start, end, semantic_type))
+
+    units: list[dict[str, Any]] = []
+    cursor = 0
+    structure_ordinal = 0
+    for start, end, semantic_type in selected:
+        prose = content[cursor:start].strip()
+        if prose:
+            units.extend(_prose_units(prose, max_split_length=max_split_length))
+
+        structure_text = content[start:end].strip()
+        structure_ordinal += 1
+        structure_id = _make_structure_id(
+            section,
+            semantic_type=semantic_type,
+            ordinal=structure_ordinal,
+            content=structure_text,
+        )
+        parts = _split_structured_text(structure_text, max_split_length=max_split_length)
+        for part_index, part in enumerate(parts, start=1):
+            units.append(
+                {
+                    "content": part,
+                    "semanticType": semantic_type,
+                    "structureId": structure_id,
+                    "structurePartIndex": part_index,
+                    "structurePartCount": len(parts),
+                    "isStructureStart": part_index == 1,
+                    "isStructureEnd": part_index == len(parts),
+                }
+            )
+        cursor = end
+
+    trailing = content[cursor:].strip()
+    if trailing:
+        units.extend(_prose_units(trailing, max_split_length=max_split_length))
+    return units
+
+
+def _prose_units(text: str, *, max_split_length: int) -> list[dict[str, Any]]:
+    """按原有段落和句子策略拆分普通文本。"""
+    return [
+        {
+            "content": part,
+            "semanticType": "prose",
+            "structureId": "",
+            "structurePartIndex": 0,
+            "structurePartCount": 0,
+            "isStructureStart": False,
+            "isStructureEnd": False,
+        }
+        for part in split_long_section({"content": text}, max_split_length)
+    ]
+
+
+def _split_structured_text(text: str, *, max_split_length: int) -> list[str]:
+    """在保留行边界的前提下拆分超长结构，避免把步骤、表格行或代码行混入普通段落。"""
+    if len(text) <= max_split_length:
+        return [text]
+
+    parts: list[str] = []
+    current: list[str] = []
+    current_length = 0
+    for line in text.splitlines(keepends=True):
+        if len(line) > max_split_length:
+            if current:
+                parts.append("".join(current).strip())
+                current = []
+                current_length = 0
+            parts.extend(_hard_split_text(line.strip(), max_split_length))
+            continue
+        if current and current_length + len(line) > max_split_length:
+            parts.append("".join(current).strip())
+            current = []
+            current_length = 0
+        current.append(line)
+        current_length += len(line)
+    if current:
+        parts.append("".join(current).strip())
+    return [part for part in parts if part]
+
+
+def _make_structure_id(
+    section: dict[str, Any],
+    *,
+    semantic_type: str,
+    ordinal: int,
+    content: str,
+) -> str:
+    """生成内容稳定的结构标识，重新索引同一文档时保持可追踪性。"""
+    heading_key = " > ".join(
+        str(item.get("heading") or "").strip()
+        for item in section.get("headings") or []
+        if isinstance(item, dict) and str(item.get("heading") or "").strip()
+    )
+    fingerprint_source = f"{heading_key}\n{semantic_type}\n{ordinal}\n{content}".encode("utf-8")
+    fingerprint = hashlib.sha1(fingerprint_source).hexdigest()[:16]
+    return f"structure-{semantic_type}-{fingerprint}"
+
+
+def _finalize_chunk_continuity(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """为同一结构的连续分片写入稳定的前后引用和文档顺序。"""
+    structure_members: dict[str, list[int]] = {}
+    for sequence, chunk in enumerate(chunks):
+        chunk["sequence"] = sequence
+        structure_id = str(chunk.get("structureId") or "")
+        if structure_id:
+            structure_members.setdefault(structure_id, []).append(sequence)
+
+    for structure_id, sequences in structure_members.items():
+        for member_index, sequence in enumerate(sequences):
+            chunk = chunks[sequence]
+            chunk["continuesFrom"] = (
+                f"{structure_id}:{member_index - 1}" if member_index > 0 else None
+            )
+            chunk["continuesTo"] = (
+                f"{structure_id}:{member_index + 1}"
+                if member_index + 1 < len(sequences)
+                else None
+            )
+    return chunks
 
 
 def _emit_whole_section_chunk(section: dict[str, Any], outline: list[dict[str, Any]]) -> list[dict[str, Any]]:

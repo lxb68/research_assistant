@@ -148,6 +148,12 @@ class Settings:
     rag_bm25_weight = float(os.getenv("RAG_BM25_WEIGHT", "0.45"))
     rag_vector_weight = float(os.getenv("RAG_VECTOR_WEIGHT", "0.55"))
     rag_max_chunks_per_paper = int(os.getenv("RAG_MAX_CHUNKS_PER_PAPER", "1"))
+    hybrid_graph_enabled = os.getenv("HYBRID_GRAPH_ENABLED", "true").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    hybrid_graph_project_id = os.getenv("HYBRID_GRAPH_PROJECT_ID", "workspace-domain-tree").strip()
+    hybrid_graph_max_relations = int(os.getenv("HYBRID_GRAPH_MAX_RELATIONS", "8"))
+    hybrid_graph_max_evidence = int(os.getenv("HYBRID_GRAPH_MAX_EVIDENCE", "3"))
     orchestrator_min_evidence = int(os.getenv("ORCHESTRATOR_MIN_EVIDENCE", "2"))
     orchestrator_min_query_coverage = float(os.getenv("ORCHESTRATOR_MIN_QUERY_COVERAGE", "0.28"))
     query_planner_max_facets = int(os.getenv("QUERY_PLANNER_MAX_FACETS", "5"))

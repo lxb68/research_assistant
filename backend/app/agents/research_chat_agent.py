@@ -13,6 +13,13 @@ from app.agents.query_planning_agent import QueryPlanningAgent
 from app.core.config import settings
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
 from app.services.model_client import chat_completion
+from app.services.hybrid_graph_retriever import HybridGraphRetriever
+from app.services.evidence_groups import (
+    evidence_group_is_complete,
+    evidence_group_key,
+    group_evidence,
+    limit_evidence_groups,
+)
 from app.services.rag_factory import build_default_rag_retriever
 from app.services.rag_retriever import EvidenceChunk, RAGRetriever
 from app.services.retrieval_contracts import compile_tfidf_query, normalize_section_types
@@ -58,6 +65,13 @@ class ResearchChatAgent:
             overlap_tokens=self.config.overlap_tokens,
             max_chunks=self.config.max_sources,
             max_context_chars=self.config.max_context_chars,
+        )
+        self.graph_retriever = HybridGraphRetriever(
+            graph_root=Path(settings.backend_storage_dir) / "domain_tree",
+            project_id=settings.hybrid_graph_project_id,
+            enabled=settings.hybrid_graph_enabled,
+            max_relations=settings.hybrid_graph_max_relations,
+            max_evidence=settings.hybrid_graph_max_evidence,
         )
 
     def run(
@@ -125,6 +139,18 @@ class ResearchChatAgent:
                 "chunkIndex": item.get("chunk_index", 0),
                 "tokenCount": item.get("token_count", 0),
                 "baseChunkIndices": item.get("base_chunk_indices", []),
+                "semanticType": item.get("semantic_type", "prose"),
+                "structureId": item.get("structure_id", ""),
+                "structureSequence": item.get("structure_sequence", 0),
+                "continuesFrom": item.get("continues_from"),
+                "continuesTo": item.get("continues_to"),
+                "isStructureStart": bool(item.get("is_structure_start")),
+                "isStructureEnd": bool(item.get("is_structure_end")),
+                "graphBacked": bool(item.get("graph_backed")),
+                "retrievalChannels": list(item.get("retrieval_channels") or []),
+                "graphEvidenceIds": list(item.get("graph_evidence_ids") or []),
+                "graphRelationIds": list(item.get("graph_relation_ids") or []),
+                "graphNavigationClaims": list(item.get("graph_navigation_claims") or []),
                 "excerpt": item["text"][:320],
                 "score": round(float(item["score"]), 4),
             }
@@ -181,6 +207,7 @@ class ResearchChatAgent:
         question_type: str = "simple_fact",
         target_evidence_count: int | None = None,
         existing_evidence: list[dict[str, Any]] | None = None,
+        graph_project_id: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """从本地论文库检索与问题相关的证据片段。"""
         normalized_question = str(question).strip()
@@ -208,6 +235,32 @@ class ResearchChatAgent:
                 minimum_evidence_count=settings.orchestrator_min_evidence,
             )
             retrieval_diagnostics = dict(self.retriever.last_diagnostics)
+        text_evidence_count = len(evidence)
+        try:
+            graph_evidence, graph_diagnostics = self.graph_retriever.retrieve(
+                query,
+                papers=papers,
+                retriever=self.retriever,
+                question_type=question_type,
+                retrieval_facets=facets,
+                project_id=graph_project_id,
+            )
+        except Exception as error:
+            # 图谱是可选导航层，异常不能中断原有全文检索。
+            graph_evidence = []
+            graph_diagnostics = {
+                "enabled": settings.hybrid_graph_enabled,
+                "attempted": True,
+                "graphAvailable": False,
+                "verifiedEvidenceCount": 0,
+                "errorType": type(error).__name__,
+                "error": str(error),
+            }
+        evidence = self.graph_retriever.merge_evidence(
+            evidence,
+            graph_evidence,
+            limit=desired_count,
+        )
         resolved_target_evidence = self.retriever.resolve_chunk_references(papers, target_chunks or [])
         if resolved_target_evidence:
             merged: list[dict[str, Any]] = []
@@ -218,15 +271,20 @@ class ResearchChatAgent:
                     continue
                 seen.add(key)
                 merged.append(item)
-                if len(merged) >= self.config.max_sources:
-                    break
-            evidence = merged
+            # max_sources 约束逻辑证据数量；连续结构的成员不能在这里被再次截断。
+            evidence = limit_evidence_groups(merged, max_groups=self.config.max_sources)
         full_text_paper_count = sum(bool(self.retriever._read_markdown(paper)) for paper in papers)
         diagnostics = {
             "paperCount": len(papers),
             "fullTextPaperCount": full_text_paper_count,
             "fullTextAvailable": bool(papers) and full_text_paper_count == len(papers),
             **retrieval_diagnostics,
+            "hybridRetrieval": {
+                "textEvidenceCount": text_evidence_count,
+                "graphEvidenceCount": len(graph_evidence),
+                "mergedEvidenceCount": len(evidence),
+                "graph": graph_diagnostics,
+            },
         }
         diagnostics.update(
             {
@@ -249,6 +307,7 @@ class ResearchChatAgent:
                 ],
             }
         )
+        self.retriever.last_diagnostics = diagnostics
         return evidence, diagnostics
 
     def _retrieve_facets(
@@ -303,31 +362,35 @@ class ResearchChatAgent:
                 }
             )
             retrieval_runs.append(run_diagnostics)
-            for rank, raw_item in enumerate(results[:per_facet_limit], start=1):
-                item = dict(raw_item)
-                key = (str(item.get("record_id") or ""), int(item.get("chunk_index") or 0))
-                section_type = self._classify_evidence_type(
-                    str(item.get("section") or ""),
-                    str(item.get("text") or ""),
-                )
-                section_adjustment = self._section_intent_adjustment(
-                    question_type=question_type,
-                    section_type=section_type,
-                    preferred_types=preferred_types,
-                )
-                contribution = float(item.get("score") or 0) + section_adjustment + 1 / (20 + rank)
-                if key not in merged:
-                    item["matched_facet_ids"] = [facet_id]
-                    item["section_type"] = section_type
-                    item["fusion_score"] = contribution
-                    merged[key] = item
-                else:
-                    current = merged[key]
-                    if facet_id not in current["matched_facet_ids"]:
-                        current["matched_facet_ids"].append(facet_id)
-                        current["fusion_score"] += 0.08
-                    current["fusion_score"] = max(float(current["fusion_score"]), contribution)
-                    current["score"] = max(float(current.get("score") or 0), float(item.get("score") or 0))
+            # per_facet_limit 限制逻辑证据组，而不是物理 chunk 数；否则底层刚补齐的
+            # 算法/表格后半段会在这里被切掉。
+            facet_groups = group_evidence(results)[:per_facet_limit]
+            for rank, group in enumerate(facet_groups, start=1):
+                for raw_item in group:
+                    item = dict(raw_item)
+                    key = (str(item.get("record_id") or ""), int(item.get("chunk_index") or 0))
+                    section_type = self._classify_evidence_type(
+                        str(item.get("section") or ""),
+                        str(item.get("text") or ""),
+                    )
+                    section_adjustment = self._section_intent_adjustment(
+                        question_type=question_type,
+                        section_type=section_type,
+                        preferred_types=preferred_types,
+                    )
+                    contribution = float(item.get("score") or 0) + section_adjustment + 1 / (20 + rank)
+                    if key not in merged:
+                        item["matched_facet_ids"] = [facet_id]
+                        item["section_type"] = section_type
+                        item["fusion_score"] = contribution
+                        merged[key] = item
+                    else:
+                        current = merged[key]
+                        if facet_id not in current["matched_facet_ids"]:
+                            current["matched_facet_ids"].append(facet_id)
+                            current["fusion_score"] += 0.08
+                        current["fusion_score"] = max(float(current["fusion_score"]), contribution)
+                        current["score"] = max(float(current.get("score") or 0), float(item.get("score") or 0))
 
         for raw_item in existing_evidence:
             item = dict(raw_item)
@@ -344,52 +407,87 @@ class ResearchChatAgent:
             if key not in merged:
                 merged[key] = item
 
-        ranked = sorted(merged.values(), key=lambda item: float(item.get("fusion_score") or 0), reverse=True)
+        ranked_chunks = sorted(merged.values(), key=lambda item: float(item.get("fusion_score") or 0), reverse=True)
+        ranked_groups = group_evidence(ranked_chunks)
+        ranked_groups.sort(
+            key=lambda group: max(float(item.get("fusion_score") or 0) for item in group),
+            reverse=True,
+        )
         selected: list[dict[str, Any]] = []
         selected_keys: set[tuple[str, int]] = set()
         per_section: dict[tuple[str, str], int] = {}
         context_chars = 0
         meaningful_sections = {
             (str(item.get("record_id") or ""), str(item.get("section") or "").strip().casefold())
-            for item in ranked
+            for item in ranked_chunks
             if str(item.get("section") or "").strip()
             and str(item.get("section") or "").strip().casefold()
             != str(item.get("title") or "").strip().casefold()
         }
-        section_metadata_degraded = len(ranked) > 2 and not meaningful_sections
+        section_metadata_degraded = len(ranked_chunks) > 2 and not meaningful_sections
         per_section_limit = target_evidence_count if section_metadata_degraded else 2
 
-        def try_select(item: dict[str, Any]) -> bool:
+        def try_select_group(group: list[dict[str, Any]]) -> bool:
             nonlocal context_chars
-            key = (str(item.get("record_id") or ""), int(item.get("chunk_index") or 0))
-            if key in selected_keys:
+            if not group:
                 return False
-            section_key = (str(item.get("record_id") or ""), str(item.get("section") or ""))
+            group_keys = {
+                (str(item.get("record_id") or ""), int(item.get("chunk_index") or 0))
+                for item in group
+            }
+            if group_keys <= selected_keys:
+                return False
+            representative = group[0]
+            section_key = (
+                str(representative.get("record_id") or ""),
+                str(representative.get("section") or ""),
+            )
             if per_section.get(section_key, 0) >= per_section_limit:
                 return False
-            text_size = len(str(item.get("text") or ""))
+            new_members = [
+                item
+                for item in group
+                if (str(item.get("record_id") or ""), int(item.get("chunk_index") or 0))
+                not in selected_keys
+            ]
+            text_size = sum(len(str(item.get("text") or "")) for item in new_members)
             if context_chars + text_size > self.config.max_context_chars:
                 return False
-            selected.append(item)
-            selected_keys.add(key)
+            selected.extend(new_members)
+            selected_keys.update(group_keys)
+            # 同一结构的全部成员只消耗一个章节多样性名额。
             per_section[section_key] = per_section.get(section_key, 0) + 1
             context_chars += text_size
             return True
 
-        # 先覆盖每个动态检索 facet，再用全局融合分补满剩余上下文。
+        # 先覆盖每个动态检索 facet，再用全局融合分补满剩余逻辑证据组。
+        selected_group_keys: set[tuple[str, str, str | int]] = set()
         for facet in facets:
             facet_id = str(facet.get("id") or "")
             if not facet_id:
                 continue
-            for item in ranked:
-                if facet_id in (item.get("matched_facet_ids") or []) and try_select(item):
+            for group in ranked_groups:
+                matched_facets = {
+                    str(value)
+                    for item in group
+                    for value in item.get("matched_facet_ids") or []
+                }
+                if facet_id not in matched_facets:
+                    continue
+                group_key = evidence_group_key(group[0])
+                if group_key in selected_group_keys:
                     break
-            if len(selected) >= target_evidence_count:
+                if try_select_group(group):
+                    selected_group_keys.add(group_key)
+                    break
+            if len(selected_group_keys) >= target_evidence_count:
                 break
-        if len(selected) < target_evidence_count:
-            for item in ranked:
-                try_select(item)
-                if len(selected) >= target_evidence_count:
+        if len(selected_group_keys) < target_evidence_count:
+            for group in ranked_groups:
+                group_key = evidence_group_key(group[0])
+                if try_select_group(group):
+                    selected_group_keys.add(group_key)
+                if len(selected_group_keys) >= target_evidence_count:
                     break
 
         selected_facet_ids = {
@@ -402,6 +500,8 @@ class ResearchChatAgent:
         section_types = {str(item.get("section_type") or "background") for item in selected}
         method_types = {"method", "framework", "protocol", "algorithm", "implementation", "overview"}
         query_coverages = [float(item.get("queryCoverage") or 0) for item in retrieval_runs]
+        final_groups = group_evidence(selected)
+        structured_groups = [group for group in final_groups if str(group[0].get("structure_id") or "")]
         diagnostics = {
             "retrievalMode": "+".join(dict.fromkeys(str(item.get("retrievalMode") or "") for item in retrieval_runs)),
             "embeddingBackend": "+".join(dict.fromkeys(str(item.get("embeddingBackend") or "") for item in retrieval_runs)),
@@ -429,6 +529,15 @@ class ResearchChatAgent:
             "sectionMetadataDegraded": section_metadata_degraded,
             "perSectionEvidenceLimit": per_section_limit,
             "targetEvidenceCount": target_evidence_count,
+            "selectedEvidenceGroupCount": len(final_groups),
+            "selectedStructureCount": len(structured_groups),
+            "selectedContinuationCount": sum(
+                bool(item.get("continues_from") or item.get("continues_to"))
+                for item in selected
+            ),
+            "incompleteStructureCount": sum(
+                not evidence_group_is_complete(group) for group in structured_groups
+            ),
             "retrievalRuns": retrieval_runs,
         }
         return selected, diagnostics

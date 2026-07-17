@@ -24,6 +24,12 @@ class BaseMarkdownBlock:
     headings: list[dict[str, Any]] = field(default_factory=list)
     summary: str = ""
     semantic_category: str = "body"
+    semantic_type: str = "prose"
+    structure_id: str = ""
+    structure_part_index: int = 0
+    structure_part_count: int = 0
+    continues_from: str | None = None
+    continues_to: str | None = None
 
 
 @dataclass(slots=True)
@@ -36,6 +42,13 @@ class PreparedRAGChunk:
     base_chunk_indices: list[int]
     overlap_token_count: int = 0
     summary: str = ""
+    semantic_type: str = "prose"
+    structure_id: str = ""
+    structure_sequence: int = 0
+    continues_from: str | None = None
+    continues_to: str | None = None
+    is_structure_start: bool = False
+    is_structure_end: bool = False
 
 
 @dataclass(slots=True)
@@ -43,8 +56,10 @@ class _SectionGroup:
     """保存同一标题路径下连续基础块合并后的中间结果。"""
 
     section: str
-    contents: list[tuple[str, int]]
+    contents: list[tuple[str, BaseMarkdownBlock]]
     summaries: list[str]
+    structure_id: str = ""
+    semantic_type: str = "prose"
 
 
 @dataclass(slots=True)
@@ -53,6 +68,8 @@ class _SemanticUnit:
 
     text: str
     base_chunk_indices: set[int]
+    semantic_type: str = "prose"
+    structure_id: str = ""
 
 
 class MarkdownRAGChunker:
@@ -84,6 +101,12 @@ class MarkdownRAGChunker:
                 headings=block.headings,
                 summary=re.sub(r"\s+", " ", block.summary).strip(),
                 semantic_category=block.semantic_category,
+                semantic_type=block.semantic_type or "prose",
+                structure_id=block.structure_id,
+                structure_part_index=block.structure_part_index,
+                structure_part_count=block.structure_part_count,
+                continues_from=block.continues_from,
+                continues_to=block.continues_to,
             )
             for block in blocks
             if str(block.content or "").strip()
@@ -92,12 +115,17 @@ class MarkdownRAGChunker:
         chunks: list[PreparedRAGChunk] = []
         for group in groups:
             units = [
-                _SemanticUnit(text=unit, base_chunk_indices={base_index})
-                for content, base_index in group.contents
+                _SemanticUnit(
+                    text=unit,
+                    base_chunk_indices={block.index},
+                    semantic_type=group.semantic_type,
+                    structure_id=group.structure_id,
+                )
+                for content, block in group.contents
                 for unit in self._semantic_units(content)
             ]
             chunks.extend(self._pack_group(group, units))
-        return chunks
+        return self._finalize_structure_continuity(chunks)
 
     def normalize_markdown(self, text: str) -> str:
         """统一换行、行尾空格和多余空行，同时保留 Markdown 结构。"""
@@ -137,16 +165,25 @@ class MarkdownRAGChunker:
             content = self._strip_repeated_heading(block.content, section)
             if not content:
                 continue
-            if groups and groups[-1].section == section:
-                groups[-1].contents.append((content, block.index))
+            structure_id = str(block.structure_id or "")
+            semantic_type = str(block.semantic_type or "prose")
+            if (
+                groups
+                and groups[-1].section == section
+                and groups[-1].structure_id == structure_id
+                and groups[-1].semantic_type == semantic_type
+            ):
+                groups[-1].contents.append((content, block))
                 if block.summary:
                     groups[-1].summaries.append(block.summary)
                 continue
             groups.append(
                 _SectionGroup(
                     section=section,
-                    contents=[(content, block.index)],
+                    contents=[(content, block)],
                     summaries=[block.summary] if block.summary else [],
+                    structure_id=structure_id,
+                    semantic_type=semantic_type,
                 )
             )
         return groups
@@ -244,7 +281,9 @@ class MarkdownRAGChunker:
                 or self.estimate_tokens("\n\n".join(item.text for item in current)) >= self.target_tokens
             ):
                 packed_units.append(current)
-                overlap = self._tail_overlap(current)
+                # 连续结构使用显式 continuesFrom/continuesTo 表达关系，避免重复算法步骤、
+                # 表格行或代码行；普通文本仍沿用受控 Token 重叠。
+                overlap = [] if group.structure_id else self._tail_overlap(current)
                 current = [*overlap, unit]
                 while len(current) > 1 and self.estimate_tokens("\n\n".join(item.text for item in current)) > self.max_tokens:
                     current.pop(0)
@@ -274,10 +313,32 @@ class MarkdownRAGChunker:
                     base_chunk_indices=base_chunk_indices,
                     overlap_token_count=overlap_count,
                     summary=summary,
+                    semantic_type=group.semantic_type,
+                    structure_id=group.structure_id,
                 )
             )
             previous_text = text
         return results
+
+    def _finalize_structure_continuity(
+        self,
+        chunks: list[PreparedRAGChunk],
+    ) -> list[PreparedRAGChunk]:
+        """按最终 RAG 分片重新计算结构序号与连续引用。"""
+        members: dict[str, list[PreparedRAGChunk]] = {}
+        for chunk in chunks:
+            if chunk.structure_id:
+                members.setdefault(chunk.structure_id, []).append(chunk)
+
+        for structure_id, structure_chunks in members.items():
+            total = len(structure_chunks)
+            for sequence, chunk in enumerate(structure_chunks):
+                chunk.structure_sequence = sequence
+                chunk.continues_from = f"{structure_id}:{sequence - 1}" if sequence > 0 else None
+                chunk.continues_to = f"{structure_id}:{sequence + 1}" if sequence + 1 < total else None
+                chunk.is_structure_start = sequence == 0
+                chunk.is_structure_end = sequence + 1 == total
+        return chunks
 
     def _tail_overlap(self, units: list[_SemanticUnit]) -> list[_SemanticUnit]:
         """选择上一块末尾不超过重叠预算的完整语义单元。"""

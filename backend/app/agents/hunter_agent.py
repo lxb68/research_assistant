@@ -741,6 +741,7 @@ class HunterAgent:
         )
         updates = {
             "splitStrategy": "document-structure",
+            "splitSchemaVersion": split_result["schemaVersion"],
             "splitMinimumLength": effective_min,
             "splitMaximumLength": effective_max,
             "splitOutline": split_result["outline"],

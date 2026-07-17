@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import math
 import re
 from collections import Counter, defaultdict
@@ -51,6 +52,13 @@ class EvidenceChunk:
     overlap_token_count: int = 0
     base_chunk_indices: list[int] | None = None
     summary: str = ""
+    semantic_type: str = "prose"
+    structure_id: str = ""
+    structure_sequence: int = 0
+    continues_from: str | None = None
+    continues_to: str | None = None
+    is_structure_start: bool = False
+    is_structure_end: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """把当前数据对象转换为接口可返回的字典。"""
@@ -67,6 +75,13 @@ class EvidenceChunk:
             "token_count": self.token_count,
             "overlap_token_count": self.overlap_token_count,
             "base_chunk_indices": self.base_chunk_indices or [],
+            "semantic_type": self.semantic_type,
+            "structure_id": self.structure_id,
+            "structure_sequence": self.structure_sequence,
+            "continues_from": self.continues_from,
+            "continues_to": self.continues_to,
+            "is_structure_start": self.is_structure_start,
+            "is_structure_end": self.is_structure_end,
         }
 
 
@@ -202,6 +217,7 @@ class RAGRetriever:
             ranked,
             max_chunks_per_paper=effective_max_chunks_per_paper,
         )
+        selected = self._complete_selected_structures(selected, candidates)
         selected_text = " ".join(self._searchable_text(item).lower() for item in selected)
         unique_query_tokens = set(query_tokens)
         matched_query_tokens = {token for token in unique_query_tokens if token in selected_text}
@@ -218,6 +234,15 @@ class RAGRetriever:
             ),
             "maxChunkTokens": max(candidate_token_counts, default=0),
             "overlappedChunkCount": sum(item.overlap_token_count > 0 for item in candidates),
+            "structuredCandidateCount": sum(bool(item.structure_id) for item in candidates),
+            "selectedStructureCount": len({
+                (item.record_id, item.structure_id)
+                for item in selected
+                if item.structure_id
+            }),
+            "selectedContinuationCount": sum(
+                bool(item.continues_from or item.continues_to) for item in selected
+            ),
             "evidenceCount": len(selected),
             "distinctPaperCount": len({item.record_id for item in selected}),
             "selectedPaperIds": list(dict.fromkeys(item.record_id for item in selected)),
@@ -228,6 +253,76 @@ class RAGRetriever:
             "topScore": round(selected[0].score, 4) if selected else 0.0,
         }
         return [item.to_dict() for item in selected]
+
+    def _complete_selected_structures(
+        self,
+        selected: list[EvidenceChunk],
+        candidates: list[EvidenceChunk],
+    ) -> list[EvidenceChunk]:
+        """命中连续结构时优先携带相邻分片，避免只返回算法、表格或代码的中段。"""
+        if not selected or not any(item.structure_id for item in selected):
+            return selected
+
+        members: dict[tuple[str, str], list[EvidenceChunk]] = defaultdict(list)
+        for candidate in candidates:
+            if candidate.structure_id:
+                members[(candidate.record_id, candidate.structure_id)].append(candidate)
+        for values in members.values():
+            values.sort(key=lambda item: item.structure_sequence)
+
+        completed: list[EvidenceChunk] = []
+        seen: set[tuple[str, int]] = set()
+        context_size = 0
+
+        def append(item: EvidenceChunk) -> bool:
+            nonlocal context_size
+            key = (item.record_id, item.chunk_index)
+            if key in seen:
+                return False
+            if len(completed) >= self.max_chunks:
+                return False
+            if context_size + len(item.text) > self.max_context_chars:
+                return False
+            completed.append(item)
+            seen.add(key)
+            context_size += len(item.text)
+            return True
+
+        expanded_structures: set[tuple[str, str]] = set()
+        for seed in selected:
+            structure_key = (seed.record_id, seed.structure_id)
+            if seed.structure_id and structure_key not in expanded_structures:
+                expanded_structures.add(structure_key)
+                structure_members = members.get(structure_key, [seed])
+                remaining_capacity = self.max_chunks - len(completed)
+                seed_position = next(
+                    (
+                        index
+                        for index, member in enumerate(structure_members)
+                        if member.chunk_index == seed.chunk_index
+                    ),
+                    0,
+                )
+                # 超长结构无法一次装入时，选择包含命中片段的连续窗口，不能只取结构开头。
+                window_start = max(
+                    0,
+                    min(
+                        seed_position - remaining_capacity // 2,
+                        len(structure_members) - remaining_capacity,
+                    ),
+                )
+                structure_window = structure_members[
+                    window_start : window_start + remaining_capacity
+                ]
+                for member in structure_window:
+                    append(member)
+                continue
+            append(seed)
+
+        # 若结构补全仍有余量，继续保留原排序中的非结构证据。
+        for seed in selected:
+            append(seed)
+        return completed
 
     def _effective_max_chunks_per_paper(
         self,
@@ -252,6 +347,20 @@ class RAGRetriever:
                 metadata.append(str(item["year"]))
             if item.get("section"):
                 metadata.append(f"章节：{item['section']}")
+            if item.get("structure_id"):
+                position = int(item.get("structure_sequence") or 0) + 1
+                relation = ""
+                if item.get("continues_from") and item.get("continues_to"):
+                    relation = "，前后均有连续片段"
+                elif item.get("continues_from"):
+                    relation = "，承接上一片段"
+                elif item.get("continues_to"):
+                    relation = "，后续仍有连续片段"
+                metadata.append(
+                    f"连续结构：{str(item.get('semantic_type') or 'structure')} 第 {position} 段{relation}"
+                )
+            if item.get("graph_backed"):
+                metadata.append("检索路径：知识图谱导航后已回查原文")
             blocks.append(f"[{index}] {' · '.join(metadata)}\n{str(item.get('text') or '').strip()}")
         return "\n\n---\n\n".join(blocks)
 
@@ -278,6 +387,76 @@ class RAGRetriever:
                     matches[key] = chunk
         return [matches[key].to_dict() for key in requested if key in matches]
 
+    def resolve_quote_references(
+        self,
+        papers: list[dict[str, Any]],
+        references: list[dict[str, Any]],
+        *,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        """用 `documentId + evidenceQuote` 把图谱导航结果回定位到当前 RAG 原文块。"""
+        # 图谱导航需要先核验全部候选，再由上层裁剪最终回答证据。
+        safe_limit = max(1, int(limit))
+        chunks_by_paper = {
+            str(paper.get("id") or paper.get("recordId") or ""): self._paper_chunks(paper)
+            for paper in papers
+            if str(paper.get("id") or paper.get("recordId") or "")
+        }
+        resolved: dict[tuple[str, int], dict[str, Any]] = {}
+        for reference in references:
+            record_id = str(reference.get("recordId") or reference.get("record_id") or "").strip()
+            quote = self._normalize_quote(reference.get("quote"))
+            if not record_id or not quote or record_id not in chunks_by_paper:
+                continue
+            expected_section = str(reference.get("section") or "").strip().casefold()
+            matches: list[tuple[float, EvidenceChunk]] = []
+            for chunk in chunks_by_paper[record_id]:
+                normalized_text = self._normalize_quote(chunk.text)
+                if quote not in normalized_text:
+                    continue
+                score = float(reference.get("relevanceScore") or 0) + 1.0
+                if expected_section and expected_section in chunk.section.casefold():
+                    score += 0.15
+                matches.append((score, chunk))
+            if not matches:
+                continue
+            score, chunk = max(matches, key=lambda item: item[0])
+            key = (record_id, chunk.chunk_index)
+            item = resolved.setdefault(
+                key,
+                {
+                    **chunk.to_dict(),
+                    "score": max(float(chunk.score), score),
+                    "graph_backed": True,
+                    "retrieval_channels": ["graph_navigation", "original_text"],
+                    "graph_evidence_ids": [],
+                    "graph_relation_ids": [],
+                    "graph_navigation_claims": [],
+                    "graph_quotes": [],
+                },
+            )
+            item["score"] = max(float(item.get("score") or 0), score)
+            graph_evidence_id = str(reference.get("graphEvidenceId") or "")
+            if graph_evidence_id and graph_evidence_id not in item["graph_evidence_ids"]:
+                item["graph_evidence_ids"].append(graph_evidence_id)
+            for relation_id in reference.get("relationIds") or []:
+                relation_id = str(relation_id)
+                if relation_id and relation_id not in item["graph_relation_ids"]:
+                    item["graph_relation_ids"].append(relation_id)
+            for claim in reference.get("navigationClaims") or []:
+                claim = str(claim).strip()
+                if claim and claim not in item["graph_navigation_claims"]:
+                    item["graph_navigation_claims"].append(claim)
+            raw_quote = str(reference.get("quote") or "").strip()
+            if raw_quote and raw_quote not in item["graph_quotes"]:
+                item["graph_quotes"].append(raw_quote)
+
+        return sorted(
+            resolved.values(),
+            key=lambda item: float(item.get("score") or 0),
+            reverse=True,
+        )[:safe_limit]
+
     def list_paper_sections(self, paper: dict[str, Any], *, limit: int = 20) -> list[dict[str, Any]]:
         """以稳定的只读结构返回论文分块章节，供目录工具复用。"""
         safe_limit = max(1, min(int(limit), 50))
@@ -287,6 +466,11 @@ class RAGRetriever:
                 "section": chunk.section,
                 "summary": chunk.summary,
                 "tokenCount": chunk.token_count,
+                "semanticType": chunk.semantic_type,
+                "structureId": chunk.structure_id,
+                "structureSequence": chunk.structure_sequence,
+                "continuesFrom": chunk.continues_from,
+                "continuesTo": chunk.continues_to,
                 "excerpt": chunk.text[:1200],
             }
             for chunk in self._paper_chunks(paper)[:safe_limit]
@@ -318,6 +502,8 @@ class RAGRetriever:
                 )
                 summary = str(raw.get("summary") or "").strip()
                 category = str(raw.get("semanticCategory") or raw.get("semantic_category") or "").strip().lower()
+                semantic_type = str(raw.get("semanticType") or raw.get("semantic_type") or "prose").strip().lower()
+                structure_id = str(raw.get("structureId") or raw.get("structure_id") or "").strip()
                 if self._is_excluded(category=category, section=section, text=f"{summary}\n{content}"):
                     continue
                 base_blocks.append(
@@ -327,6 +513,12 @@ class RAGRetriever:
                         headings=headings,
                         summary=summary,
                         semantic_category=category or "body",
+                        semantic_type=semantic_type or "prose",
+                        structure_id=structure_id,
+                        structure_part_index=int(raw.get("structurePartIndex") or raw.get("structure_part_index") or 0),
+                        structure_part_count=int(raw.get("structurePartCount") or raw.get("structure_part_count") or 0),
+                        continues_from=raw.get("continuesFrom") or raw.get("continues_from"),
+                        continues_to=raw.get("continuesTo") or raw.get("continues_to"),
                     )
                 )
             if base_blocks:
@@ -346,6 +538,13 @@ class RAGRetriever:
                         overlap_token_count=item.overlap_token_count,
                         base_chunk_indices=item.base_chunk_indices,
                         summary=item.summary,
+                        semantic_type=item.semantic_type,
+                        structure_id=item.structure_id,
+                        structure_sequence=item.structure_sequence,
+                        continues_from=item.continues_from,
+                        continues_to=item.continues_to,
+                        is_structure_start=item.is_structure_start,
+                        is_structure_end=item.is_structure_end,
                     )
                     for index, item in enumerate(prepared)
                 ]
@@ -382,6 +581,13 @@ class RAGRetriever:
                 overlap_token_count=item.overlap_token_count,
                 base_chunk_indices=item.base_chunk_indices,
                 summary=item.summary,
+                semantic_type=item.semantic_type,
+                structure_id=item.structure_id,
+                structure_sequence=item.structure_sequence,
+                continues_from=item.continues_from,
+                continues_to=item.continues_to,
+                is_structure_start=item.is_structure_start,
+                is_structure_end=item.is_structure_end,
             )
             for index, item in enumerate(prepared)
         ]
@@ -415,6 +621,11 @@ class RAGRetriever:
     def _searchable_text(self, chunk: EvidenceChunk) -> str:
         """拼接证据片段中参与检索的字段。"""
         return f"{chunk.title} {chunk.section} {chunk.summary} {chunk.text}"
+
+    @staticmethod
+    def _normalize_quote(value: Any) -> str:
+        """以保守方式规范空白和 HTML 实体，保持逐字回查语义。"""
+        return re.sub(r"\s+", " ", html.unescape(str(value or ""))).strip()
 
     def _tokenize(self, text: str) -> list[str]:
         """按中英文规则把文本切分为检索词元。"""

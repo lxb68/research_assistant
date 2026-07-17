@@ -204,6 +204,91 @@ class RAGRetrieverChunkIntegrationTest(unittest.TestCase):
         self.assertEqual(len(evidence), 1)
         self.assertIn("1: locally prepare inputs", evidence[0]["text"])
 
+    def test_retrieval_completes_adjacent_parts_of_selected_structure(self) -> None:
+        """命中结构中段时，应在上下文预算内带回同一结构的相邻分片。"""
+        retriever = RAGRetriever(
+            target_chunk_tokens=8,
+            max_chunk_tokens=12,
+            overlap_tokens=0,
+            max_chunks=4,
+            max_chunks_per_paper=1,
+        )
+        paper = {
+            "id": "paper-1",
+            "title": "Structured Method",
+            "splitChunks": [
+                {
+                    "content": "1: prepare inputs\n2: initialize shared state",
+                    "semanticType": "algorithm",
+                    "structureId": "structure-algorithm-1",
+                    "structurePartIndex": 1,
+                    "structurePartCount": 2,
+                },
+                {
+                    "content": "3: compute unique_target_score\n4: return outputs",
+                    "semanticType": "algorithm",
+                    "structureId": "structure-algorithm-1",
+                    "structurePartIndex": 2,
+                    "structurePartCount": 2,
+                },
+            ],
+        }
+
+        evidence = retriever.retrieve("unique_target_score", [paper])
+
+        self.assertGreater(len(evidence), 1)
+        self.assertEqual(
+            [item["structure_sequence"] for item in evidence],
+            list(range(len(evidence))),
+        )
+        self.assertTrue(evidence[0]["is_structure_start"])
+        self.assertTrue(evidence[-1]["is_structure_end"])
+        self.assertIsNotNone(evidence[0]["continues_to"])
+        self.assertIsNotNone(evidence[-1]["continues_from"])
+
+    def test_structure_window_keeps_hit_when_structure_exceeds_context_capacity(self) -> None:
+        """结构长于容量时应选择命中点附近的连续窗口，不能退化为只取结构开头。"""
+        retriever = RAGRetriever(max_chunks=4, max_context_chars=10000)
+        candidates = [
+            EvidenceChunk(
+                record_id="paper-1",
+                title="Long Structure",
+                text=f"part {index}",
+                score=1.0 if index == 6 else 0.1,
+                chunk_index=index,
+                structure_id="structure-algorithm-long",
+                structure_sequence=index,
+                continues_from=(f"structure-algorithm-long:{index - 1}" if index else None),
+                continues_to=(f"structure-algorithm-long:{index + 1}" if index < 7 else None),
+            )
+            for index in range(8)
+        ]
+
+        completed = retriever._complete_selected_structures([candidates[6]], candidates)
+
+        self.assertEqual([item.structure_sequence for item in completed], [4, 5, 6, 7])
+        self.assertIn(candidates[6], completed)
+
+    def test_context_marks_continuous_structure_without_exposing_only_plain_chunks(self) -> None:
+        """回答上下文应明确片段属于连续结构，普通片段保持原格式。"""
+        retriever = RAGRetriever()
+        context = retriever.build_context(
+            [
+                {
+                    "title": "Paper",
+                    "text": "step content",
+                    "semantic_type": "algorithm",
+                    "structure_id": "structure-algorithm-1",
+                    "structure_sequence": 1,
+                    "continues_from": "structure-algorithm-1:0",
+                    "continues_to": "structure-algorithm-1:2",
+                }
+            ]
+        )
+
+        self.assertIn("连续结构：algorithm 第 2 段", context)
+        self.assertIn("前后均有连续片段", context)
+
 
 if __name__ == "__main__":
     unittest.main()

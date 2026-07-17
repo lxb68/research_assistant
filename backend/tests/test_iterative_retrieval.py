@@ -127,6 +127,56 @@ class QueryPlanningAndRetrievalTest(unittest.TestCase):
         self.assertIn("contribution", compiled)
         self.assertIn("framework", compiled)
 
+    def test_facet_fusion_keeps_all_members_of_selected_structure(self) -> None:
+        """多 facet 融合不能把底层已经补齐的连续算法重新截断。"""
+        self.agent.retriever.last_diagnostics = {
+            "retrievalMode": "hybrid_tfidf",
+            "embeddingBackend": "tfidf",
+            "queryCoverage": 0.8,
+            "candidateCount": 4,
+        }
+        self.agent.retriever.retrieve.return_value = [
+            {
+                "record_id": "paper-1", "chunk_index": 10, "title": "Protocol",
+                "section": "Algorithm", "text": "1: prepare inputs\n2: compute state", "score": 1.2,
+                "semantic_type": "algorithm", "structure_id": "structure-algorithm-1",
+                "structure_sequence": 0, "continues_from": None,
+                "continues_to": "structure-algorithm-1:1",
+            },
+            {
+                "record_id": "paper-1", "chunk_index": 20, "title": "Protocol",
+                "section": "Background", "text": "related background", "score": 0.9,
+            },
+            {
+                "record_id": "paper-1", "chunk_index": 21, "title": "Protocol",
+                "section": "Discussion", "text": "related discussion", "score": 0.8,
+            },
+            {
+                "record_id": "paper-1", "chunk_index": 11, "title": "Protocol",
+                "section": "Algorithm", "text": "3: compute output\n4: write shares", "score": 1.1,
+                "semantic_type": "algorithm", "structure_id": "structure-algorithm-1",
+                "structure_sequence": 1, "continues_from": "structure-algorithm-1:0",
+                "continues_to": None,
+            },
+        ]
+
+        evidence, diagnostics = self.agent._retrieve_facets(
+            [{"id": "paper-1", "title": "Protocol"}],
+            [{
+                "id": "protocol", "goal": "完整协议", "query": "target output protocol",
+                "preferredSectionTypes": ["algorithm"],
+            }],
+            question_type="mechanism",
+            target_evidence_count=2,
+            existing_evidence=[],
+        )
+
+        selected_indices = {int(item["chunk_index"]) for item in evidence}
+        self.assertIn(10, selected_indices)
+        self.assertIn(11, selected_indices)
+        self.assertEqual(diagnostics["incompleteStructureCount"], 0)
+        self.assertEqual(diagnostics["selectedStructureCount"], 1)
+
     def test_putting_everything_together_is_classified_as_overview(self) -> None:
         section_type = self.agent._classify_section_type("Paper Title > 4.6 Putting Everything Together")
         self.assertEqual(section_type, "overview")
