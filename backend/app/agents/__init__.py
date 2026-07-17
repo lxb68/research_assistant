@@ -7,6 +7,7 @@ from app.agents.research_chat_agent import ResearchAgentConfig, ResearchChatAgen
 from app.agents.query_planning_agent import QueryPlanningAgent
 from app.agents.evidence_evaluator import EvidenceEvaluator
 from app.agents.error_recovery_agent import ErrorRecoveryAgent, RecoveryDecision, RecoveryExhaustedError
+from app.agents.tool_loop_agent import ObservationReducer, ToolLoopAgent
 
 __all__ = [
     "HunterAgent",
@@ -20,4 +21,6 @@ __all__ = [
     "ErrorRecoveryAgent",
     "RecoveryDecision",
     "RecoveryExhaustedError",
+    "ObservationReducer",
+    "ToolLoopAgent",
 ]

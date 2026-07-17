@@ -12,7 +12,7 @@ from app.agents.query_planning_agent import QueryPlanningAgent
 from app.core.config import settings
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
 from app.services.model_client import chat_completion
-from app.services.embedding_store import EmbeddingClient, SQLiteVectorStore
+from app.services.rag_factory import build_default_rag_retriever
 from app.services.rag_retriever import EvidenceChunk, RAGRetriever
 
 
@@ -44,38 +44,12 @@ class ResearchChatAgent:
         self.config = config or ResearchAgentConfig()
         self.log_callback = log_callback
         self.hunter = HunterAgent(log_callback=self._log)
-        bailian_embedding_client = EmbeddingClient(
-            base_url=settings.rag_embedding_base_url,
-            api_key=settings.rag_embedding_api_key,
-            model=settings.rag_embedding_model,
-            timeout=settings.rag_embedding_timeout,
-            provider="bailian",
-            protocol="openai_compatible",
-            batch_size=10,
-            requires_api_key=True,
-        )
-        local_embedding_client = EmbeddingClient(
-            base_url=settings.rag_local_embedding_base_url,
-            api_key=settings.rag_local_embedding_api_key,
-            model=settings.rag_local_embedding_model,
-            timeout=settings.rag_local_embedding_timeout,
-            provider=f"local_{settings.rag_local_embedding_protocol}",
-            protocol=settings.rag_local_embedding_protocol,
-            batch_size=16,
-            requires_api_key=False,
-        )
-        self.retriever = RAGRetriever(
+        self.retriever: RAGRetriever = build_default_rag_retriever(
             target_chunk_tokens=self.config.target_chunk_tokens,
             max_chunk_tokens=self.config.max_chunk_tokens,
             overlap_tokens=self.config.overlap_tokens,
             max_chunks=self.config.max_sources,
             max_context_chars=self.config.max_context_chars,
-            max_chunks_per_paper=settings.rag_max_chunks_per_paper,
-            # 顺序即降级优先级：百炼 → 本地 Embedding → TF-IDF（检索器内部兜底）。
-            embedding_clients=[bailian_embedding_client, local_embedding_client],
-            vector_store=SQLiteVectorStore(settings.rag_vector_store_path),
-            bm25_weight=settings.rag_bm25_weight,
-            vector_weight=settings.rag_vector_weight,
         )
 
     def run(

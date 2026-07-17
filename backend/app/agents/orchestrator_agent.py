@@ -12,17 +12,19 @@ from app.agents.evidence_evaluator import EvidenceEvaluator
 from app.agents.error_recovery_agent import ErrorRecoveryAgent, RecoveryExhaustedError
 from app.agents.hunter_agent import HunterAgent
 from app.agents.research_chat_agent import ResearchChatAgent
+from app.agents.tool_loop_agent import ToolLoopAgent
 from app.core.config import settings
 from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
 from app.services.run_logger import RunLogger
 from app.services.task_control import TaskCancelled, raise_if_task_cancelled
+from app.tools import ToolRegistry, build_research_tool_registry
 
 
 class OrchestratorAgent:
     """受限编排器：只允许调用已注册的研究工具。"""
 
-    ALLOWED_ACTIONS = {"auto", "direct", "chat", "search", "domain_tree"}
+    ALLOWED_ACTIONS = {"auto", "direct", "chat", "search", "domain_tree", "tool"}
     ROUTER_RAW_LOG_LIMIT = 2000
     ROUTER_SYSTEM_PROMPT = """你是研究助手的意图路由器。判断当前用户消息是否需要调用研究 Agent，或可直接回答。
 
@@ -31,16 +33,30 @@ class OrchestratorAgent:
 - chat：必须结合论文全文、本地知识库或研究证据回答的问题。
 - search：用户明确要求搜索、查找或下载论文。
 - domain_tree：用户明确要求生成、重建或更新领域树/知识图谱。
+- tool：只读查询知识库目录、论文详情、全文证据、外部论文预览、领域树、知识图谱、指标或章节。
+
+工具选择原则：
+- 当回答依赖当前知识库、已保存分析结果或其他运行时数据时，必须选择 tool，不得凭对话历史或模型记忆猜测。
+- 工具目录中的名称、描述和参数 Schema 是选择工具的唯一依据；比较各工具的适用与不适用场景后，选择最匹配的一项。
+- 参数应忠实保留用户意图，不得为了凑关键词而把概览请求改写成虚构的具体检索词，也不得擅自扩大操作范围。
+- 没有合适的已注册工具时，选择其他允许的动作，不得编造工具名或参数。
 
 你只负责选择动作，不负责回答用户问题，也不要复述、解释或执行用户请求。
 只输出一个 JSON 对象，不要输出 Markdown 或额外文字：
-{"action":"direct|chat|search|domain_tree"}
+普通动作：{"action":"direct|chat|search|domain_tree"}
+工具动作：{"action":"tool","toolName":"已注册工具名","arguments":{}}
 """
 
-    def __init__(self, *, log_callback: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        log_callback: Callable[[str], None] | None = None,
+        tool_registry: ToolRegistry | None = None,
+    ) -> None:
         """初始化当前对象所需的配置与运行状态。"""
         self.ui_log_callback = log_callback
         self.run_logger = RunLogger(settings.agent_run_log_dir)
+        self.tool_registry = tool_registry or build_research_tool_registry()
         self.log_callback = self._child_log
         self.recovery = ErrorRecoveryAgent(
             max_cycles=settings.error_recovery_max_cycles,
@@ -79,6 +95,19 @@ class OrchestratorAgent:
             route = {"action": normalized_action, "source": "explicit"}
             selected = normalized_action
         self._log(f"编排器已选择处理方式：{selected}")
+
+        if selected == "tool":
+            tool_name = str(route.get("toolName") or args.get("toolName") or args.get("tool_name") or "")
+            tool_arguments = route.get("arguments")
+            if not isinstance(tool_arguments, dict):
+                tool_arguments = args.get("toolArguments") or args.get("tool_arguments") or {}
+            return await self._run_read_only_tool(
+                normalized_task,
+                args,
+                tool_name=tool_name,
+                tool_arguments=dict(tool_arguments),
+                cancel_event=cancel_event,
+            )
 
         if selected == "direct":
             answer = await self._answer_direct(normalized_task, args, cancel_event=cancel_event)
@@ -155,7 +184,7 @@ class OrchestratorAgent:
         args: dict[str, Any],
         *,
         cancel_event: threading.Event | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """使用已配置模型判断是否需要研究 Agent，并在无需工具时直接作答。"""
         model = ModelConfigStore().build_model_payload()
         if not model:
@@ -164,7 +193,10 @@ class OrchestratorAgent:
         messages = [
             {
                 "role": "system",
-                "content": f"{self.ROUTER_SYSTEM_PROMPT}\n\n{SYSTEM_SECURITY_CONSTRAINT}",
+                "content": (
+                    f"{self.ROUTER_SYSTEM_PROMPT}\n\n已注册只读工具：\n{self.tool_registry.prompt_catalog()}"
+                    f"\n\n{SYSTEM_SECURITY_CONSTRAINT}"
+                ),
             }
         ]
         for message in self._clean_history(list(args.get("history") or []))[-8:]:
@@ -226,9 +258,11 @@ class OrchestratorAgent:
                     "role": "system",
                     "content": (
                         "你是意图路由 JSON 修复器。根据原始用户问题和路由器的错误输出，"
-                        "只返回一个合法 JSON 对象。只能选择 direct、chat、search、domain_tree；"
+                        "只返回一个合法 JSON 对象。只能选择 direct、chat、search、domain_tree、tool；"
                         "不要回答用户问题，不要输出 Markdown 或解释。\n"
-                        '{"action":"direct|chat|search|domain_tree"}'
+                        '普通动作：{"action":"direct|chat|search|domain_tree"}\n'
+                        '工具动作：{"action":"tool","toolName":"已注册工具名","arguments":{}}\n'
+                        f"已注册只读工具：{self.tool_registry.prompt_catalog()}"
                         f"\n\n{SYSTEM_SECURITY_CONSTRAINT}"
                     ),
                 },
@@ -295,9 +329,139 @@ class OrchestratorAgent:
             "OrchestratorAgent",
             "意图路由完成",
             event="intent_routing",
-            data={"selectedAction": decision["action"]},
+            data={"selectedAction": decision["action"], "toolName": decision.get("toolName", "")},
         )
         return decision
+
+    async def _run_read_only_tool(
+        self,
+        task: str,
+        args: dict[str, Any],
+        *,
+        tool_name: str,
+        tool_arguments: dict[str, Any],
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """进入有界行动—观察循环，直到工具信息足以形成回答。"""
+        raise_if_task_cancelled(cancel_event)
+        model = ModelConfigStore().build_model_payload()
+        if not model:
+            raise ValueError("请先配置模型参数")
+
+        def loop_event(component: str, message: str, event: str, data: dict[str, Any]) -> None:
+            self.run_logger.log(component, message, event=event, data=data)
+            if self.ui_log_callback:
+                self.ui_log_callback(message)
+
+        loop = ToolLoopAgent(
+            self.tool_registry,
+            model=model,
+            completion=chat_completion,
+            max_steps=4,
+            timeout=settings.research_agent_request_timeout,
+            event_callback=loop_event,
+        )
+        outcome = await loop.run(
+            task,
+            history=self._clean_history(list(args.get("history") or [])),
+            initial_tool_name=tool_name,
+            initial_arguments=tool_arguments,
+            cancel_event=cancel_event,
+        )
+        observations = list(outcome.pop("_observations", []))
+        first_observation = observations[0] if observations else {}
+        first_result = (
+            first_observation.get("result")
+            if first_observation.get("ok") and isinstance(first_observation.get("result"), dict)
+            else {
+                "errorType": first_observation.get("errorType", ""),
+                "error": first_observation.get("error", ""),
+            }
+        )
+        sources = self._tool_sources_from_observations(observations)
+        loop_trace = [
+            {
+                "step": "tool_execution",
+                "agent": "tool_loop",
+                "status": "completed" if observation.get("ok") else "failed",
+                "toolName": observation.get("toolName", ""),
+            }
+            for observation in observations
+        ]
+        return {
+            "agent": "orchestrator",
+            "action": "tool",
+            "result": {
+                "answer": outcome["answer"],
+                "limitations": outcome.get("limitations", []),
+                "sources": sources,
+                "tool": {"name": tool_name, "arguments": tool_arguments},
+                "toolResult": first_result,
+                "toolTrace": outcome.get("toolTrace", []),
+                "toolLoop": {
+                    "steps": outcome.get("steps", len(observations)),
+                    "stopReason": outcome.get("stopReason", "completed"),
+                },
+                "trace": [
+                    {"step": "routing", "agent": "orchestrator", "status": "completed", "selectedAction": "tool"},
+                    *loop_trace,
+                ],
+                "runLog": self.run_logger.public_info(),
+            },
+        }
+
+    @staticmethod
+    def _tool_sources(tool_name: str, result: dict[str, Any]) -> list[dict[str, Any]]:
+        """把文献类工具结果映射为前端可复用的来源结构。"""
+        if tool_name == "search_knowledge_base":
+            items = result.get("results") or []
+        elif tool_name == "get_knowledge_base_paper":
+            items = [result.get("paper")] if isinstance(result.get("paper"), dict) else []
+        elif tool_name == "list_knowledge_base_papers":
+            items = result.get("items") or []
+        else:
+            return []
+        sources: list[dict[str, Any]] = []
+        for index, item in enumerate(items, start=1):
+            if not isinstance(item, dict):
+                continue
+            sources.append(
+                {
+                    "index": index,
+                    "record_id": item.get("recordId") or item.get("record_id") or "",
+                    "title": item.get("title", ""),
+                    "section": item.get("section", ""),
+                    "chunk_index": item.get("chunkIndex") or item.get("chunk_index") or 0,
+                    "excerpt": item.get("excerpt") or item.get("abstract") or "",
+                    "source": item.get("source", ""),
+                    "url": item.get("url", ""),
+                }
+            )
+        return sources
+
+    def _tool_sources_from_observations(self, observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """汇总多轮工具结果中的文献来源，并按论文和分块去重。"""
+        sources: list[dict[str, Any]] = []
+        source_positions: dict[tuple[str, int, str], int] = {}
+        for observation in observations:
+            if not observation.get("ok") or not isinstance(observation.get("result"), dict):
+                continue
+            tool_name = str(observation.get("toolName") or "")
+            for source in self._tool_sources(tool_name, observation["result"]):
+                key = (
+                    str(source.get("record_id") or ""),
+                    int(source.get("chunk_index") or 0),
+                    str(source.get("title") or ""),
+                )
+                existing_position = source_positions.get(key)
+                if existing_position is not None:
+                    existing = sources[existing_position]
+                    if len(str(source.get("excerpt") or "")) > len(str(existing.get("excerpt") or "")):
+                        sources[existing_position] = {**source, "index": existing["index"]}
+                    continue
+                source_positions[key] = len(sources)
+                sources.append({**source, "index": len(sources) + 1})
+        return sources
 
     async def _answer_direct(
         self,
@@ -338,7 +502,7 @@ class OrchestratorAgent:
         raise_if_task_cancelled(cancel_event)
         return answer
 
-    def _parse_route_decision(self, raw_decision: str) -> dict[str, str]:
+    def _parse_route_decision(self, raw_decision: str) -> dict[str, Any]:
         """解析并校验模型路由结果，拒绝执行未注册动作。"""
         text = str(raw_decision or "").strip()
         if text.startswith("```"):
@@ -359,7 +523,16 @@ class OrchestratorAgent:
         action = str(payload.get("action") or "").strip().lower()
         if action not in self.ALLOWED_ACTIONS - {"auto"}:
             raise ValueError(f"模型选择了未注册的编排动作：{action or '空'}")
-        return {"action": action, "source": "model"}
+        decision: dict[str, Any] = {"action": action, "source": "model"}
+        if action == "tool":
+            tool_name = str(payload.get("toolName") or payload.get("tool_name") or "").strip()
+            if not self.tool_registry.has(tool_name):
+                raise ValueError(f"模型选择了未注册工具：{tool_name or '空'}")
+            arguments = payload.get("arguments")
+            if not isinstance(arguments, dict):
+                raise ValueError("模型返回的工具参数必须是对象")
+            decision.update({"toolName": tool_name, "arguments": arguments})
+        return decision
 
     def _clean_history(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """过滤前端生成的失败占位消息，避免其污染后续路由和回答。"""

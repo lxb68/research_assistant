@@ -25,13 +25,13 @@ class SjrMetrics:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def lookup(self, venue: str) -> dict:
+    def lookup(self, venue: str, *, refresh_if_empty: bool = True) -> dict:
         """按规范化名称查询最匹配的指标记录。"""
         normalized = self._normalize(venue)
         if not normalized:
             return {"sjr": None, "impactFactor": None, "metricSource": ""}
 
-        if self.count() == 0:
+        if self.count() == 0 and refresh_if_empty:
             try:
                 self.refresh()
             except Exception:

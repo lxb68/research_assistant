@@ -278,6 +278,20 @@ class RAGRetriever:
                     matches[key] = chunk
         return [matches[key].to_dict() for key in requested if key in matches]
 
+    def list_paper_sections(self, paper: dict[str, Any], *, limit: int = 20) -> list[dict[str, Any]]:
+        """以稳定的只读结构返回论文分块章节，供目录工具复用。"""
+        safe_limit = max(1, min(int(limit), 50))
+        return [
+            {
+                "chunkIndex": chunk.chunk_index,
+                "section": chunk.section,
+                "summary": chunk.summary,
+                "tokenCount": chunk.token_count,
+                "excerpt": chunk.text[:1200],
+            }
+            for chunk in self._paper_chunks(paper)[:safe_limit]
+        ]
+
     def _paper_chunks(self, paper: dict[str, Any]) -> list[EvidenceChunk]:
         """把单篇论文整理为可检索的证据片段。"""
         base = {

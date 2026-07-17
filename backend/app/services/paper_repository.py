@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,7 @@ class PaperRepository:
         return connection
 
     def ensure_schema(self) -> None:
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS papers (
@@ -42,7 +43,7 @@ class PaperRepository:
             connection.commit()
 
     def save(self, record: dict[str, Any]) -> None:
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             connection.execute(
                 """
                 INSERT INTO papers (
@@ -75,8 +76,20 @@ class PaperRepository:
             params.extend([pattern, pattern])
         query += " ORDER BY saved_at DESC LIMIT ?"
         params.append(max(1, min(limit, 500)))
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             return [self._row_to_record(row) for row in connection.execute(query, params).fetchall()]
+
+    def count(self, *, keyword: str | None = None) -> int:
+        """统计文献数量，可使用与列表一致的关键词过滤。"""
+        query = "SELECT COUNT(*) FROM papers"
+        params: list[object] = []
+        if keyword:
+            query += " WHERE keyword LIKE ? OR title LIKE ?"
+            pattern = f"%{keyword}%"
+            params.extend([pattern, pattern])
+        with closing(self.connect()) as connection:
+            row = connection.execute(query, params).fetchone()
+        return int(row[0] if row else 0)
 
     def find(self, *, record_id: str | None = None, doi: str | None = None, title: str | None = None) -> dict[str, Any] | None:
         clauses: list[str] = []
@@ -87,7 +100,7 @@ class PaperRepository:
                 params.append(value)
         if not clauses:
             return None
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             row = connection.execute(
                 f"SELECT {PAPER_COLUMNS} FROM papers WHERE {' OR '.join(clauses)} LIMIT 1",
                 params,
@@ -99,7 +112,7 @@ class PaperRepository:
         if not normalized:
             return
         placeholders = ", ".join("?" for _ in normalized)
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             connection.execute(f"DELETE FROM papers WHERE id IN ({placeholders})", normalized)
             connection.commit()
 
