@@ -164,14 +164,15 @@ class RAGRetrieverChunkIntegrationTest(unittest.TestCase):
             )
         ]
 
-        effective_limit = retriever._effective_max_chunks_per_paper(
+        effective_limit = retriever._effective_max_groups_per_paper(
             ranked,
             minimum_evidence_count=2,
         )
-        selected = retriever._select_diverse(
+        selected = retriever.evidence_assembler.assemble(
             ranked,
-            max_chunks_per_paper=effective_limit,
-        )
+            ranked,
+            max_groups_per_paper=effective_limit,
+        ).evidence
 
         self.assertEqual(effective_limit, 2)
         self.assertEqual(len(selected), 2)
@@ -246,6 +247,76 @@ class RAGRetrieverChunkIntegrationTest(unittest.TestCase):
         self.assertIsNotNone(evidence[0]["continues_to"])
         self.assertIsNotNone(evidence[-1]["continues_from"])
 
+    def test_candidate_search_is_not_truncated_by_final_evidence_limit(self) -> None:
+        """候选搜索必须返回宽候选池，最终数量限制只能由组装阶段执行。"""
+        retriever = RAGRetriever(
+            target_chunk_tokens=4,
+            max_chunk_tokens=8,
+            overlap_tokens=0,
+            max_chunks=1,
+            max_chunks_per_paper=3,
+        )
+        paper = {
+            "id": "paper-1",
+            "title": "Candidate Separation",
+            "splitChunks": [
+                {"content": "target mechanism prepares private inputs"},
+                {"content": "target mechanism computes intermediate state"},
+                {"content": "target mechanism returns final output"},
+            ],
+        }
+
+        candidates = retriever.search_candidates("target mechanism", [paper])
+        evidence = retriever.retrieve("target mechanism", [paper])
+
+        self.assertGreater(len(candidates.ranked), len(evidence))
+        self.assertEqual(len(evidence), 1)
+        self.assertNotIn("evidenceCount", candidates.diagnostics)
+        self.assertEqual(retriever.last_diagnostics["rankedCandidateCount"], len(candidates.ranked))
+
+    def test_diversity_is_applied_between_structures_not_inside_structure(self) -> None:
+        """高度相似的连续分片属于同一逻辑证据时，不能被多样性规则互相去重。"""
+        retriever = RAGRetriever(
+            target_chunk_tokens=8,
+            max_chunk_tokens=12,
+            overlap_tokens=0,
+            max_chunks=8,
+            max_chunks_per_paper=1,
+        )
+        paper = {
+            "id": "paper-1",
+            "title": "Repeated Protocol",
+            "splitChunks": [
+                {
+                    "content": "protocol repeats shared state update target step one",
+                    "semanticType": "algorithm",
+                    "structureId": "structure-protocol-1",
+                    "structurePartIndex": 1,
+                    "structurePartCount": 2,
+                },
+                {
+                    "content": "protocol repeats shared state update target step two",
+                    "semanticType": "algorithm",
+                    "structureId": "structure-protocol-1",
+                    "structurePartIndex": 2,
+                    "structurePartCount": 2,
+                },
+                {"content": "target unrelated background"},
+            ],
+        }
+
+        evidence = retriever.retrieve("protocol shared state update target", [paper])
+
+        self.assertGreater(len(evidence), 1)
+        self.assertEqual(
+            [item["structure_sequence"] for item in evidence],
+            list(range(len(evidence))),
+        )
+        self.assertEqual({item["structure_id"] for item in evidence}, {"structure-protocol-1"})
+        self.assertEqual(retriever.last_diagnostics["selectedEvidenceGroupCount"], 1)
+        self.assertEqual(retriever.last_diagnostics["incompleteStructureCount"], 0)
+        self.assertEqual(retriever.last_diagnostics["droppedByDiversity"], 0)
+
     def test_structure_window_keeps_hit_when_structure_exceeds_context_capacity(self) -> None:
         """结构长于容量时应选择命中点附近的连续窗口，不能退化为只取结构开头。"""
         retriever = RAGRetriever(max_chunks=4, max_context_chars=10000)
@@ -264,7 +335,11 @@ class RAGRetrieverChunkIntegrationTest(unittest.TestCase):
             for index in range(8)
         ]
 
-        completed = retriever._complete_selected_structures([candidates[6]], candidates)
+        completed = retriever.evidence_assembler.assemble(
+            sorted(candidates, key=lambda item: item.score, reverse=True),
+            candidates,
+            max_groups_per_paper=1,
+        ).evidence
 
         self.assertEqual([item.structure_sequence for item in completed], [4, 5, 6, 7])
         self.assertIn(candidates[6], completed)

@@ -6,8 +6,9 @@ import json
 from typing import Any, Callable
 
 from app.core.config import settings
-from app.services.conversation_context import ConversationContextProjector
+from app.services.context_resolver import ContextResolver
 from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT
+from app.services.question_contract_builder import QuestionContractBuilder
 from app.services.retrieval_contracts import (
     SECTION_TYPES,
     normalize_execution_complexity,
@@ -70,6 +71,8 @@ class QueryPlanningAgent:
         self.model = model
         self.timeout = timeout
         self.max_facets = max(1, min(int(max_facets or settings.query_planner_max_facets), 8))
+        self.context_resolver = ContextResolver()
+        self.contract_builder = QuestionContractBuilder(max_facets=self.max_facets)
 
     def plan(
         self,
@@ -83,9 +86,9 @@ class QueryPlanningAgent:
         if not normalized_question:
             raise ValueError("研究问题不能为空")
 
-        context = ConversationContextProjector().project(normalized_question, history)
-        planning_context = context.for_query_planning()
-        candidate_sources = planning_context["candidate_sources"]
+        resolved_context = self.context_resolver.resolve(normalized_question, history)
+        planning_context = resolved_context.for_planning()
+        candidate_sources = resolved_context.candidate_sources
         planner_input = {
             "current_question": normalized_question,
             "usage_mode": planning_context["usage_mode"],
@@ -106,12 +109,12 @@ class QueryPlanningAgent:
         )
         try:
             payload = self._parse_response(raw_response)
-            plan = self._normalize_plan(
+            plan = self.contract_builder.build(
                 payload,
-                normalized_question=normalized_question,
+                question=normalized_question,
                 candidate_sources=candidate_sources,
                 explicit_paper_ids=explicit_paper_ids or [],
-            )
+            ).to_dict()
         except Exception as error:
             setattr(error, "raw_response", str(raw_response or ""))
             raise
@@ -125,126 +128,13 @@ class QueryPlanningAgent:
         candidate_sources: list[dict[str, Any]],
         explicit_paper_ids: list[str],
     ) -> dict[str, Any]:
-        known_ids = {str(source["record_id"]) for source in candidate_sources}
-        explicit_ids = {str(record_id) for record_id in explicit_paper_ids if str(record_id)}
-        allowed_ids = known_ids | explicit_ids
-        proposed_values = payload.get("target_paper_ids")
-        proposed_values = proposed_values if isinstance(proposed_values, list) else []
-        proposed_ids = [str(value).strip() for value in proposed_values if str(value).strip()]
-        target_paper_ids = list(dict.fromkeys(proposed_ids if not explicit_ids else explicit_paper_ids))
-        invalid_ids = [record_id for record_id in target_paper_ids if record_id not in allowed_ids]
-        target_paper_ids = [record_id for record_id in target_paper_ids if record_id in allowed_ids]
-
-        known_chunks = {(str(source["record_id"]), int(source["chunk_index"])) for source in candidate_sources}
-        target_chunks: list[dict[str, Any]] = []
-        invalid_chunks: list[dict[str, Any]] = []
-        proposed_chunks = payload.get("target_chunks")
-        proposed_chunks = proposed_chunks if isinstance(proposed_chunks, list) else []
-        for item in proposed_chunks:
-            if not isinstance(item, dict):
-                continue
-            try:
-                chunk_index = int(item.get("chunk_index") or 0)
-            except (TypeError, ValueError):
-                chunk_index = -1
-            reference = {"record_id": str(item.get("record_id") or "").strip(), "chunk_index": chunk_index}
-            if (reference["record_id"], reference["chunk_index"]) in known_chunks:
-                if reference not in target_chunks:
-                    target_chunks.append(reference)
-            else:
-                invalid_chunks.append(reference)
-        for reference in target_chunks:
-            if reference["record_id"] not in target_paper_ids:
-                target_paper_ids.append(reference["record_id"])
-
-        standalone_question = str(payload.get("standalone_question") or normalized_question).strip()
-        question_type = str(payload.get("question_type") or "simple_fact").strip().lower()
-        if question_type not in self.ALLOWED_QUESTION_TYPES:
-            question_type = "simple_fact"
-        complexity = str(payload.get("complexity") or "simple").strip().lower()
-        if complexity not in self.ALLOWED_COMPLEXITIES:
-            complexity = "simple"
-
-        facets: list[dict[str, Any]] = []
-        seen_facet_queries: set[str] = set()
-        raw_facets = payload.get("retrieval_facets")
-        raw_facets = raw_facets if isinstance(raw_facets, list) else []
-        for index, item in enumerate(raw_facets[: self.max_facets], start=1):
-            if not isinstance(item, dict):
-                continue
-            query = str(item.get("query") or "").strip()
-            if not query or query.casefold() in seen_facet_queries:
-                continue
-            seen_facet_queries.add(query.casefold())
-            section_types = normalize_section_types(
-                item.get("preferred_section_types") or item.get("preferredSectionTypes") or []
-            )
-            concepts = item.get("concepts") if isinstance(item.get("concepts"), list) else []
-            phrases = item.get("phrases") if isinstance(item.get("phrases"), list) else []
-            facets.append(
-                {
-                    "id": str(item.get("id") or f"facet-{index}")[:80],
-                    "goal": str(item.get("goal") or query)[:500],
-                    "query": query[:2000],
-                    "concepts": [str(value).strip()[:200] for value in concepts if str(value).strip()][:16],
-                    "phrases": [str(value).strip()[:300] for value in phrases if str(value).strip()][:12],
-                    "preferredSectionTypes": list(dict.fromkeys(section_types)),
-                }
-            )
-        if not facets:
-            facets = [{"id": "facet-1", "goal": standalone_question, "query": standalone_question, "preferredSectionTypes": []}]
-
-        requirements = payload.get("core_requirements")
-        if not isinstance(requirements, list):
-            requirements = payload.get("answer_requirements")
-        requirements = requirements if isinstance(requirements, list) else []
-        requirement_specs = [
-            normalized
-            for index, value in enumerate(requirements[:8], start=1)
-            if (normalized := normalize_requirement(value, index, question_type=question_type)) is not None
-        ]
-        core_requirements = [item["description"] for item in requirement_specs if item.get("required")]
-        optional_values = payload.get("optional_details")
-        optional_values = optional_values if isinstance(optional_values, list) else []
-        optional_details = [str(value).strip()[:500] for value in optional_values if str(value).strip()][:8]
-        needs_clarification = payload.get("needs_clarification") is True
-        if (invalid_ids and not target_paper_ids) or (invalid_chunks and not target_chunks):
-            needs_clarification = True
-        clarification = str(payload.get("clarification_question") or "").strip()
-        if needs_clarification and not clarification:
-            clarification = "我无法唯一确定你指的是哪篇文献或哪个片段，请补充论文标题、章节或引用内容。"
-
-        complexity = normalize_execution_complexity(
-            complexity,
-            question_type=question_type,
-            facet_count=len(facets),
-            requirement_count=len(core_requirements),
-        )
-        is_complex = complexity == "complex"
-        target_evidence_count = (
-            max(settings.orchestrator_min_evidence, settings.rag_complex_target_evidence)
-            if is_complex
-            else settings.orchestrator_min_evidence
-        )
-        return {
-            "standaloneQuestion": standalone_question,
-            "questionType": question_type,
-            "complexity": complexity,
-            "targetPaperIds": target_paper_ids,
-            "targetChunks": target_chunks,
-            "retrievalFacets": facets,
-            "coreRequirements": core_requirements,
-            "requirementSpecs": requirement_specs,
-            "optionalDetails": optional_details,
-            "answerRequirements": core_requirements,
-            "requiresIterativeRetrieval": is_complex and bool(facets or requirement_specs),
-            "targetEvidenceCount": max(1, min(int(target_evidence_count), 12)),
-            "needsClarification": needs_clarification,
-            "clarificationQuestion": clarification,
-            "candidateSourceCount": len(candidate_sources),
-            "invalidTargetIds": invalid_ids,
-            "invalidTargetChunks": invalid_chunks,
-        }
+        """兼容旧入口；问题范围由独立 QuestionContractBuilder 维护。"""
+        return self.contract_builder.build(
+            payload,
+            question=normalized_question,
+            candidate_sources=candidate_sources,
+            explicit_paper_ids=explicit_paper_ids,
+        ).to_dict()
 
     @staticmethod
     def _parse_response(raw_response: str) -> dict[str, Any]:

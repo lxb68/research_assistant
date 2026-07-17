@@ -20,6 +20,7 @@ from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAI
 from app.services.run_logger import RunLogger
 from app.services.task_control import TaskCancelled, raise_if_task_cancelled
 from app.services.retrieval_contracts import requires_semantic_validation
+from app.services.retrieval_refiner import RetrievalRefiner
 from app.tools import ToolRegistry, build_research_tool_registry
 
 
@@ -81,6 +82,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             log_callback=self.log_callback,
         )
         self.evidence_evaluator = EvidenceEvaluator()
+        self.retrieval_refiner = RetrievalRefiner()
 
     async def run(
         self,
@@ -1143,7 +1145,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         )
 
         max_retrieval_rounds = max(1, min(settings.orchestrator_max_retrieval_rounds, 3))
-        refinement_facets = self.evidence_evaluator.refinement_facets(plan, evaluation) if not sufficient else []
+        refinement_facets = self.retrieval_refiner.refine(plan, evaluation) if not sufficient else []
         if not sufficient and max_retrieval_rounds > 1 and refinement_facets:
                 self._log("首轮证据存在覆盖缺口，正在执行一次补偿检索")
                 raise_if_task_cancelled(cancel_event)

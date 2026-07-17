@@ -13,6 +13,9 @@ from app.agents.query_planning_agent import QueryPlanningAgent
 from app.core.config import settings
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
 from app.services.model_client import chat_completion
+from app.services.answer_composer import AnswerComposer
+from app.services.answer_policy import AnswerPolicy
+from app.services.grounding_validator import GroundingValidator
 from app.services.hybrid_graph_retriever import HybridGraphRetriever
 from app.services.evidence_groups import (
     evidence_group_is_complete,
@@ -73,6 +76,8 @@ class ResearchChatAgent:
             max_relations=settings.hybrid_graph_max_relations,
             max_evidence=settings.hybrid_graph_max_evidence,
         )
+        self.answer_policy = AnswerPolicy()
+        self.grounding_validator = GroundingValidator()
 
     def run(
         self,
@@ -156,13 +161,13 @@ class ResearchChatAgent:
             }
             for index, item in enumerate(evidence, start=1)
         ]
-        cited_indices = self._extract_citation_indices(answer, len(retrieved_sources))
-        retry_reasons = self._answer_retry_reasons(
+        grounding = self._grounding_validator().validate(
             answer,
             source_count=len(retrieved_sources),
-            cited_indices=cited_indices,
             retrieval_state=retrieval_state or {},
         )
+        cited_indices = grounding.cited_indices
+        retry_reasons = grounding.reasons
         if retry_reasons:
             self._log(f"回答一致性校验未通过，正在重试：{'；'.join(retry_reasons)}")
             answer = self._complete(
@@ -178,7 +183,7 @@ class ResearchChatAgent:
                     + "。当前检索状态优先于历史对话中的旧判断。"
                 ),
             )
-            cited_indices = self._extract_citation_indices(answer, len(retrieved_sources))
+            cited_indices = self._grounding_validator().extract_citation_indices(answer, len(retrieved_sources))
         sources = [source for source in retrieved_sources if source["index"] in cited_indices]
         self._log("研究回答生成完成")
         return {
@@ -701,54 +706,17 @@ class ResearchChatAgent:
         retrieval_state: dict[str, Any],
         revision_instruction: str = "",
     ) -> str:
-        """调用已配置模型，根据证据上下文生成研究回答。"""
-        context = self.retriever.build_context(evidence)
-        system_prompt = self._load_prompt().replace("{{evidence}}", context)
-        if answer_requirements:
-            requirements_text = "\n".join(f"- {str(item)[:500]}" for item in answer_requirements if str(item).strip())
-            system_prompt = (
-                f"{system_prompt}\n\n# 本次回答的核心覆盖目标\n{requirements_text}\n"
-                "这些目标用于组织回答；个别非核心实现细节缺失时应明确边界，但不要因此否定已有证据能够支持的整体回答。"
-            )
-        normalized_state = {
-            "fullTextAvailable": bool(retrieval_state.get("fullTextAvailable")),
-            "evidenceSufficient": bool(retrieval_state.get("evidenceSufficient")),
-            "evidenceCount": int(retrieval_state.get("evidenceCount") or len(evidence)),
-            "candidateCount": int(retrieval_state.get("candidateCount") or 0),
-            "missingFacetIds": list(retrieval_state.get("missingFacetIds") or [])[:12],
-            "missingRequirementIds": list(retrieval_state.get("missingRequirementIds") or [])[:12],
-            "sectionMetadataDegraded": bool(retrieval_state.get("sectionMetadataDegraded")),
-            "requirementClaims": list(retrieval_state.get("requirementClaims") or [])[:12],
-        }
-        system_prompt = (
-            f"{system_prompt}\n\n# 当前检索状态\n"
-            f"{json.dumps(normalized_state, ensure_ascii=False)}\n"
-            "该状态由检索管线产生，优先于对话历史中的旧判断。fullTextAvailable=true 表示当前论文全文已完成解析并可供检索；"
-            "证据片段没有覆盖某项细节时，只能说明当前片段未覆盖，不能推断全文不存在。"
-        )
-        if revision_instruction:
-            system_prompt = f"{system_prompt}\n\n# 修订要求\n{revision_instruction}"
-        system_prompt = f"{system_prompt}\n\n{SYSTEM_SECURITY_CONSTRAINT}"
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "currentQuestion": question,
-                        "resolvedResearchQuestion": resolved_question,
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ]
-
-        # 供应商协议差异统一由适配器处理，Agent 只维护通用消息结构。
-        return chat_completion(
-            model,
-            messages,
-            temperature=0.2,
+        """兼容门面：把回答生成委托给独立 AnswerComposer。"""
+        return AnswerComposer(completion=chat_completion, policy=self._answer_policy()).compose(
+            model=model,
+            base_prompt=self._load_prompt(),
+            evidence_context=self.retriever.build_context(evidence),
+            question=question,
+            resolved_question=resolved_question,
+            answer_requirements=answer_requirements,
+            retrieval_state={**retrieval_state, "evidenceCount": int(retrieval_state.get("evidenceCount") or len(evidence))},
             timeout=self.config.request_timeout,
+            revision_instruction=revision_instruction,
         )
 
     def _answer_retry_reasons(
@@ -760,18 +728,15 @@ class ResearchChatAgent:
         retrieval_state: dict[str, Any],
     ) -> list[str]:
         """根据结构化检索状态校验回答，不让模型自行猜测全文可用性。"""
-        reasons: list[str] = []
-        if source_count > 0 and not cited_indices:
-            reasons.append("回答没有引用任何已提供证据")
-        if bool(retrieval_state.get("fullTextAvailable")) and any(
-            pattern.search(answer) for pattern in self._FULL_TEXT_CONFLICT_PATTERNS
-        ):
-            reasons.append("回答声称全文不可用，但检索状态显示全文已经解析")
-        for citation_group in retrieval_state.get("requiredCitationGroups") or []:
-            valid_group = {int(value) for value in citation_group if str(value).isdigit()}
-            if valid_group and not (valid_group & cited_indices):
-                reasons.append(f"回答未引用核心要求对应的直接证据 {sorted(valid_group)}")
-        return reasons
+        result = self._grounding_validator().validate(
+            answer,
+            source_count=source_count,
+            retrieval_state=retrieval_state,
+        )
+        # 兼容调用方显式传入的解析结果。
+        if cited_indices != result.cited_indices and source_count > 0 and not cited_indices:
+            return ["回答没有引用任何已提供证据"]
+        return result.reasons
 
     def _load_prompt(self) -> str:
         """加载提示词。"""
@@ -782,23 +747,17 @@ class ResearchChatAgent:
 
     def _extract_citation_indices(self, answer: str, source_count: int) -> set[int]:
         """从回答文本中提取有效引用序号。"""
-        indices: set[int] = set()
-        for content in re.findall(r"\[([0-9,，\-–—\s]+)\]", answer):
-            normalized = content.replace("，", ",").replace("–", "-").replace("—", "-")
-            for part in normalized.split(","):
-                value = part.strip()
-                if not value:
-                    continue
-                if "-" in value:
-                    bounds = [item.strip() for item in value.split("-", 1)]
-                    if len(bounds) == 2 and all(item.isdigit() for item in bounds):
-                        start, end = int(bounds[0]), int(bounds[1])
-                        if start <= end and end - start <= 20:
-                            indices.update(range(start, end + 1))
-                    continue
-                if value.isdigit():
-                    indices.add(int(value))
-        return {index for index in indices if 1 <= index <= source_count}
+        return self._grounding_validator().extract_citation_indices(answer, source_count)
+
+    def _answer_policy(self) -> AnswerPolicy:
+        """兼容绕过构造器的旧调用方，并保持策略对象的单一来源。"""
+        policy = getattr(self, "answer_policy", None)
+        return policy if isinstance(policy, AnswerPolicy) else AnswerPolicy()
+
+    def _grounding_validator(self) -> GroundingValidator:
+        """兼容绕过构造器的旧调用方，并返回独立落地验证器。"""
+        validator = getattr(self, "grounding_validator", None)
+        return validator if isinstance(validator, GroundingValidator) else GroundingValidator()
 
     def _log(self, message: str) -> None:
         """把运行消息转发给已配置的日志回调。"""

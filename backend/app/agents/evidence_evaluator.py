@@ -8,6 +8,7 @@ from typing import Any, Callable
 from app.core.config import settings
 from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT
 from app.services.retrieval_contracts import normalize_requirement
+from app.services.retrieval_refiner import RetrievalRefiner
 
 
 class EvidenceEvaluator:
@@ -231,41 +232,15 @@ class EvidenceEvaluator:
         unsupported_requirements = [item for item in requirement_assessments if item["status"] == "unsupported"]
         partial_requirements = [item for item in requirement_assessments if item["status"] == "partial"]
         answerable = not missing_facets and not unsupported_requirements and not partial_requirements
-        refinement_facets = []
-        original_facets = {str(item.get("id") or ""): item for item in plan.get("retrievalFacets") or [] if isinstance(item, dict)}
-        for assessment in facet_assessments:
-            if assessment["status"] == "supported":
-                continue
-            original = original_facets.get(assessment["id"], {})
-            query = str(assessment.get("refinementQuery") or original.get("query") or "").strip()
-            if not query:
-                continue
-            refinement_facets.append(
-                {
-                    "id": str(assessment["id"]),
-                    "goal": str(original.get("goal") or assessment.get("missingDetail") or query),
-                    "query": query,
-                    "preferredSectionTypes": list(original.get("preferredSectionTypes") or []),
-                }
-            )
-        original_requirements = {item["id"]: item for item in core_requirements}
-        for assessment in requirement_assessments:
-            if assessment["status"] == "supported":
-                continue
-            requirement = original_requirements.get(assessment["id"], {})
-            description = str(requirement.get("description") or "")
-            query = str(assessment.get("refinementQuery") or description).strip()
-            if not query:
-                continue
-            refinement_facets.append(
-                {
-                    "id": f"requirement-{assessment['id']}",
-                    "goal": description or assessment.get("missingDetail") or query,
-                    "query": query,
-                    "evidenceIntent": str(requirement.get("evidenceIntent") or "fact"),
-                    "preferredSectionTypes": list(requirement.get("preferredSectionTypes") or []),
-                }
-            )
+        # 兼容旧返回字段，但补偿查询的构造算法由 RetrievalRefiner 独立维护。
+        refinement_facets = RetrievalRefiner().refine(
+            plan,
+            {
+                "facetAssessments": facet_assessments,
+                "requirementAssessments": requirement_assessments,
+                "missingFacetIds": missing_facets,
+            },
+        )
         return (
             {
                 "semanticValidated": True,
@@ -349,36 +324,8 @@ class EvidenceEvaluator:
         plan: dict[str, Any],
         evaluation: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """只为未覆盖维度生成第二轮查询，避免无界 ReAct 和重复全量检索。"""
-        semantic_refinements = [
-            dict(item) for item in evaluation.get("refinementFacets") or [] if isinstance(item, dict)
-        ]
-        if semantic_refinements:
-            return semantic_refinements[: settings.query_planner_max_facets]
-        facets = [dict(item) for item in plan.get("retrievalFacets") or [] if isinstance(item, dict)]
-        missing_ids = {str(value) for value in evaluation.get("missingFacetIds") or [] if str(value)}
-        if missing_ids:
-            return [item for item in facets if str(item.get("id") or "") in missing_ids]
-        if (
-            str(plan.get("questionType") or "") == "mechanism"
-            and int(evaluation.get("methodEvidenceCount") or 0) < settings.orchestrator_min_method_evidence
-        ):
-            refined: list[dict[str, Any]] = []
-            for index, item in enumerate(facets[: settings.query_planner_max_facets], start=1):
-                query = str(item.get("query") or "").strip()
-                goal = str(item.get("goal") or "").strip()
-                if not query:
-                    continue
-                refined.append(
-                    {
-                        "id": f"refine-method-{index}",
-                        "goal": goal or "补充方法与协议证据",
-                        "query": f"{query}\n{goal}\nmethod framework protocol algorithm implementation",
-                        "preferredSectionTypes": ["method", "framework", "protocol", "algorithm", "implementation", "overview"],
-                    }
-                )
-            return refined
-        return []
+        """兼容旧入口；补偿策略由独立 RetrievalRefiner 维护。"""
+        return RetrievalRefiner().refine(plan, evaluation)
 
 
 __all__ = ["EvidenceEvaluator"]

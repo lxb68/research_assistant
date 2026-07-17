@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import math
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -18,6 +18,9 @@ from app.services.embedding_store import (
     cosine_similarity,
     tfidf_cosine_scores,
 )
+from app.services.evidence_assembler import EvidenceAssembler
+from app.services.candidate_retriever import CandidateRetriever
+from app.services.document_structure_indexer import DocumentStructureIndexer
 from app.services.rag_chunking import BaseMarkdownBlock, MarkdownRAGChunker
 from app.services.split import parse_markdown_sections
 
@@ -85,6 +88,17 @@ class EvidenceChunk:
         }
 
 
+@dataclass(slots=True)
+class CandidateSearchResult:
+    """候选搜索阶段的输出，不包含最终证据选择决策。"""
+
+    query: str
+    candidates: list[EvidenceChunk]
+    ranked: list[EvidenceChunk]
+    query_tokens: list[str]
+    diagnostics: dict[str, Any]
+
+
 class RAGRetriever:
     """面向中英文论文分块的本地 BM25 检索器。"""
 
@@ -104,11 +118,12 @@ class RAGRetriever:
         vector_weight: float = 0.55,
     ) -> None:
         """初始化当前对象所需的配置与运行状态。"""
-        self.chunker = MarkdownRAGChunker(
+        self.structure_indexer = DocumentStructureIndexer(
             target_tokens=target_chunk_tokens,
             max_tokens=max_chunk_tokens,
             overlap_tokens=overlap_tokens,
         )
+        self.chunker = self.structure_indexer.chunker
         self.max_chunks = max(1, max_chunks)
         self.max_context_chars = max(1000, max_context_chars)
         self.max_chunks_per_paper = max(1, max_chunks_per_paper)
@@ -123,6 +138,44 @@ class RAGRetriever:
         self.vector_weight = vector_weight / total_weight
         self.last_retrieval_mode = "bm25"
         self.last_diagnostics: dict[str, Any] = {}
+        self.evidence_assembler = EvidenceAssembler(
+            max_chunks=self.max_chunks,
+            max_context_chars=self.max_context_chars,
+            tokenize=self._tokenize,
+        )
+        self.candidate_retriever = CandidateRetriever(
+            index_paper=lambda paper: self.structure_indexer.index_paper(paper, chunk_factory=EvidenceChunk),
+            tokenize=self._tokenize,
+            searchable_text=self._searchable_text,
+            embedding_clients=self.embedding_clients,
+            vector_store=self.vector_store,
+            bm25_weight=self.bm25_weight,
+            vector_weight=self.vector_weight,
+        )
+
+    def search_candidates(
+        self,
+        query: str,
+        papers: list[dict[str, Any]],
+        *,
+        section_score_adjuster: Callable[[str], float] | None = None,
+        chunk_score_adjuster: Callable[[EvidenceChunk], float] | None = None,
+    ) -> CandidateSearchResult:
+        """兼容门面：把宽候选召回委托给独立 CandidateRetriever。"""
+        batch = self.candidate_retriever.retrieve(
+            query,
+            papers,
+            section_score_adjuster=section_score_adjuster,
+            chunk_score_adjuster=chunk_score_adjuster,
+        )
+        self.last_retrieval_mode = str(batch.diagnostics.get("retrievalMode") or "bm25")
+        return CandidateSearchResult(
+            query=batch.query,
+            candidates=batch.candidates,
+            ranked=batch.ranked,
+            query_tokens=batch.query_tokens,
+            diagnostics=batch.diagnostics,
+        )
 
     def retrieve(
         self,
@@ -133,204 +186,53 @@ class RAGRetriever:
         section_score_adjuster: Callable[[str], float] | None = None,
         chunk_score_adjuster: Callable[[EvidenceChunk], float] | None = None,
     ) -> list[dict[str, Any]]:
-        """融合稀疏与向量得分，返回去冗余后的高相关证据。"""
-        normalized_query = str(query).strip()
-        if not normalized_query:
-            return []
-        candidates = [chunk for paper in papers for chunk in self._paper_chunks(paper)]
-        if not candidates:
-            return []
-
-        query_tokens = self._tokenize(normalized_query)
-        if not query_tokens:
-            return []
-        tokenized = [self._tokenize(self._searchable_text(chunk)) for chunk in candidates]
-        document_frequency: Counter[str] = Counter()
-        for tokens in tokenized:
-            document_frequency.update(set(tokens))
-        average_length = sum(len(tokens) for tokens in tokenized) / max(1, len(tokenized))
-
-        bm25_scores: list[float] = []
-        for chunk, tokens in zip(candidates, tokenized, strict=True):
-            score = self._bm25(
-                query_tokens=query_tokens,
-                document_tokens=tokens,
-                document_frequency=document_frequency,
-                document_count=len(candidates),
-                average_length=average_length,
-            )
-            lowered_title = chunk.title.lower()
-            lowered_section = chunk.section.lower()
-            for token in set(query_tokens):
-                if token in lowered_title:
-                    score += 1.2
-                if chunk.section and token in lowered_section:
-                    score += 0.65
-            bm25_scores.append(score)
-
-        vector_scores = [0.0] * len(candidates)
-        searchable = [self._searchable_text(chunk) for chunk in candidates]
-        embedding_failures: list[str] = []
-        active_embedding_backend = ""
-        self.last_retrieval_mode = "hybrid_tfidf"
-        if self.vector_store:
-            for embedding_client in self.embedding_clients:
-                if not embedding_client.configured:
-                    continue
-                try:
-                    candidate_vectors = self.vector_store.get_or_create(searchable, client=embedding_client)
-                    query_vector = embedding_client.embed([normalized_query])[0]
-                    vector_scores = [cosine_similarity(query_vector, vector) for vector in candidate_vectors]
-                    active_embedding_backend = embedding_client.provider
-                    self.last_retrieval_mode = f"hybrid_{embedding_client.provider}"
-                    break
-                except (requests.RequestException, RuntimeError, ValueError, KeyError, TypeError) as error:
-                    embedding_failures.append(f"{embedding_client.provider}:{type(error).__name__}")
-
-        if not active_embedding_backend:
-            # 百炼与本地嵌入均不可用时仍提供 TF-IDF 稀疏语义得分，不退化为单一 BM25。
-            vector_scores = tfidf_cosine_scores(normalized_query, searchable)
-            active_embedding_backend = "tfidf"
-            self.last_retrieval_mode = "hybrid_tfidf"
-
-        normalized_bm25 = self._normalize_scores(bm25_scores)
-        normalized_vectors = self._normalize_scores(vector_scores)
-        ranked: list[EvidenceChunk] = []
-        for index, chunk in enumerate(candidates):
-            if self.last_retrieval_mode.startswith("hybrid_"):
-                chunk.score = self.bm25_weight * normalized_bm25[index] + self.vector_weight * normalized_vectors[index]
-            else:
-                chunk.score = normalized_bm25[index]
-            if section_score_adjuster is not None:
-                chunk.score += float(section_score_adjuster(chunk.section))
-            if chunk_score_adjuster is not None:
-                chunk.score += float(chunk_score_adjuster(chunk))
-            if chunk.score > 0:
-                ranked.append(chunk)
-        ranked.sort(key=lambda item: item.score, reverse=True)
+        """兼容门面：先搜索候选，再由证据组装器执行最终选择。"""
+        search_result = self.search_candidates(
+            query,
+            papers,
+            section_score_adjuster=section_score_adjuster,
+            chunk_score_adjuster=chunk_score_adjuster,
+        )
         required_capacity = max(0, int(minimum_evidence_count or 0))
-        effective_max_chunks_per_paper = self._effective_max_chunks_per_paper(
-            ranked,
+        effective_max_groups_per_paper = self._effective_max_groups_per_paper(
+            search_result.ranked,
             minimum_evidence_count=required_capacity,
         )
-        selected = self._select_diverse(
-            ranked,
-            max_chunks_per_paper=effective_max_chunks_per_paper,
+        assembly = self.evidence_assembler.assemble(
+            search_result.ranked,
+            search_result.candidates,
+            max_groups_per_paper=effective_max_groups_per_paper,
         )
-        selected = self._complete_selected_structures(selected, candidates)
+        selected = assembly.evidence
         selected_text = " ".join(self._searchable_text(item).lower() for item in selected)
-        unique_query_tokens = set(query_tokens)
+        unique_query_tokens = set(search_result.query_tokens)
         matched_query_tokens = {token for token in unique_query_tokens if token in selected_text}
-        candidate_token_counts = [item.token_count for item in candidates if item.token_count > 0]
         self.last_diagnostics = {
-            "retrievalMode": self.last_retrieval_mode,
-            "embeddingBackend": active_embedding_backend,
-            "embeddingFailures": embedding_failures,
-            "chunkingStrategy": "mineru_structure_semantic_token_overlap",
-            "candidateCount": len(candidates),
-            "averageChunkTokens": round(
-                sum(candidate_token_counts) / max(1, len(candidate_token_counts)),
-                2,
-            ),
-            "maxChunkTokens": max(candidate_token_counts, default=0),
-            "overlappedChunkCount": sum(item.overlap_token_count > 0 for item in candidates),
-            "structuredCandidateCount": sum(bool(item.structure_id) for item in candidates),
-            "selectedStructureCount": len({
-                (item.record_id, item.structure_id)
-                for item in selected
-                if item.structure_id
-            }),
-            "selectedContinuationCount": sum(
-                bool(item.continues_from or item.continues_to) for item in selected
-            ),
+            **search_result.diagnostics,
+            **assembly.diagnostics,
             "evidenceCount": len(selected),
             "distinctPaperCount": len({item.record_id for item in selected}),
             "selectedPaperIds": list(dict.fromkeys(item.record_id for item in selected)),
+            "selectedContinuationCount": sum(
+                bool(item.continues_from or item.continues_to) for item in selected
+            ),
             "configuredMaxChunksPerPaper": self.max_chunks_per_paper,
-            "effectiveMaxChunksPerPaper": effective_max_chunks_per_paper,
+            "effectiveMaxChunksPerPaper": effective_max_groups_per_paper,
+            "configuredMaxGroupsPerPaper": self.max_chunks_per_paper,
+            "effectiveMaxGroupsPerPaper": effective_max_groups_per_paper,
             "minimumEvidenceCount": required_capacity,
             "queryCoverage": round(len(matched_query_tokens) / max(1, len(unique_query_tokens)), 4),
             "topScore": round(selected[0].score, 4) if selected else 0.0,
         }
         return [item.to_dict() for item in selected]
 
-    def _complete_selected_structures(
-        self,
-        selected: list[EvidenceChunk],
-        candidates: list[EvidenceChunk],
-    ) -> list[EvidenceChunk]:
-        """命中连续结构时优先携带相邻分片，避免只返回算法、表格或代码的中段。"""
-        if not selected or not any(item.structure_id for item in selected):
-            return selected
-
-        members: dict[tuple[str, str], list[EvidenceChunk]] = defaultdict(list)
-        for candidate in candidates:
-            if candidate.structure_id:
-                members[(candidate.record_id, candidate.structure_id)].append(candidate)
-        for values in members.values():
-            values.sort(key=lambda item: item.structure_sequence)
-
-        completed: list[EvidenceChunk] = []
-        seen: set[tuple[str, int]] = set()
-        context_size = 0
-
-        def append(item: EvidenceChunk) -> bool:
-            nonlocal context_size
-            key = (item.record_id, item.chunk_index)
-            if key in seen:
-                return False
-            if len(completed) >= self.max_chunks:
-                return False
-            if context_size + len(item.text) > self.max_context_chars:
-                return False
-            completed.append(item)
-            seen.add(key)
-            context_size += len(item.text)
-            return True
-
-        expanded_structures: set[tuple[str, str]] = set()
-        for seed in selected:
-            structure_key = (seed.record_id, seed.structure_id)
-            if seed.structure_id and structure_key not in expanded_structures:
-                expanded_structures.add(structure_key)
-                structure_members = members.get(structure_key, [seed])
-                remaining_capacity = self.max_chunks - len(completed)
-                seed_position = next(
-                    (
-                        index
-                        for index, member in enumerate(structure_members)
-                        if member.chunk_index == seed.chunk_index
-                    ),
-                    0,
-                )
-                # 超长结构无法一次装入时，选择包含命中片段的连续窗口，不能只取结构开头。
-                window_start = max(
-                    0,
-                    min(
-                        seed_position - remaining_capacity // 2,
-                        len(structure_members) - remaining_capacity,
-                    ),
-                )
-                structure_window = structure_members[
-                    window_start : window_start + remaining_capacity
-                ]
-                for member in structure_window:
-                    append(member)
-                continue
-            append(seed)
-
-        # 若结构补全仍有余量，继续保留原排序中的非结构证据。
-        for seed in selected:
-            append(seed)
-        return completed
-
-    def _effective_max_chunks_per_paper(
+    def _effective_max_groups_per_paper(
         self,
         ranked: list[EvidenceChunk],
         *,
         minimum_evidence_count: int,
     ) -> int:
-        """保证每篇上限不会与最低证据数形成不可达配置。"""
+        """保证每篇逻辑证据组上限不会与最低证据数形成不可达配置。"""
         ranked_paper_count = len({item.record_id for item in ranked})
         if minimum_evidence_count <= 0 or ranked_paper_count == 0:
             return self.max_chunks_per_paper
@@ -478,145 +380,15 @@ class RAGRetriever:
 
     def _paper_chunks(self, paper: dict[str, Any]) -> list[EvidenceChunk]:
         """把单篇论文整理为可检索的证据片段。"""
-        base = {
-            "record_id": str(paper.get("id") or paper.get("recordId") or ""),
-            "title": str(paper.get("title") or "未命名文献"),
-            "year": str(paper.get("year") or ""),
-            "source": str(paper.get("source") or ""),
-            "url": str(paper.get("url") or ""),
-        }
-        split_chunks = paper.get("splitChunks") or paper.get("split_chunks")
-        if isinstance(split_chunks, list):
-            base_blocks: list[BaseMarkdownBlock] = []
-            for index, raw in enumerate(split_chunks):
-                if not isinstance(raw, dict):
-                    continue
-                content = str(raw.get("content") or "").strip()
-                if not content:
-                    continue
-                headings = raw.get("headings") if isinstance(raw.get("headings"), list) else []
-                section = " > ".join(
-                    str(heading.get("heading") or "").strip()
-                    for heading in headings
-                    if isinstance(heading, dict) and str(heading.get("heading") or "").strip()
-                )
-                summary = str(raw.get("summary") or "").strip()
-                category = str(raw.get("semanticCategory") or raw.get("semantic_category") or "").strip().lower()
-                semantic_type = str(raw.get("semanticType") or raw.get("semantic_type") or "prose").strip().lower()
-                structure_id = str(raw.get("structureId") or raw.get("structure_id") or "").strip()
-                if self._is_excluded(category=category, section=section, text=f"{summary}\n{content}"):
-                    continue
-                base_blocks.append(
-                    BaseMarkdownBlock(
-                        content=content,
-                        index=index,
-                        headings=headings,
-                        summary=summary,
-                        semantic_category=category or "body",
-                        semantic_type=semantic_type or "prose",
-                        structure_id=structure_id,
-                        structure_part_index=int(raw.get("structurePartIndex") or raw.get("structure_part_index") or 0),
-                        structure_part_count=int(raw.get("structurePartCount") or raw.get("structure_part_count") or 0),
-                        continues_from=raw.get("continuesFrom") or raw.get("continues_from"),
-                        continues_to=raw.get("continuesTo") or raw.get("continues_to"),
-                    )
-                )
-            if base_blocks:
-                outline = paper.get("splitOutline") or paper.get("split_outline") or []
-                prepared = self.chunker.build(
-                    base_blocks,
-                    outline=outline if isinstance(outline, list) else [],
-                )
-                return [
-                    EvidenceChunk(
-                        **base,
-                        text=item.text,
-                        score=0,
-                        section=item.section,
-                        chunk_index=index,
-                        token_count=item.token_count,
-                        overlap_token_count=item.overlap_token_count,
-                        base_chunk_indices=item.base_chunk_indices,
-                        summary=item.summary,
-                        semantic_type=item.semantic_type,
-                        structure_id=item.structure_id,
-                        structure_sequence=item.structure_sequence,
-                        continues_from=item.continues_from,
-                        continues_to=item.continues_to,
-                        is_structure_start=item.is_structure_start,
-                        is_structure_end=item.is_structure_end,
-                    )
-                    for index, item in enumerate(prepared)
-                ]
-
-        content = self._read_markdown(paper) or str(paper.get("abstract") or "").strip()
-        outline, sections = parse_markdown_sections(content)
-        fallback_blocks: list[BaseMarkdownBlock] = []
-        for index, section_data in enumerate(sections):
-            section_content = str(section_data.get("content") or "").strip()
-            heading = str(section_data.get("heading") or "").strip()
-            heading_item = {
-                "heading": heading,
-                "level": int(section_data.get("level") or 1),
-                "position": int(section_data.get("position") or index + 1),
-            }
-            if not section_content or self._is_excluded(category="", section=heading, text=section_content):
-                continue
-            fallback_blocks.append(
-                BaseMarkdownBlock(
-                    content=section_content,
-                    index=index,
-                    headings=[heading_item] if heading else [],
-                )
-            )
-        prepared = self.chunker.build(fallback_blocks, outline=outline)
-        return [
-            EvidenceChunk(
-                **base,
-                text=item.text,
-                score=0,
-                section=item.section,
-                chunk_index=index,
-                token_count=item.token_count,
-                overlap_token_count=item.overlap_token_count,
-                base_chunk_indices=item.base_chunk_indices,
-                summary=item.summary,
-                semantic_type=item.semantic_type,
-                structure_id=item.structure_id,
-                structure_sequence=item.structure_sequence,
-                continues_from=item.continues_from,
-                continues_to=item.continues_to,
-                is_structure_start=item.is_structure_start,
-                is_structure_end=item.is_structure_end,
-            )
-            for index, item in enumerate(prepared)
-        ]
+        return self.structure_indexer.index_paper(paper, chunk_factory=EvidenceChunk)
 
     def _read_markdown(self, paper: dict[str, Any]) -> str:
         """读取Markdown。"""
-        for key in ("markdownPath", "markdown_path"):
-            path_value = str(paper.get(key) or "").strip()
-            if path_value:
-                path = Path(path_value)
-                if path.exists() and path.is_file():
-                    return path.read_text(encoding="utf-8", errors="ignore")
-        output_dir = str(paper.get("markdownOutputDir") or paper.get("markdown_output_dir") or "").strip()
-        if output_dir:
-            path = Path(output_dir) / "full.md"
-            if path.exists() and path.is_file():
-                return path.read_text(encoding="utf-8", errors="ignore")
-        return ""
+        return self.structure_indexer.read_markdown(paper)
 
     def _is_excluded(self, *, category: str, section: str, text: str) -> bool:
         """判断片段是否属于参考文献等应排除内容。"""
-        normalized_category = category.replace("-", "_").replace(" ", "_")
-        if normalized_category in _EXCLUDED_CATEGORIES:
-            return True
-        normalized_section = section.lower().strip()
-        if normalized_section and any(pattern in normalized_section for pattern in _EXCLUDED_SECTION_PATTERNS):
-            return True
-        first_line = next((line.strip(" #\t:：.-").lower() for line in text.splitlines() if line.strip()), "")
-        return any(first_line.startswith(pattern) for pattern in _EXCLUDED_SECTION_PATTERNS)
+        return self.structure_indexer.is_excluded(category=category, section=section, text=text)
 
     def _searchable_text(self, chunk: EvidenceChunk) -> str:
         """拼接证据片段中参与检索的字段。"""
@@ -660,38 +432,6 @@ class RAGRetriever:
             score += inverse_frequency * frequency * 2.5 / denominator
         return score
 
-    def _select_diverse(
-        self,
-        ranked: list[EvidenceChunk],
-        *,
-        max_chunks_per_paper: int | None = None,
-    ) -> list[EvidenceChunk]:
-        """从排序结果中选择来源和内容更丰富的证据。"""
-        selected: list[EvidenceChunk] = []
-        per_paper: defaultdict[str, int] = defaultdict(int)
-        context_size = 0
-        paper_limit = max(1, int(max_chunks_per_paper or self.max_chunks_per_paper))
-        for candidate in ranked:
-            if per_paper[candidate.record_id] >= paper_limit:
-                continue
-            if context_size + len(candidate.text) > self.max_context_chars:
-                continue
-            candidate_tokens = set(self._tokenize(candidate.text))
-            if any(self._jaccard(candidate_tokens, set(self._tokenize(item.text))) > 0.82 for item in selected):
-                continue
-            selected.append(candidate)
-            per_paper[candidate.record_id] += 1
-            context_size += len(candidate.text)
-            if len(selected) >= self.max_chunks:
-                break
-        return selected
-
-    def _jaccard(self, left: set[str], right: set[str]) -> float:
-        """计算两个词元集合的 Jaccard 相似度。"""
-        if not left or not right:
-            return 0.0
-        return len(left & right) / len(left | right)
-
     def _normalize_scores(self, scores: list[float]) -> list[float]:
         """规范化得分。"""
         if not scores:
@@ -703,4 +443,4 @@ class RAGRetriever:
         return [(value - minimum) / (maximum - minimum) for value in scores]
 
 
-__all__ = ["RAGRetriever", "EvidenceChunk"]
+__all__ = ["RAGRetriever", "EvidenceChunk", "CandidateSearchResult"]
