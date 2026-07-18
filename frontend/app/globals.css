@@ -2502,6 +2502,160 @@ select.settings-input {
   margin-top: 24px;
 }
 
+.home-notice label {
+  display: grid;
+  gap: 6px;
+  font-weight: 800;
+}
+
+.home-notice input {
+  min-width: min(360px, 80vw);
+  min-height: 40px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 8px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  padding: 0 12px;
+}
+
+/* 项目选择和成员管理构成领域树页面的隔离入口。 */
+.domain-tree-project-bar,
+.domain-tree-project-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.domain-tree-project-bar {
+  justify-content: space-between;
+  margin-top: 20px;
+  padding: 16px;
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  background: var(--app-surface);
+}
+
+.domain-tree-project-bar label {
+  display: grid;
+  gap: 6px;
+  min-width: min(420px, 100%);
+  color: var(--app-text-muted);
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.domain-tree-project-bar select,
+.domain-tree-project-actions button {
+  min-height: 40px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 9px;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  padding: 0 12px;
+}
+
+.domain-tree-project-actions button {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.domain-tree-project-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.domain-tree-member-editor {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  background: var(--app-surface);
+}
+
+.domain-tree-create-project {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(260px, 1.4fr) auto;
+  align-items: end;
+  gap: 16px;
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  background: var(--app-surface);
+}
+
+.domain-tree-create-project > div:first-child,
+.domain-tree-create-project label {
+  display: grid;
+  gap: 6px;
+}
+
+.domain-tree-create-project span {
+  color: var(--app-text-muted);
+  font-size: 0.84rem;
+}
+
+.domain-tree-create-project input {
+  min-height: 40px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 9px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  padding: 0 12px;
+}
+
+.domain-tree-member-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.domain-tree-source-project {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-surface) 92%, var(--app-primary) 8%);
+}
+
+.domain-tree-source-project label {
+  display: grid;
+  gap: 6px;
+  min-width: min(420px, 100%);
+}
+
+.domain-tree-source-project label > span {
+  color: var(--app-text-muted);
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.domain-tree-source-project select {
+  min-height: 40px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 9px;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  padding: 0 12px;
+}
+
+.domain-tree-member-list label {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 9px;
+  color: var(--app-text);
+}
+
 .domain-tree-select-wrap {
   display: grid;
   flex: 1 1 auto;
@@ -3249,6 +3403,18 @@ select.settings-input {
   .domain-tree-card-head {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .domain-tree-project-bar,
+  .domain-tree-project-actions,
+  .domain-tree-create-project,
+  .domain-tree-source-project {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .domain-tree-create-project {
+    display: flex;
   }
 
   .domain-tree-results {

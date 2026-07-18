@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 from collections import Counter, defaultdict
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from app.core.config import settings
 from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore
 from app.services.domain_tree_store import DomainTreeStore
+from app.services.project_repository import DEFAULT_PROJECT_ID, ProjectRepository
 from app.services.semantic_graph import SemanticGraphExtractor, SemanticSourceDocument
 from app.services.task_control import (
     DomainTreeGenerationCancelled,
@@ -235,6 +237,7 @@ class DomainTreeAgent:
         storage_dir: str | Path | None = None,
         metadata_db_path: str | Path | None = None,
         prompt_dir: str | Path | None = None,
+        project_repository: ProjectRepository | None = None,
     ) -> None:
         """初始化当前对象所需的配置与运行状态。"""
         self.storage_dir = self._resolve_storage_dir(storage_dir)
@@ -243,6 +246,8 @@ class DomainTreeAgent:
         self.analysis_root = self.storage_dir / "domain_tree"
         self.analysis_root.mkdir(parents=True, exist_ok=True)
         self.store = DomainTreeStore()
+        # 项目仓储按需初始化，纯模型/图谱单元测试不会产生数据库副作用。
+        self.project_repository = project_repository
         self._generation_metadata: dict[str, Any] = self._default_generation_metadata()
 
     async def handle_domain_tree(
@@ -882,14 +887,15 @@ class DomainTreeAgent:
         return None
 
     def _load_documents(self, project_id: str) -> list[SourceDocument]:
-        """加载来源文档。"""
-        specific_document = self._load_document_for_project(project_id)
-        if specific_document:
-            return [specific_document]
+        """只加载当前项目成员论文，禁止未知项目回退到全局文献。"""
+        project_repository = self.project_repository or ProjectRepository(self.metadata_db_path)
+        project = project_repository.get(project_id)
+        if not project or project.get("status") != "active":
+            logger.warning("[%s] 项目不存在或已归档，拒绝加载文献", project_id)
+            return []
 
-        documents: list[SourceDocument] = []
-        if self.metadata_db_path.exists():
-            documents.extend(self._load_documents_from_metadata_db())
+        paper_ids = project_repository.list_paper_ids(project_id)
+        documents = self._load_documents_from_metadata_db(paper_ids)
 
         if documents:
             unique: dict[str, SourceDocument] = {}
@@ -898,6 +904,9 @@ class DomainTreeAgent:
                 unique.setdefault(key, document)
             return list(unique.values())
 
+        # 默认项目兼容尚未登记到 papers 表的历史 Markdown 目录；新项目必须显式关联论文。
+        if project_id != DEFAULT_PROJECT_ID:
+            return []
         markdown_root = self.storage_dir / "markdown"
         if not markdown_root.exists():
             return []
@@ -907,32 +916,17 @@ class DomainTreeAgent:
             fallback_documents.append(self._build_document_from_markdown_dir(directory.name, {}, directory))
         return fallback_documents
 
-    def _load_document_for_project(self, project_id: str) -> SourceDocument | None:
-        """加载来源文档、项目标识。"""
-        if self.metadata_db_path.exists():
-            with sqlite3.connect(self.metadata_db_path) as connection:
-                connection.row_factory = sqlite3.Row
-                row = connection.execute(
-                    (
-                        "SELECT id, title, metadata_json FROM papers "
-                        "WHERE id = ? OR title = ? LIMIT 1"
-                    ),
-                    [project_id, project_id],
-                ).fetchone()
-            if row:
-                metadata = self._parse_metadata_json(row["metadata_json"])
-                return self._build_document_from_metadata(str(row["id"]), metadata, fallback_title=str(row["title"]))
-
-        markdown_dir = self.storage_dir / "markdown" / project_id
-        if markdown_dir.exists() and markdown_dir.is_dir():
-            return self._build_document_from_markdown_dir(project_id, {}, markdown_dir)
-        return None
-
-    def _load_documents_from_metadata_db(self) -> list[SourceDocument]:
-        """加载来源文档、元数据。"""
-        with sqlite3.connect(self.metadata_db_path) as connection:
+    def _load_documents_from_metadata_db(self, record_ids: list[str]) -> list[SourceDocument]:
+        """按项目成员 ID 加载来源文档和元数据。"""
+        if not record_ids or not self.metadata_db_path.exists():
+            return []
+        placeholders = ", ".join("?" for _ in record_ids)
+        with closing(sqlite3.connect(self.metadata_db_path)) as connection:
             connection.row_factory = sqlite3.Row
-            rows = connection.execute("SELECT id, title, metadata_json FROM papers").fetchall()
+            rows = connection.execute(
+                f"SELECT id, title, metadata_json FROM papers WHERE id IN ({placeholders})",
+                record_ids,
+            ).fetchall()
 
         documents: list[SourceDocument] = []
         for row in rows:

@@ -10,7 +10,7 @@ const pages = [
   { href: "/research-chat", label: "研究对话" },
   { href: "/dataset-download", label: "下载数据集" },
   { href: "/dataset-brower", label: "浏览数据集" },
-  { href: "/domain-tree", label: "领域树" },
+  { href: "/domain-tree", label: "项目知识空间" },
   { href: "/setting", label: "设置" },
 ];
 

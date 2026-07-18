@@ -9,6 +9,7 @@ import DatasetDownloadPage from "@/app/_views/DatasetDownloadView";
 import DomainTreePage from "@/app/_views/DomainTreeView";
 import SettingsWorkspace from "@/app/_views/SettingsView";
 import HeroSection from "@/home/HeroSection";
+import { useProjects } from "@/app/_components/ProjectProvider";
 
 type WorkspaceView = "home" | "download" | "browse" | "domain-tree" | "settings";
 
@@ -28,15 +29,30 @@ type HomeWorkspaceProps = {
 /** 管理首页内嵌视图和导航状态。 */
 export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
   const router = useRouter();
+  const { createProject } = useProjects();
   const [manualView, setManualView] = useState<WorkspaceView | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [projectName, setProjectName] = useState("");
+  const [projectMessage, setProjectMessage] = useState("");
   const activeView = manualView ?? parseWorkspaceView(initialView);
+
+  async function handleCreateProject() {
+    if (!projectName.trim()) return;
+    try {
+      await createProject(projectName.trim());
+      setProjectName("");
+      setCreateDialogOpen(false);
+      setManualView("domain-tree");
+    } catch (error) {
+      setProjectMessage(error instanceof Error ? error.message : "创建项目失败");
+    }
+  }
 
   const navItems = useMemo(
     () => [
       { id: "download" as const, label: "下载数据集" },
       { id: "browse" as const, label: "浏览数据集" },
-      { id: "domain-tree" as const, label: "领域树" },
+      { id: "domain-tree" as const, label: "项目知识空间" },
       { id: "settings" as const, label: "设置" },
     ],
     [],
@@ -87,10 +103,19 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
 
             {createDialogOpen && (
               <section className="home-notice" role="status">
-                创建项目功能待接入。
-                <button type="button" onClick={() => setCreateDialogOpen(false)}>
-                  关闭
+                <label>
+                  项目名称
+                  <input
+                    value={projectName}
+                    onChange={(event) => setProjectName(event.target.value)}
+                    placeholder="例如：医学影像跨领域研究"
+                  />
+                </label>
+                <button type="button" onClick={() => void handleCreateProject()} disabled={!projectName.trim()}>
+                  创建并配置文献
                 </button>
+                <button type="button" onClick={() => setCreateDialogOpen(false)}>取消</button>
+                {projectMessage ? <span>{projectMessage}</span> : null}
               </section>
             )}
           </main>

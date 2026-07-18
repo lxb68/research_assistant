@@ -91,6 +91,20 @@ class PaperRepository:
             row = connection.execute(query, params).fetchone()
         return int(row[0] if row else 0)
 
+    def list_by_ids(self, record_ids: list[str]) -> list[dict[str, Any]]:
+        """按给定顺序返回论文，用于项目成员边界内的数据投影。"""
+        normalized = list(dict.fromkeys(value.strip() for value in record_ids if value.strip()))
+        if not normalized:
+            return []
+        placeholders = ", ".join("?" for _ in normalized)
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                f"SELECT {PAPER_COLUMNS} FROM papers WHERE id IN ({placeholders})",
+                normalized,
+            ).fetchall()
+        records = {str(row["id"]): self._row_to_record(row) for row in rows}
+        return [records[record_id] for record_id in normalized if record_id in records]
+
     def find(self, *, record_id: str | None = None, doi: str | None = None, title: str | None = None) -> dict[str, Any] | None:
         clauses: list[str] = []
         params: list[str] = []

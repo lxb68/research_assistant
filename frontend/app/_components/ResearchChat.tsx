@@ -25,6 +25,7 @@ import { buildApiUrl } from "@/lib/api";
 import { useBackgroundTasks } from "@/app/_components/BackgroundTaskProvider";
 import { fetchJob } from "@/lib/background-jobs";
 import MessageContent from "@/app/_components/MessageContent";
+import { useProjects } from "@/app/_components/ProjectProvider";
 
 type Props = { onOpenDownload: () => void; onOpenBrowse: () => void; onOpenDomainTree: () => void; onOpenSettings: () => void };
 type Source = {
@@ -92,6 +93,7 @@ function usableHistory(messages: Message[]) {
 /** 管理研究对话、流式响应和本地会话记录。 */
 export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomainTree, onOpenSettings }: Props) {
   const { jobs, submitJob } = useBackgroundTasks();
+  const { activeProjectId, activeProject } = useProjects();
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
@@ -251,6 +253,7 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
     try {
       const job = await submitJob("research_chat", {
         question: prompt,
+        project_id: activeProjectId,
         title,
         history: usableHistory(messages).slice(-8).map((message) => ({
           role: message.role === "agent" ? "assistant" : "user",
@@ -463,7 +466,7 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
           </section>
           <div className="research-compose-wrap">
             
-            <form className="research-compose" onSubmit={submit}><textarea rows={2} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={keyDown} placeholder="继续追问，或给 Research Agent 一个任务…" /><div><button type="button"><AddRounded /></button><button type="button" className="library-pill"><FolderOpenRounded />医疗大模型研究 <span>42 篇</span></button><button className="research-send" disabled={!input.trim() || thinking}><SendRounded /></button></div></form>
+            <form className="research-compose" onSubmit={submit}><textarea rows={2} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={keyDown} placeholder="继续追问，或给 Research Agent 一个任务…" /><div><button type="button"><AddRounded /></button><button type="button" className="library-pill" onClick={onOpenDomainTree}><FolderOpenRounded />{activeProject?.name || "当前项目"} <span>{activeProject?.paperCount ?? 0} 篇</span></button><button className="research-send" disabled={!input.trim() || thinking}><SendRounded /></button></div></form>
             <small className="research-note">{isDirectAnswer ? "本次为普通对话，未调用研究 Agent 或知识库。" : "研究内容由 AI 基于所选知识库生成，请核验关键结论与原始文献。"}</small>
           </div>
         </div>}

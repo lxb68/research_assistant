@@ -998,6 +998,13 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
     ) -> dict[str, Any]:
         """依次评估本地证据、补充论文并生成研究回答。"""
         history = self._clean_history(list(args.get("history") or []))
+        project_id = str(args.get("project_id") or "workspace-domain-tree").strip()
+        project_scope_ids = list(dict.fromkeys(
+            str(paper_id).strip()
+            for paper_id in args.get("project_paper_ids") or []
+            if str(paper_id).strip()
+        ))
+        project_paper_ids = set(project_scope_ids)
         paper_ids = list(args.get("paper_ids") or []) or None
         trace: list[dict[str, Any]] = []
         research_agent = ResearchChatAgent(log_callback=self.log_callback)
@@ -1089,7 +1096,15 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             }
 
         paper_ids = list(plan.get("targetPaperIds") or paper_ids or []) or None
+        if project_paper_ids:
+            paper_ids = [paper_id for paper_id in paper_ids or [] if paper_id in project_paper_ids] or project_scope_ids
         target_chunks = list(plan.get("targetChunks") or [])
+        if project_paper_ids:
+            target_chunks = [
+                item
+                for item in target_chunks
+                if str(item.get("record_id") or item.get("recordId") or "").strip() in project_paper_ids
+            ]
         retrieval_facets = list(plan.get("retrievalFacets") or [])
         question_type = str(plan.get("questionType") or "simple_fact")
         target_evidence_count = int(plan.get("targetEvidenceCount") or settings.orchestrator_min_evidence)
@@ -1108,6 +1123,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             retrieval_facets=retrieval_facets,
             question_type=question_type,
             target_evidence_count=target_evidence_count,
+            **({"graph_project_id": project_id} if args.get("project_id") else {}),
         )
         raise_if_task_cancelled(cancel_event)
         evaluation = await self._evaluate_retrieved_evidence(
@@ -1160,6 +1176,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                     question_type=question_type,
                     target_evidence_count=target_evidence_count,
                     existing_evidence=evidence,
+                    **({"graph_project_id": project_id} if args.get("project_id") else {}),
                 )
                 raise_if_task_cancelled(cancel_event)
                 evaluation = await self._evaluate_retrieved_evidence(

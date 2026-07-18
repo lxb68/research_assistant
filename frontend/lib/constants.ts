@@ -5,6 +5,7 @@ export const API_BASE_URL =
 
 export const WORKSPACE_SETTINGS_STORAGE_KEY = "research-agent.settings";
 export const WORKSPACE_DOMAIN_TREE_PROJECT_ID = "workspace-domain-tree";
+export const ACTIVE_PROJECT_STORAGE_KEY = "research-agent.active-project";
 
 export const DEFAULT_MINIMUM_SPLIT_LENGTH = 1500;
 export const DEFAULT_MAXIMUM_SPLIT_LENGTH = 2000;

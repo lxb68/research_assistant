@@ -49,14 +49,27 @@ class ImportPaperRequest(BaseModel):
     custom_tags: list[str] = Field(default_factory=list)
 
 
-class DomainTreeGenerateRequest(BaseModel):
-    project_id: str = Field(..., min_length=1)
+class DomainTreeGenerateOptions(BaseModel):
     action: Literal["rebuild", "revise", "keep"] = "rebuild"
     language: Literal["auto", "中文", "English"] = "auto"
     all_toc: str | None = None
     new_toc: str | None = None
     delete_toc: str | None = None
     model: str | None = None
+
+
+class DomainTreeGenerateRequest(DomainTreeGenerateOptions):
+    project_id: str = Field(..., min_length=1)
+
+
+class ProjectCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: str = Field("", max_length=2000)
+    paper_ids: list[str] = Field(default_factory=list, max_length=500)
+
+
+class ProjectPapersRequest(BaseModel):
+    paper_ids: list[str] = Field(default_factory=list, max_length=500)
 
 
 class ModelConfigRequest(BaseModel):
@@ -95,6 +108,7 @@ class ResearchChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=20000)
     history: list[ChatMessage] = Field(default_factory=list, max_length=20)
     paper_ids: list[str] = Field(default_factory=list, max_length=100)
+    project_id: str = Field("workspace-domain-tree", min_length=1, max_length=200)
 
 
 class OrchestratorRequest(BaseModel):
@@ -105,7 +119,8 @@ class OrchestratorRequest(BaseModel):
 
 __all__ = [
     "DatasetDownloadRequest", "DeduplicatePapersRequest", "DeletePapersRequest",
-    "DomainTreeGenerateRequest", "ImportPaperRequest", "ManualPdfLinkRequest",
+    "DomainTreeGenerateOptions", "DomainTreeGenerateRequest", "ImportPaperRequest", "ManualPdfLinkRequest",
     "ModelConfigRequest", "ModelDiscoveryRequest", "OrchestratorRequest",
+    "ProjectCreateRequest", "ProjectPapersRequest",
     "ResearchChatRequest",
 ]

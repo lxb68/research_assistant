@@ -7,17 +7,23 @@ from fastapi import APIRouter, HTTPException, Request
 from app.agents import OrchestratorAgent
 from app.api.streaming import ndjson_worker_response
 from app.schemas.api import OrchestratorRequest, ResearchChatRequest
+from app.core.config import settings
+from app.services.project_repository import ProjectNotFoundError
+from app.services.project_scope import ProjectScopeService
 
 
 router = APIRouter()
 
 
 def _research_arguments(payload: ResearchChatRequest) -> dict:
-    return {
-        "history": [message.model_dump() for message in payload.history],
-        "paper_ids": payload.paper_ids,
-        "allow_external_search": not bool(payload.paper_ids),
-    }
+    try:
+        return ProjectScopeService(settings.hunter_metadata_db).build_research_arguments(
+            project_id=payload.project_id,
+            requested_paper_ids=payload.paper_ids,
+            history=[message.model_dump() for message in payload.history],
+        )
+    except ProjectNotFoundError as error:
+        raise ValueError(str(error)) from error
 
 
 @router.post("/api/research/chat")

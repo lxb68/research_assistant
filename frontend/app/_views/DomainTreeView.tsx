@@ -6,6 +6,10 @@ import { useEffect, useMemo, useState } from "react";
 import { buildApiUrl } from "@/lib/api";
 import { SplitChunk, SavedPaper } from "@/lib/papers";
 import { WORKSPACE_DOMAIN_TREE_PROJECT_ID } from "@/lib/constants";
+import { useProjects } from "@/app/_components/ProjectProvider";
+import { DomainTreePanel } from "@/app/_views/project-knowledge/DomainTreePanel";
+import { KnowledgeGraphPanel } from "@/app/_views/project-knowledge/KnowledgeGraphPanel";
+import { ProjectLiteraturePanel } from "@/app/_views/project-knowledge/ProjectLiteraturePanel";
 
 type DomainTreeNode = {
   label: string;
@@ -146,7 +150,7 @@ type ModelConfigStatus = {
 };
 
 type DomainTreeAction = "revise" | "rebuild" | "keep";
-type DomainTreeViewMode = "tree" | "graph";
+type DomainTreeViewMode = "project" | "tree" | "graph";
 type DomainTreeLanguage = "auto" | "中文" | "English";
 
 type DomainTreeJob = {
@@ -372,12 +376,37 @@ function renderTree(
 }
 
 /** 管理领域树生成、修订和证据关联。 */
-export default function DomainTreePage({
+export default function DomainTreePage(props: DomainTreePageProps = {}) {
+  const { activeProjectId } = useProjects();
+  return <DomainTreeProjectPage key={activeProjectId} {...props} />;
+}
+
+/** 每次切换项目时重新挂载，避免旧项目的任务和图谱状态残留。 */
+function DomainTreeProjectPage({
   embedded = false,
   isActiveView = true,
   onOpenSettings,
-}: DomainTreePageProps = {}) {
+}: DomainTreePageProps) {
+  const {
+    projects,
+    activeProjectId,
+    activeProject,
+    isLoadingProjects,
+    projectError,
+    selectProject,
+    createProject,
+    refreshProjects,
+  } = useProjects();
   const [papers, setPapers] = useState<SavedPaper[]>([]);
+  const [availablePapers, setAvailablePapers] = useState<SavedPaper[]>([]);
+  const [memberDraftIds, setMemberDraftIds] = useState<string[]>([]);
+  const [isEditingMembers, setIsEditingMembers] = useState(false);
+  const [isSavingMembers, setIsSavingMembers] = useState(false);
+  const [sourceProjectId, setSourceProjectId] = useState(WORKSPACE_DOMAIN_TREE_PROJECT_ID);
+  const [isLoadingSourcePapers, setIsLoadingSourcePapers] = useState(false);
+  const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [paperDetails, setPaperDetails] = useState<Record<string, PaperDetail>>({});
   const [result, setResult] = useState<DomainTreeResult | null>(null);
   const [isLoadingPapers, setIsLoadingPapers] = useState(true);
@@ -394,7 +423,7 @@ export default function DomainTreePage({
   const [isLoadingModelStatus, setIsLoadingModelStatus] = useState(true);
   const [manualGenerationMode, setManualGenerationMode] = useState<DomainTreeAction | null>(null);
   const [generationLanguage, setGenerationLanguage] = useState<DomainTreeLanguage>("auto");
-  const [viewMode, setViewMode] = useState<DomainTreeViewMode>("tree");
+  const [viewMode, setViewMode] = useState<DomainTreeViewMode>("project");
   const [selectedSecondaryKey, setSelectedSecondaryKey] = useState("");
   const [selectedSecondaryLabel, setSelectedSecondaryLabel] = useState("");
   const [matchedChunks, setMatchedChunks] = useState<ChunkMatch[]>([]);
@@ -646,22 +675,30 @@ export default function DomainTreePage({
   useEffect(() => {
     let cancelled = false;
 
-    /** 按关键词加载本地论文列表。 */
+    /** 同时加载全局论文目录和当前项目成员论文。 */
     async function loadPapers() {
       setIsLoadingPapers(true);
       setError("");
 
       try {
-        const url = buildApiUrl("/api/papers");
-        url.searchParams.set("limit", "200");
-        const response = await fetch(url);
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(payload.detail || "加载论文列表失败");
-        }
+        const allUrl = buildApiUrl("/api/papers");
+        allUrl.searchParams.set("limit", "500");
+        const [allResponse, projectResponse] = await Promise.all([
+          fetch(allUrl),
+          fetch(buildApiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}/papers`)),
+        ]);
+        const [allPayload, projectPayload] = await Promise.all([
+          allResponse.json().catch(() => ({})),
+          projectResponse.json().catch(() => ({})),
+        ]);
+        if (!allResponse.ok) throw new Error(allPayload.detail || "加载论文列表失败");
+        if (!projectResponse.ok) throw new Error(projectPayload.detail || "加载项目论文失败");
 
         if (!cancelled) {
-          setPapers(payload.papers ?? []);
+          const projectPapers = (projectPayload.papers ?? []) as SavedPaper[];
+          setAvailablePapers(allPayload.papers ?? []);
+          setPapers(projectPapers);
+          setMemberDraftIds(projectPapers.flatMap((paper) => paper.id ? [paper.id] : []));
         }
       } catch (loadError) {
         if (!cancelled) {
@@ -682,7 +719,7 @@ export default function DomainTreePage({
     return () => {
       cancelled = true;
     };
-  }, [embedded, isActiveView]);
+  }, [activeProjectId, embedded, isActiveView]);
 
   useEffect(() => {
     let cancelled = false;
@@ -694,7 +731,7 @@ export default function DomainTreePage({
 
       try {
         const response = await fetch(
-          buildApiUrl(`/api/domain-tree/${encodeURIComponent(WORKSPACE_DOMAIN_TREE_PROJECT_ID)}`),
+          buildApiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}/domain-tree`),
         );
         const payload = await response.json().catch(() => ({}));
 
@@ -733,7 +770,7 @@ export default function DomainTreePage({
     return () => {
       cancelled = true;
     };
-  }, [embedded, isActiveView]);
+  }, [activeProjectId, embedded, isActiveView]);
 
   useEffect(() => {
     let cancelled = false;
@@ -743,7 +780,7 @@ export default function DomainTreePage({
       try {
         const response = await fetch(
           buildApiUrl(
-            `/api/domain-tree/jobs/active/${encodeURIComponent(WORKSPACE_DOMAIN_TREE_PROJECT_ID)}`,
+            `/api/projects/${encodeURIComponent(activeProjectId)}/domain-tree/jobs/active`,
           ),
         );
         if (response.status === 404) {
@@ -776,7 +813,7 @@ export default function DomainTreePage({
     return () => {
       cancelled = true;
     };
-  }, [embedded, isActiveView]);
+  }, [activeProjectId, embedded, isActiveView]);
 
   useEffect(() => {
     if (!activeJobId || (embedded && !isActiveView)) {
@@ -790,7 +827,9 @@ export default function DomainTreePage({
     async function pollJob() {
       try {
         const response = await fetch(
-          buildApiUrl(`/api/domain-tree/jobs/${encodeURIComponent(activeJobId)}`),
+          buildApiUrl(
+            `/api/projects/${encodeURIComponent(activeProjectId)}/domain-tree/jobs/${encodeURIComponent(activeJobId)}`,
+          ),
         );
         const payload = (await response.json().catch(() => ({}))) as DomainTreeJob & { detail?: string };
         if (!response.ok) {
@@ -867,7 +906,7 @@ export default function DomainTreePage({
         clearTimeout(timer);
       }
     };
-  }, [activeJobId, embedded, isActiveView]);
+  }, [activeJobId, activeProjectId, embedded, isActiveView]);
 
   const generationMode = useMemo<DomainTreeAction>(() => {
     if (manualGenerationMode) {
@@ -911,17 +950,19 @@ export default function DomainTreePage({
     );
 
     try {
-      const response = await fetch(buildApiUrl("/api/domain-tree/generate"), {
+      const response = await fetch(
+        buildApiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}/domain-tree/generate`),
+        {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          project_id: WORKSPACE_DOMAIN_TREE_PROJECT_ID,
           action: generationMode,
           language: generationLanguage,
         }),
-      });
+        },
+      );
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(payload.detail || "生成领域树失败");
@@ -946,7 +987,9 @@ export default function DomainTreePage({
     setError("");
     try {
       const response = await fetch(
-        buildApiUrl(`/api/domain-tree/jobs/${encodeURIComponent(activeJobId)}/cancel`),
+        buildApiUrl(
+          `/api/projects/${encodeURIComponent(activeProjectId)}/domain-tree/jobs/${encodeURIComponent(activeJobId)}/cancel`,
+        ),
         { method: "POST" },
       );
       const payload = (await response.json().catch(() => ({}))) as DomainTreeJob & { detail?: string };
@@ -958,6 +1001,90 @@ export default function DomainTreePage({
     } catch (cancelError) {
       setError(cancelError instanceof Error ? cancelError.message : "取消领域树任务失败");
       setIsCancelling(false);
+    }
+  }
+
+  /** 创建空项目，论文成员由项目文献面板显式选择。 */
+  async function handleCreateProject() {
+    const name = newProjectName.trim();
+    if (!name || isCreatingProject) return;
+    setIsCreatingProject(true);
+    setError("");
+    try {
+      await createProject(name);
+      setNewProjectName("");
+      setIsCreateProjectOpen(false);
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : "创建项目失败");
+    } finally {
+      setIsCreatingProject(false);
+    }
+  }
+
+  /** 从指定来源项目加载可复用的论文成员。 */
+  async function loadSourceProjectPapers(projectId: string) {
+    if (!projectId) {
+      setAvailablePapers([]);
+      return;
+    }
+    setIsLoadingSourcePapers(true);
+    setError("");
+    try {
+      const response = await fetch(
+        buildApiUrl(`/api/projects/${encodeURIComponent(projectId)}/papers`),
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "加载来源项目论文失败");
+      setAvailablePapers(payload.papers ?? []);
+    } catch (loadError) {
+      setAvailablePapers([]);
+      setError(loadError instanceof Error ? loadError.message : "加载来源项目论文失败");
+    } finally {
+      setIsLoadingSourcePapers(false);
+    }
+  }
+
+  /** 打开成员管理时默认展示默认项目，也允许切换到其他项目。 */
+  async function handleToggleMemberEditor() {
+    if (isEditingMembers) {
+      setIsEditingMembers(false);
+      return;
+    }
+    const sourceId = projects.some(
+      (project) => project.id === sourceProjectId && project.id !== activeProjectId,
+    )
+      ? sourceProjectId
+      : projects.find((project) => project.id !== activeProjectId)?.id || "";
+    setSourceProjectId(sourceId);
+    setIsEditingMembers(true);
+    await loadSourceProjectPapers(sourceId);
+  }
+
+  /** 保存当前项目的完整论文成员集合。 */
+  async function handleSaveProjectMembers() {
+    if (activeProjectId === WORKSPACE_DOMAIN_TREE_PROJECT_ID) return;
+    setIsSavingMembers(true);
+    setError("");
+    try {
+      const response = await fetch(
+        buildApiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}/papers`),
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ paper_ids: memberDraftIds }),
+        },
+      );
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "保存项目论文失败");
+      setPapers(payload.papers ?? []);
+      setIsEditingMembers(false);
+      setManualGenerationMode(null);
+      setStatus("项目论文集合已更新，可修订或重建领域树与知识图谱。");
+      await refreshProjects();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "保存项目论文失败");
+    } finally {
+      setIsSavingMembers(false);
     }
   }
 
@@ -1053,6 +1180,13 @@ export default function DomainTreePage({
     <main className="domain-tree-page">
       <section className="domain-tree-panel">
         <header className="domain-tree-header">
+          <div>
+            <span className="domain-tree-kicker">{activeProject?.name || "当前项目"}</span>
+            <h1>项目知识空间</h1>
+            <p className="domain-tree-subtitle">
+              分别管理项目文献、领域树和知识图谱；所有分析结果均按当前项目隔离。
+            </p>
+          </div>
           <div className="domain-tree-stats">
             <span>{markdownReadyPapers.length} 篇已解析文献</span>
             <span>{graphStats.nodeCount} 个图节点</span>
@@ -1062,9 +1196,16 @@ export default function DomainTreePage({
 
         <section
           className="domain-tree-view-switcher"
-          aria-label="领域树页面视图切换"
-          style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}
+          aria-label="项目知识空间视图切换"
+          style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}
         >
+          <button
+            type="button"
+            className={`domain-tree-view-button${viewMode === "project" ? " is-active" : ""}`}
+            onClick={() => setViewMode("project")}
+          >
+            项目文献
+          </button>
           <button
             type="button"
             className={`domain-tree-view-button${viewMode === "tree" ? " is-active" : ""}`}
@@ -1080,6 +1221,53 @@ export default function DomainTreePage({
             知识图谱
           </button>
         </section>
+
+        {viewMode === "project" ? (
+          <ProjectLiteraturePanel
+            projects={projects}
+            activeProjectId={activeProjectId}
+            projectError={projectError}
+            isLoadingProjects={isLoadingProjects}
+            isGenerating={isGenerating}
+            isCreateProjectOpen={isCreateProjectOpen}
+            newProjectName={newProjectName}
+            isCreatingProject={isCreatingProject}
+            isEditingMembers={isEditingMembers}
+            sourceProjectId={sourceProjectId}
+            isLoadingSourcePapers={isLoadingSourcePapers}
+            isSavingMembers={isSavingMembers}
+            availablePapers={availablePapers}
+            memberDraftIds={memberDraftIds}
+            onSelectProject={selectProject}
+            onToggleCreateProject={() => setIsCreateProjectOpen((current) => !current)}
+            onNewProjectNameChange={setNewProjectName}
+            onCreateProject={() => void handleCreateProject()}
+            onCancelCreateProject={() => {
+              setIsCreateProjectOpen(false);
+              setNewProjectName("");
+            }}
+            onToggleMemberEditor={() => void handleToggleMemberEditor()}
+            onSourceProjectChange={(projectId) => {
+              setSourceProjectId(projectId);
+              void loadSourceProjectPapers(projectId);
+            }}
+            onTogglePaper={(paperId, checked) => setMemberDraftIds((current) =>
+              checked ? Array.from(new Set([...current, paperId])) : current.filter((value) => value !== paperId),
+            )}
+            onSelectAllSourcePapers={() => setMemberDraftIds((current) => Array.from(new Set([
+              ...current,
+              ...availablePapers.flatMap((paper) => paper.id ? [paper.id] : []),
+            ])))}
+            onClearSourcePapers={() => {
+              const sourceIds = new Set(availablePapers.flatMap((paper) => paper.id ? [paper.id] : []));
+              setMemberDraftIds((current) => current.filter((paperId) => !sourceIds.has(paperId)));
+            }}
+            onSaveMembers={() => void handleSaveProjectMembers()}
+          />
+        ) : null}
+
+        {viewMode !== "project" ? (
+          <>
 
         {isModelConfigurationMissing && !isLoadingModelStatus ? (
           <div className="domain-tree-empty domain-tree-config-empty">
@@ -1260,6 +1448,7 @@ export default function DomainTreePage({
             <span>当前工作区已具备可分析文献，点击“生成领域树”即可开始。</span>
           </div>
         ) : viewMode === "tree" ? (
+          <DomainTreePanel>
           <div className="domain-tree-results">
             <section className="domain-tree-card domain-tree-tree-card">
               <div className="domain-tree-card-head">
@@ -1341,7 +1530,9 @@ export default function DomainTreePage({
               </article>
             </section>
           </div>
+          </DomainTreePanel>
         ) : (
+          <KnowledgeGraphPanel>
           <div className="domain-tree-graph-page">
             <article className="domain-tree-card">
               <div className="domain-tree-card-head">
@@ -1591,7 +1782,10 @@ export default function DomainTreePage({
               </div>
             </article>
           </div>
+          </KnowledgeGraphPanel>
         )}
+          </>
+        ) : null}
       </section>
     </main>
   );

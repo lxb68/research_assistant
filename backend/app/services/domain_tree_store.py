@@ -23,9 +23,20 @@ class DomainTreeStore:
         domain_payload = self._read_json(output_dir / "domain_tree.json")
         if domain_payload is None:
             return None
+        if isinstance(domain_payload, dict):
+            stored_project_id = str(domain_payload.get("projectId") or "").strip()
+            if stored_project_id and stored_project_id != project_id:
+                return None
         graph_status = str(domain_payload.get("graphStatus", "ready")) if isinstance(domain_payload, dict) else "ready"
         graph_payload = self._read_json(output_dir / "knowledge_graph.json") if graph_status == "ready" else {}
         manifest_payload = self.load_manifest(output_dir)
+        if isinstance(graph_payload, dict):
+            graph_project_id = str(graph_payload.get("projectId") or "").strip()
+            if graph_project_id and graph_project_id != project_id:
+                return None
+        manifest_project_id = str(manifest_payload.get("projectId") or "").strip()
+        if manifest_project_id and manifest_project_id != project_id:
+            return None
         catalog_path = output_dir / "catalog.txt"
         try:
             catalog_text = catalog_path.read_text(encoding="utf-8") if catalog_path.exists() else ""

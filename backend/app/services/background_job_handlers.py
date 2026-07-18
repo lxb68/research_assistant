@@ -12,14 +12,15 @@ from app.schemas.api import DatasetDownloadRequest, DomainTreeGenerateRequest, R
 from app.services.background_jobs import BackgroundJobContext, BackgroundJobManager
 from app.services.conversations import conversation_store
 from app.services.model_config import ModelConfigStore
+from app.services.project_scope import ProjectScopeService
 
 
 def _research_arguments(payload: ResearchChatRequest) -> dict[str, Any]:
-    return {
-        "history": [message.model_dump() for message in payload.history],
-        "paper_ids": payload.paper_ids,
-        "allow_external_search": not bool(payload.paper_ids),
-    }
+    return ProjectScopeService(settings.hunter_metadata_db).build_research_arguments(
+        project_id=payload.project_id,
+        requested_paper_ids=payload.paper_ids,
+        history=[message.model_dump() for message in payload.history],
+    )
 
 
 def _dataset_download(context: BackgroundJobContext, raw: dict[str, Any]) -> dict[str, Any]:

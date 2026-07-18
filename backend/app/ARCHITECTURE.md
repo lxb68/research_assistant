@@ -7,12 +7,20 @@ The backend is organized by responsibility rather than by framework entrypoint:
 - `services/domain_tree_jobs.py`: background task lifecycle and cancellation.
 - `services/model_client.py`, `services/mineru.py`, `services/providers/`: external service clients.
 - `services/model_config.py`, `services/embedding_store.py`, catalog services: persistence and configuration stores.
+- `services/project_repository.py`: project metadata and project-to-paper membership persistence.
+- `services/project_scope.py`: trusted project corpus projection for domain analysis and research retrieval.
 - `agents/`: research workflows and domain orchestration.
 - `schemas/`: transport and domain data models.
 
 `app/main.py` is the composition root. New endpoints belong in a feature router;
 new network integrations belong in a service client; durable state belongs in a
 store/repository; domain decisions belong in an agent or domain service.
+
+## Project isolation boundary
+
+项目是论文分析的隔离单位。`ProjectRepository` 决定项目论文成员，领域树 Agent 只能消费该成员集合；
+领域树、知识图谱、语义缓存和后台任务均以稳定的项目 ID 分区。研究问答在进入检索管线前由
+`ProjectScopeService` 过滤论文 ID、历史来源和精确分块引用，生成器和检索器不得自行回退到全局论文。
 
 ## Research answer pipeline
 
