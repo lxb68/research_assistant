@@ -2471,6 +2471,57 @@ select.settings-input {
   background: rgba(15, 23, 42, 0.5);
 }
 
+.domain-tree-toolbar {
+  display: grid;
+  grid-template-columns: minmax(420px, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+}
+
+.domain-tree-toolbar .domain-tree-view-switcher {
+  margin-top: 0;
+}
+
+.domain-tree-toolbar .domain-tree-stats {
+  justify-content: flex-end;
+}
+
+.dataset-center-page {
+  min-height: calc(100vh - 64px);
+  background: var(--app-page-background);
+}
+
+.dataset-center-tabs {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(720px, calc(100% - 48px));
+  margin: 0 auto;
+  padding-top: 20px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.dataset-center-tabs button {
+  min-height: 48px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: transparent;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+}
+
+.dataset-center-tabs button:hover {
+  color: var(--app-text-strong);
+}
+
+.dataset-center-tabs button.is-active {
+  border-bottom-color: var(--app-primary);
+  color: var(--app-primary);
+}
+
 .domain-tree-view-switcher .domain-tree-view-button {
   width: 100%;
   min-width: 0;
@@ -3397,6 +3448,14 @@ select.settings-input {
 }
 
 @media (max-width: 960px) {
+  .domain-tree-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .domain-tree-toolbar .domain-tree-stats {
+    justify-content: flex-start;
+  }
+
   .domain-tree-header,
   .domain-tree-controls,
   .domain-tree-selected-paper,
@@ -3439,6 +3498,11 @@ select.settings-input {
 }
 
 @media (max-width: 640px) {
+  .dataset-center-tabs {
+    width: calc(100% - 28px);
+    padding-top: 12px;
+  }
+
   .domain-tree-page {
     padding: 20px 14px 48px;
   }

@@ -390,7 +390,6 @@ function DomainTreeProjectPage({
   const {
     projects,
     activeProjectId,
-    activeProject,
     isLoadingProjects,
     projectError,
     selectProject,
@@ -1179,21 +1178,7 @@ function DomainTreeProjectPage({
   return (
     <main className="domain-tree-page">
       <section className="domain-tree-panel">
-        <header className="domain-tree-header">
-          <div>
-            <span className="domain-tree-kicker">{activeProject?.name || "当前项目"}</span>
-            <h1>项目知识空间</h1>
-            <p className="domain-tree-subtitle">
-              分别管理项目文献、领域树和知识图谱；所有分析结果均按当前项目隔离。
-            </p>
-          </div>
-          <div className="domain-tree-stats">
-            <span>{markdownReadyPapers.length} 篇已解析文献</span>
-            <span>{graphStats.nodeCount} 个图节点</span>
-            <span>{graphStats.edgeCount} 条关系</span>
-          </div>
-        </header>
-
+        <div className="domain-tree-toolbar">
         <section
           className="domain-tree-view-switcher"
           aria-label="项目知识空间视图切换"
@@ -1221,6 +1206,12 @@ function DomainTreeProjectPage({
             知识图谱
           </button>
         </section>
+          <div className="domain-tree-stats" aria-label="当前项目分析统计">
+            <span>{markdownReadyPapers.length} 篇文献</span>
+            <span>{graphStats.nodeCount} 个节点</span>
+            <span>{graphStats.edgeCount} 条关系</span>
+          </div>
+        </div>
 
         {viewMode === "project" ? (
           <ProjectLiteraturePanel

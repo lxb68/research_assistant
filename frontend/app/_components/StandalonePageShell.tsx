@@ -8,8 +8,7 @@ import ArrowBackRoundedIcon from "@mui/icons-material/ArrowBackRounded";
 
 const pages = [
   { href: "/research-chat", label: "研究对话" },
-  { href: "/dataset-download", label: "下载数据集" },
-  { href: "/dataset-brower", label: "浏览数据集" },
+  { href: "/datasets", label: "数据集中心" },
   { href: "/domain-tree", label: "项目知识空间" },
   { href: "/setting", label: "设置" },
 ];

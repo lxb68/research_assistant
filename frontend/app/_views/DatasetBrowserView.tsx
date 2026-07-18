@@ -72,7 +72,7 @@ function getSplitLengthsFromSettings() {
 }
 
 /** 管理本地论文浏览、导入、删除和重新分块。 */
-export default function DatasetBrowserView() {
+export default function DatasetBrowserView({ refreshToken = 0 }: { refreshToken?: number } = {}) {
   const { registerJob } = useBackgroundTasks();
   const [papers, setPapers] = useState<SavedPaper[]>([]);
   const [query, setQuery] = useState("");
@@ -128,7 +128,7 @@ export default function DatasetBrowserView() {
     };
 
     void run();
-  }, []);
+  }, [refreshToken]);
 
   /** 提交论文列表搜索条件。 */
   function handleSubmit(event: FormEvent<HTMLFormElement>) {

@@ -22,10 +22,8 @@ function getServerTheme() {
 
 /** 渲染首页介绍和工作流快捷入口。 */
 export default function HeroSection({
-  onCreateProject,
   onOpenResearchChat,
-  onOpenDownload,
-  onOpenBrowse,
+  onOpenDatasets,
   onOpenDomainTree,
   onOpenSettings,
 }) {
@@ -79,16 +77,12 @@ export default function HeroSection({
             研究对话
           </button>
 
-          <button type="button" className="hero-button hero-button-secondary" onClick={onOpenDownload}>
-            下载数据集
-          </button>
-
-          <button type="button" className="hero-button hero-button-secondary" onClick={onOpenBrowse}>
-            浏览数据集
+          <button type="button" className="hero-button hero-button-secondary" onClick={onOpenDatasets}>
+            数据集中心
           </button>
 
           <button type="button" className="hero-button hero-button-secondary" onClick={onOpenDomainTree}>
-            领域树
+            项目知识空间
           </button>
 
           <button type="button" className="hero-button hero-button-secondary" onClick={onOpenSettings}>

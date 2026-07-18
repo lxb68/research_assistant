@@ -1,9 +1,8 @@
-/* 数据集浏览功能的独立路由入口。 */
+/* 兼容旧的数据集浏览地址。 */
 
-import StandalonePageShell from "@/app/_components/StandalonePageShell";
-import DatasetBrowserView from "@/app/_views/DatasetBrowserView";
+import { redirect } from "next/navigation";
 
 /** 渲染独立的数据集浏览页面。 */
 export default function DatasetBrowserPage() {
-  return <StandalonePageShell><DatasetBrowserView /></StandalonePageShell>;
+  redirect("/datasets?tab=library");
 }

@@ -4,21 +4,21 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import DatasetBrowser from "@/app/_views/DatasetBrowserView";
-import DatasetDownloadPage from "@/app/_views/DatasetDownloadView";
+import DatasetCenterView, { DatasetCenterTab } from "@/app/_views/DatasetCenterView";
 import DomainTreePage from "@/app/_views/DomainTreeView";
 import SettingsWorkspace from "@/app/_views/SettingsView";
 import HeroSection from "@/home/HeroSection";
 import { useProjects } from "@/app/_components/ProjectProvider";
 
-type WorkspaceView = "home" | "download" | "browse" | "domain-tree" | "settings";
+type WorkspaceView = "home" | "datasets" | "domain-tree" | "settings";
 
 /** 把查询参数转换为受支持的工作区视图。 */
 function parseWorkspaceView(value: string | null): WorkspaceView {
   // 只接受白名单视图，未知参数统一回退到首页。
-  if (value === "download" || value === "browse" || value === "domain-tree" || value === "settings") {
+  if (value === "datasets" || value === "domain-tree" || value === "settings") {
     return value;
   }
+  if (value === "download" || value === "browse") return "datasets";
   return "home";
 }
 
@@ -34,6 +34,7 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [projectMessage, setProjectMessage] = useState("");
+  const [datasetTab, setDatasetTab] = useState<DatasetCenterTab>(initialView === "browse" ? "library" : "download");
   const activeView = manualView ?? parseWorkspaceView(initialView);
 
   async function handleCreateProject() {
@@ -50,8 +51,7 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
 
   const navItems = useMemo(
     () => [
-      { id: "download" as const, label: "下载数据集" },
-      { id: "browse" as const, label: "浏览数据集" },
+      { id: "datasets" as const, label: "数据集中心" },
       { id: "domain-tree" as const, label: "项目知识空间" },
       { id: "settings" as const, label: "设置" },
     ],
@@ -93,10 +93,11 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
         >
           <main className="home-page">
             <HeroSection
-              onCreateProject={() => setCreateDialogOpen(true)}
               onOpenResearchChat={() => router.push("/research-chat")}
-              onOpenDownload={() => setManualView("download")}
-              onOpenBrowse={() => setManualView("browse")}
+              onOpenDatasets={() => {
+                setDatasetTab("download");
+                setManualView("datasets");
+              }}
               onOpenDomainTree={() => setManualView("domain-tree")}
               onOpenSettings={() => setManualView("settings")}
             />
@@ -123,18 +124,14 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
 
         <div
           className={`workspace-view-panel ${
-            activeView === "download" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
+            activeView === "datasets" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
           }`}
         >
-          <DatasetDownloadPage embedded isActiveView={activeView === "download"} />
-        </div>
-
-        <div
-          className={`workspace-view-panel ${
-            activeView === "browse" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
-          }`}
-        >
-          <DatasetBrowser />
+          <DatasetCenterView
+            key={datasetTab}
+            initialTab={datasetTab}
+            isActiveView={activeView === "datasets"}
+          />
         </div>
 
         <div

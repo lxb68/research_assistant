@@ -171,12 +171,14 @@ function getProgressVisual(state: SourceState) {
 type DatasetDownloadPageProps = {
   embedded?: boolean;
   isActiveView?: boolean;
+  onDatasetChanged?: () => void;
 };
 
 /** 管理多来源论文检索、筛选和下载。 */
 export default function DatasetDownloadPage({
   embedded = false,
   isActiveView = true,
+  onDatasetChanged,
 }: DatasetDownloadPageProps = {}) {
   const { jobs, submitJob } = useBackgroundTasks();
   const [query, setQuery] = useState("");
@@ -440,6 +442,7 @@ export default function DatasetDownloadPage({
       setSummary(
         `清理完成：删除 ${payload.removedCount ?? 0} 条没有本地 PDF 的元数据，保留 ${payload.keptCount ?? 0} 条。`,
       );
+      onDatasetChanged?.();
     } catch (cleanupError) {
       const message = cleanupError instanceof Error ? cleanupError.message : "清理无 PDF 元数据失败";
       setError(message);
@@ -494,6 +497,7 @@ export default function DatasetDownloadPage({
             : item,
         ),
       );
+      onDatasetChanged?.();
       setSummary(`已绑定本地 PDF：${pdfPath}`);
     } catch (linkError) {
       const message = linkError instanceof Error ? linkError.message : "绑定本地 PDF 失败";
@@ -606,6 +610,7 @@ export default function DatasetDownloadPage({
       });
 
       setResults(payload.papers);
+      onDatasetChanged?.();
       setAgentLogs(payload.logs ?? []);
       setSummary(
         `后端处理完成：检索 ${payload.searchedCount} 篇，去重后 ${payload.deduplicatedCount} 篇，筛选后 ${payload.filteredCount} 篇，总保存 ${payload.savedCount} 篇；每个数据源目标 ${payload.targetPerSource ?? safeLimit} 篇。优先保存已下载 PDF 的论文；若达到最大轮次仍不足，会返回仅元数据结果并提示手动下载。`,
