@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -502,12 +503,11 @@ class HunterAgent:
         record["updatedAt"] = datetime.now(timezone.utc).isoformat()
         return self._save_paper_to_db(record)
 
-    def cleanup_records_without_local_pdf(self) -> dict:
-        """删除数据库中没有对应本地 PDF 文件的论文元数据记录。"""
-        removed_records: list[Paper] = []
+    def preview_records_without_local_pdf(self) -> dict:
+        """只读扫描没有对应本地 PDF 文件的论文元数据记录。"""
+        candidate_records: list[Paper] = []
         kept_records = 0
-
-        with sqlite3.connect(self.metadata_db_path) as connection:
+        with closing(sqlite3.connect(self.metadata_db_path)) as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 """
@@ -516,6 +516,41 @@ class HunterAgent:
                 FROM papers
                 """,
             ).fetchall()
+        for row in rows:
+            record = self._row_to_paper(row)
+            if self._paper_has_local_pdf(record):
+                kept_records += 1
+            else:
+                candidate_records.append(record)
+        return {
+            "candidateCount": len(candidate_records),
+            "keptCount": kept_records,
+            "candidateRecords": candidate_records,
+        }
+
+    def cleanup_records_without_local_pdf(self, candidate_ids: list[str] | None = None) -> dict:
+        """删除没有本地 PDF 的记录；传入候选 ID 时严格限制在确认范围内。"""
+        removed_records: list[Paper] = []
+        kept_records = 0
+        normalized_ids = None if candidate_ids is None else sorted({
+            str(record_id).strip() for record_id in candidate_ids if str(record_id).strip()
+        })
+        if normalized_ids == []:
+            return {"removedCount": 0, "keptCount": 0, "removedRecords": []}
+
+        with closing(sqlite3.connect(self.metadata_db_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            query = """
+                SELECT id, source, title, doi, external_id, url, pdf_url, pdf_path, keyword,
+                       relevance_score, metadata_json, saved_at
+                FROM papers
+            """
+            parameters: list[str] = []
+            if normalized_ids is not None:
+                placeholders = ", ".join("?" for _ in normalized_ids)
+                query += f" WHERE id IN ({placeholders})"
+                parameters.extend(normalized_ids)
+            rows = connection.execute(query, parameters).fetchall()
 
             for row in rows:
                 record = self._row_to_paper(row)

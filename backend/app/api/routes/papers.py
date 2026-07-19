@@ -8,12 +8,15 @@ from fastapi.responses import FileResponse, RedirectResponse
 from app.agents import HunterAgent
 from app.api.streaming import ndjson_worker_response
 from app.schemas.api import (
+    CleanupMissingPdfsRequest,
     DatasetDownloadRequest,
     DeduplicatePapersRequest,
     DeletePapersRequest,
     ImportPaperRequest,
     ManualPdfLinkRequest,
 )
+from app.core.config import settings
+from app.services.project_repository import ProjectRepository
 from app.services.paper_search import search_papers
 
 
@@ -90,10 +93,30 @@ def link_local_pdf(payload: ManualPdfLinkRequest) -> dict:
         raise HTTPException(status_code=502, detail=str(error)) from error
 
 
-@router.post("/api/papers/cleanup-missing-pdfs")
-def cleanup_missing_pdfs() -> dict:
+@router.get("/api/papers/cleanup-missing-pdfs/preview")
+def preview_cleanup_missing_pdfs() -> dict:
     try:
-        return {"status": "ok", **HunterAgent().cleanup_records_without_local_pdf()}
+        result = HunterAgent().preview_records_without_local_pdf()
+        candidates = [
+            {
+                "id": str(record.get("id") or ""),
+                "title": str(record.get("title") or "未命名文献"),
+                "source": str(record.get("source") or ""),
+            }
+            for record in result.pop("candidateRecords", [])
+        ]
+        return {"status": "ok", **result, "candidates": candidates}
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@router.post("/api/papers/cleanup-missing-pdfs")
+def cleanup_missing_pdfs(payload: CleanupMissingPdfsRequest | None = None) -> dict:
+    try:
+        result = HunterAgent().cleanup_records_without_local_pdf(payload.ids if payload else None)
+        removed_ids = [str(record.get("id") or "") for record in result.get("removedRecords", [])]
+        removed_project_references = ProjectRepository(settings.hunter_metadata_db).remove_paper_references(removed_ids)
+        return {"status": "ok", **result, "removedProjectReferenceCount": removed_project_references}
     except Exception as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
 

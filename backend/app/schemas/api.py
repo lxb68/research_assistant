@@ -33,6 +33,10 @@ class DeletePapersRequest(BaseModel):
     ids: list[str] = Field(..., min_length=1, max_length=500)
 
 
+class CleanupMissingPdfsRequest(BaseModel):
+    ids: list[str] = Field(..., min_length=1, max_length=5000)
+
+
 class DeduplicatePapersRequest(BaseModel):
     record_id: str | None = None
 
@@ -126,7 +130,7 @@ class OrchestratorRequest(BaseModel):
 
 
 __all__ = [
-    "DatasetDownloadRequest", "DeduplicatePapersRequest", "DeletePapersRequest",
+    "CleanupMissingPdfsRequest", "DatasetDownloadRequest", "DeduplicatePapersRequest", "DeletePapersRequest",
     "DomainTreeGenerateOptions", "DomainTreeGenerateRequest", "ImportPaperRequest", "ManualPdfLinkRequest",
     "EnvConfigUpdateRequest", "ModelConfigRequest", "ModelConnectionTestRequest", "ModelDiscoveryRequest", "OrchestratorRequest",
     "ProjectCreateRequest", "ProjectPapersRequest",

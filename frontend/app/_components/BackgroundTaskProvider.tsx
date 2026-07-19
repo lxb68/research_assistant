@@ -31,6 +31,8 @@ import { buildApiUrl } from "@/lib/api";
 import type { BackgroundJob } from "@/lib/background-jobs";
 
 const RECENT_JOB_IDS_KEY = "research-agent.background-job-ids";
+const TASK_BUTTON_POSITION_KEY = "research-agent.task-button-position";
+const TASK_BUTTON_VIEWPORT_MARGIN = 8;
 const ACTIVE = new Set(["queued", "running", "cancelling"]);
 const TYPE_LABELS: Record<string, string> = {
   dataset_download: "数据集下载",
@@ -57,6 +59,20 @@ type BackgroundTaskContextValue = {
   openCenter: () => void;
 };
 
+type FloatingPosition = {
+  x: number;
+  y: number;
+};
+
+type DragState = {
+  pointerId: number;
+  offsetX: number;
+  offsetY: number;
+  startX: number;
+  startY: number;
+  moved: boolean;
+};
+
 const BackgroundTaskContext = createContext<BackgroundTaskContextValue | null>(null);
 
 async function readError(response: Response, fallback: string) {
@@ -64,11 +80,137 @@ async function readError(response: Response, fallback: string) {
   return payload.detail || payload.error || fallback;
 }
 
+/** 将浮动按钮限制在当前视口内，避免拖动后无法找回。 */
+function clampFloatingPosition(position: FloatingPosition, width: number, height: number): FloatingPosition {
+  const maxX = Math.max(TASK_BUTTON_VIEWPORT_MARGIN, window.innerWidth - width - TASK_BUTTON_VIEWPORT_MARGIN);
+  const maxY = Math.max(TASK_BUTTON_VIEWPORT_MARGIN, window.innerHeight - height - TASK_BUTTON_VIEWPORT_MARGIN);
+  return {
+    x: Math.min(Math.max(position.x, TASK_BUTTON_VIEWPORT_MARGIN), maxX),
+    y: Math.min(Math.max(position.y, TASK_BUTTON_VIEWPORT_MARGIN), maxY),
+  };
+}
+
+/** 管理任务按钮的拖动、点击抑制和位置持久化。 */
+function useDraggableTaskButton(onActivate: () => void) {
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const positionRef = useRef<FloatingPosition | null>(null);
+  const dragStateRef = useRef<DragState | null>(null);
+  const suppressClickRef = useRef(false);
+  const [position, setPosition] = useState<FloatingPosition | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const updatePosition = useCallback((nextPosition: FloatingPosition) => {
+    positionRef.current = nextPosition;
+    setPosition(nextPosition);
+  }, []);
+
+  useEffect(() => {
+    const button = buttonRef.current;
+    if (!button) return;
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(TASK_BUTTON_POSITION_KEY) ?? "null") as Partial<FloatingPosition> | null;
+      if (stored && Number.isFinite(stored.x) && Number.isFinite(stored.y)) {
+        const rect = button.getBoundingClientRect();
+        updatePosition(clampFloatingPosition({ x: Number(stored.x), y: Number(stored.y) }, rect.width, rect.height));
+      }
+    } catch {
+      // 保存的位置损坏或存储不可用时，继续使用默认右下角位置。
+    }
+  }, [updatePosition]);
+
+  useEffect(() => {
+    function handleResize() {
+      const button = buttonRef.current;
+      const currentPosition = positionRef.current;
+      if (!button || !currentPosition) return;
+      const rect = button.getBoundingClientRect();
+      updatePosition(clampFloatingPosition(currentPosition, rect.width, rect.height));
+    }
+
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [updatePosition]);
+
+  function handlePointerDown(event: React.PointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    dragStateRef.current = {
+      pointerId: event.pointerId,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsDragging(true);
+  }
+
+  function handlePointerMove(event: React.PointerEvent<HTMLButtonElement>) {
+    const dragState = dragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    if (!dragState.moved && Math.hypot(event.clientX - dragState.startX, event.clientY - dragState.startY) < 4) return;
+    dragState.moved = true;
+    const rect = event.currentTarget.getBoundingClientRect();
+    updatePosition(clampFloatingPosition({
+      x: event.clientX - dragState.offsetX,
+      y: event.clientY - dragState.offsetY,
+    }, rect.width, rect.height));
+  }
+
+  function finishDrag(event: React.PointerEvent<HTMLButtonElement>) {
+    const dragState = dragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    dragStateRef.current = null;
+    setIsDragging(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (!dragState.moved) return;
+    suppressClickRef.current = true;
+    try {
+      window.localStorage.setItem(TASK_BUTTON_POSITION_KEY, JSON.stringify(positionRef.current));
+    } catch {
+      // 存储不可用时只保留本次页面会话中的拖动位置。
+    }
+    window.setTimeout(() => {
+      suppressClickRef.current = false;
+    }, 0);
+  }
+
+  function handleClick(event: React.MouseEvent<HTMLButtonElement>) {
+    if (suppressClickRef.current) {
+      event.preventDefault();
+      return;
+    }
+    onActivate();
+  }
+
+  return {
+    buttonRef,
+    position,
+    isDragging,
+    handleClick,
+    handlePointerDown,
+    handlePointerMove,
+    finishDrag,
+  };
+}
+
 export function BackgroundTaskProvider({ children }: { children: React.ReactNode }) {
   const [jobs, setJobs] = useState<BackgroundJob[]>([]);
   const [open, setOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const previousStatuses = useRef(new Map<string, string>());
+  const {
+    buttonRef: taskButtonRef,
+    position: taskButtonPosition,
+    isDragging: isTaskButtonDragging,
+    handleClick: handleTaskButtonClick,
+    handlePointerDown: handleTaskButtonPointerDown,
+    handlePointerMove: handleTaskButtonPointerMove,
+    finishDrag: finishTaskButtonDrag,
+  } = useDraggableTaskButton(() => setOpen(true));
 
   const mergeJobs = useCallback((incoming: BackgroundJob[]) => {
     setJobs((current) => {
@@ -155,12 +297,29 @@ export function BackgroundTaskProvider({ children }: { children: React.ReactNode
   return (
     <BackgroundTaskContext.Provider value={value}>
       {children}
-      <Tooltip title="后台任务中心">
+      <Tooltip title="后台任务中心（拖动可移动）">
         <Button
-          onClick={() => setOpen(true)}
+          ref={taskButtonRef}
+          onClick={handleTaskButtonClick}
+          onPointerDown={handleTaskButtonPointerDown}
+          onPointerMove={handleTaskButtonPointerMove}
+          onPointerUp={finishTaskButtonDrag}
+          onPointerCancel={finishTaskButtonDrag}
           variant="contained"
           startIcon={activeCount ? <CircularProgress size={16} color="inherit" /> : <TaskAltRounded />}
-          sx={{ position: "fixed", right: 24, bottom: 24, zIndex: 1200, borderRadius: 99, boxShadow: 6 }}
+          aria-label="打开后台任务中心；可拖动调整位置"
+          sx={{
+            position: "fixed",
+            ...(taskButtonPosition
+              ? { left: taskButtonPosition.x, top: taskButtonPosition.y }
+              : { right: 24, bottom: 24 }),
+            zIndex: 1200,
+            borderRadius: 99,
+            boxShadow: 6,
+            cursor: isTaskButtonDragging ? "grabbing" : "grab",
+            touchAction: "none",
+            userSelect: "none",
+          }}
         >
           任务{activeCount ? ` ${activeCount}` : ""}
         </Button>

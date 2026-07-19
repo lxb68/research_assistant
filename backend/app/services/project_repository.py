@@ -191,6 +191,35 @@ class ProjectRepository:
             connection.commit()
         return self.require(project_id)
 
+    def remove_paper_references(self, paper_ids: list[str]) -> int:
+        """移除已删除论文的全部项目成员关系，并刷新受影响项目的更新时间。"""
+        normalized = list(dict.fromkeys(str(value).strip() for value in paper_ids if str(value).strip()))
+        if not normalized:
+            return 0
+        placeholders = ", ".join("?" for _ in normalized)
+        now = _timestamp()
+        with closing(self.connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            project_rows = connection.execute(
+                f"SELECT DISTINCT project_id FROM project_papers WHERE paper_id IN ({placeholders})",
+                normalized,
+            ).fetchall()
+            cursor = connection.execute(
+                f"DELETE FROM project_papers WHERE paper_id IN ({placeholders})",
+                normalized,
+            )
+            removed_count = max(0, int(cursor.rowcount))
+            cursor.close()
+            project_ids = [str(row["project_id"]) for row in project_rows]
+            if project_ids:
+                project_placeholders = ", ".join("?" for _ in project_ids)
+                connection.execute(
+                    f"UPDATE projects SET updated_at = ? WHERE id IN ({project_placeholders})",
+                    [now, *project_ids],
+                )
+            connection.commit()
+        return removed_count
+
     def _sync_default_project_members(self) -> None:
         """默认项目持续承接全局论文，保证升级前后的行为一致。"""
         now = _timestamp()

@@ -28,6 +28,11 @@
   --app-primary-soft: rgba(42, 92, 170, 0.1);
   --app-accent: #8b5cf6;
   --app-accent-gradient: linear-gradient(90deg, #2a5caa 0%, #6d5df6 100%);
+  /* Agent 标识在亮色主题下统一使用白蓝色。 */
+  --app-agent-mark-background: linear-gradient(135deg, #ffffff 0%, #eaf3ff 100%);
+  --app-agent-mark-color: #2563eb;
+  --app-agent-mark-border: rgba(96, 165, 250, 0.32);
+  --app-agent-mark-shadow: 0 8px 20px rgba(37, 99, 235, 0.12);
   --app-warning: #9a5800;
   --app-warning-soft: rgba(180, 83, 9, 0.1);
   --app-focus-ring: rgba(42, 92, 170, 0.14);
@@ -65,6 +70,11 @@
     --app-primary-soft: rgba(37, 99, 235, 0.16);
     --app-accent: #a78bfa;
     --app-accent-gradient: linear-gradient(90deg, #2563eb 0%, #7c3aed 100%);
+    /* Agent 标识在暗色主题下统一使用蓝紫色。 */
+    --app-agent-mark-background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+    --app-agent-mark-color: #ffffff;
+    --app-agent-mark-border: rgba(129, 140, 248, 0.34);
+    --app-agent-mark-shadow: 0 10px 24px rgba(79, 70, 229, 0.22);
     --app-warning: #fbbf24;
     --app-warning-soft: rgba(120, 53, 15, 0.24);
     --app-focus-ring: rgba(96, 165, 250, 0.14);
@@ -4357,15 +4367,15 @@ select.settings-input {
 .research-project-picker select:disabled { cursor:not-allowed; opacity:.55; }
 .research-body { display:flex; flex-direction:column; height:calc(100vh - 70px); min-height:0; }.research-thread { flex:1; overflow-y:auto; padding:34px clamp(28px,6vw,76px) 20px; scrollbar-width:thin; }.research-message { display:grid; grid-template-columns:34px 1fr; gap:13px; max-width:760px; margin:0 auto 30px; }.research-avatar { display:grid; place-items:center; width:32px; height:32px; border-radius:9px; background:#d8b697; color:#fff; font-size:10px; font-weight:800; }.research-message.agent .research-avatar { background:var(--green); }.research-avatar svg { font-size:17px; }.research-message>div:last-child>header { display:flex; align-items:center; gap:9px; height:31px; }.research-message header strong { font-size:13px; }.research-message header span { color:#9aa39e; font-size:10px; }.research-message p { color:#34433b; font-size:13px; line-height:1.85; }.research-citations { display:flex; flex-wrap:wrap; gap:6px; margin-top:13px; }.research-citations button { border:1px solid #dde6df; border-radius:5px; background:#f4f7f4; color:#476556; cursor:pointer; padding:5px 8px; font-size:10px; }.research-message footer { display:flex; gap:12px; margin-top:10px; }.research-message footer button { display:flex; align-items:center; gap:4px; border:0; background:transparent; color:#8a958e; cursor:pointer; font-size:10px; }.research-message footer svg { font-size:14px; }
 .research-thinking { display:flex; align-items:center; gap:5px; max-width:760px; margin:0 auto; color:#7e8b83; font-size:11px; }.research-thinking i { width:5px; height:5px; border-radius:50%; background:#638071; animation:researchPulse 1s infinite alternate; }.research-thinking i:nth-child(2){animation-delay:.2s}.research-thinking i:nth-child(3){animation-delay:.4s}@keyframes researchPulse{to{opacity:.2;transform:translateY(-3px)}}
-/* 研究伙伴标识：侧栏品牌与空状态共用尺寸体系，仅由主题切换配色。 */
-.research-agent-mark { display:grid; place-items:center; transition:background .2s ease,color .2s ease,border-color .2s ease,box-shadow .2s ease; }
-[data-theme="dark"] .research-agent-mark { border:1px solid rgba(129,140,248,.34); background:linear-gradient(135deg,#2563eb 0%,#7c3aed 100%); color:#fff; box-shadow:0 10px 24px rgba(79,70,229,.22); }
-/* 亮色主题使用高明度白蓝组合，避免被全局紫色强调色带偏。 */
-[data-theme="light"] .research-agent-mark {
-  border: 1px solid rgba(96, 165, 250, 0.32);
-  background: linear-gradient(135deg, #ffffff 0%, #eaf3ff 100%);
-  color: #2563eb;
-  box-shadow: 0 8px 20px rgba(37, 99, 235, 0.12);
+/* 研究伙伴标识：侧栏品牌、空状态与消息头像统一消费主题令牌。 */
+.research-agent-mark {
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--app-agent-mark-border);
+  background: var(--app-agent-mark-background);
+  color: var(--app-agent-mark-color);
+  box-shadow: var(--app-agent-mark-shadow);
+  transition: background .2s ease,color .2s ease,border-color .2s ease,box-shadow .2s ease;
 }
 .research-empty { display:grid; justify-items:center; margin:15vh auto 0; text-align:center; }.research-empty>span { width:52px; height:52px; border-radius:16px; }.research-empty h2 { margin-top:16px; font-family:Georgia,serif; font-size:25px; }.research-empty p { margin-top:9px; color:var(--muted); font-size:12px; }
 .research-compose-wrap { padding:8px clamp(28px,6vw,76px) 14px; }.research-prompts { display:flex; gap:6px; max-width:760px; margin:0 auto 8px; overflow:hidden; }.research-prompts button { display:flex; align-items:center; gap:4px; white-space:nowrap; border:1px solid #e1e7e3; border-radius:7px; background:#fafbfa; color:#68766e; cursor:pointer; padding:6px 9px; font-size:10px; }.research-prompts svg { font-size:13px; color:#8d7762; }.research-compose { max-width:760px; margin:auto; border:1px solid #d9e1dc; border-radius:13px; background:#fff; box-shadow:0 10px 26px #18211d10; padding:11px 12px 9px; }.research-compose:focus-within { border-color:#8eaa9b; box-shadow:0 0 0 3px #315e4c0e,0 10px 26px #18211d10; }.research-compose textarea { width:100%; resize:none; border:0; outline:0; color:#27332d; font:inherit; font-size:12px; line-height:1.5; }.research-compose>div { display:flex; align-items:center; gap:6px; }.research-compose button { display:flex; align-items:center; border:0; background:transparent; color:#758179; cursor:pointer; }.research-compose svg { font-size:18px; }.research-compose .library-pill { gap:6px; border-left:1px solid #e3e8e5; padding-left:9px; font-size:10px; }.library-pill span { border-radius:8px; background:#eef3ef; padding:2px 6px; }.research-compose .research-send { justify-content:center; width:31px; height:31px; margin-left:auto; border-radius:8px; background:var(--green); color:white; }.research-send:disabled { opacity:.35; cursor:not-allowed; }.research-note { display:block; margin:7px auto 0; color:#a0a8a3; text-align:center; font-size:9px; }
@@ -4578,6 +4588,27 @@ select.settings-input {
 .research-chat.is-records .research-records-page {
   background: var(--app-page-background);
   color: var(--app-text);
+}
+
+/*
+ * 页面背景由最外层工作区统一负责，避免页签子组件因内容高度不同
+ * 重新计算径向渐变，导致切换数据集中心或项目知识空间时背景跳变。
+ */
+.workspace-shell,
+.standalone-page-shell {
+  background: var(--app-page-background);
+  background-attachment: fixed;
+  background-position: center top;
+  background-repeat: no-repeat;
+  background-size: 100vw 100vh;
+}
+
+.dataset-center-page,
+.dataset-center-page .dataset-download-page,
+.dataset-center-page .dataset-browser-page,
+.workspace-shell .domain-tree-page,
+.standalone-page-shell .domain-tree-page {
+  background: transparent;
 }
 
 .dataset-browser-panel,
@@ -4886,10 +4917,23 @@ select.settings-input {
 }
 
 .research-new,
-.research-message.agent .research-avatar,
 .research-compose .research-send {
   background: var(--app-accent-gradient);
 }
+
+.research-message.agent .research-avatar {
+  border: 1px solid var(--app-agent-mark-border);
+  background: var(--app-agent-mark-background);
+  color: var(--app-agent-mark-color);
+  box-shadow: var(--app-agent-mark-shadow);
+}
+
+/* 对话中的破坏性维护操作必须与普通消息操作明确分层。 */
+.research-maintenance-action { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+.research-maintenance-action button { min-height:34px; border:1px solid var(--app-border); border-radius:8px; background:var(--app-surface-strong); color:var(--app-text); cursor:pointer; padding:0 12px; font-size:11px; font-weight:800; }
+.research-maintenance-action button.is-danger { border-color:rgba(239,68,68,.32); background:rgba(239,68,68,.1); color:#dc2626; }
+[data-theme="dark"] .research-maintenance-action button.is-danger { color:#fca5a5; }
+.research-maintenance-action button:disabled { cursor:not-allowed; opacity:.55; }
 
 .research-nav button,
 .research-recents button,

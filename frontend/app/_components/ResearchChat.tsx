@@ -45,6 +45,11 @@ type Message = {
   sources?: Source[];
   contextSources?: Source[];
   responseMode?: "direct" | "research";
+  maintenanceAction?: {
+    kind: "cleanup-missing-pdfs";
+    candidateIds: string[];
+    status: "pending" | "running" | "completed" | "cancelled";
+  };
 };
 type OrchestratorResult = {
   action: string;
@@ -77,6 +82,15 @@ const CONVERSATIONS_KEY = "research-agent.conversations";
 const ACTIVE_CONVERSATION_KEY = "research-agent.active-conversation";
 const RESEARCH_RECORDS_KEY = "research-agent.research-records";
 
+/** 识别明确要求清理无 PDF 文献记录的管理意图。 */
+function isMissingPdfCleanupRequest(value: string) {
+  const normalized = value.replace(/\s+/g, "").toLowerCase();
+  const requestsDeletion = /(删除|清理|移除)/.test(normalized);
+  const targetsDataset = /(数据集|数据中心|文献库|论文库|文献|论文)/.test(normalized);
+  const targetsMissingPdf = /(?:没有|无|缺少|缺失|未下载|未绑定|不存在).*pdf|pdf.*(?:没有|无|缺少|缺失|未下载|未绑定|不存在)/i.test(normalized);
+  return requestsDeletion && targetsDataset && targetsMissingPdf;
+}
+
 /** 排除失败占位消息及其对应问题，避免不完整轮次污染后续模型上下文。 */
 function usableHistory(messages: Message[]) {
   const cleaned: Message[] = [];
@@ -95,7 +109,7 @@ function usableHistory(messages: Message[]) {
 /** 管理研究对话、流式响应和本地会话记录。 */
 export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) {
   const { jobs, submitJob } = useBackgroundTasks();
-  const { projects, activeProjectId, activeProject, isLoadingProjects, selectProject } = useProjects();
+  const { projects, activeProjectId, activeProject, isLoadingProjects, selectProject, refreshProjects } = useProjects();
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
@@ -227,6 +241,68 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
     return () => { cancelled = true; };
   }, [activeConversationId, hasHydrated, jobs]);
 
+  /** 同步追加一条 Agent 消息到当前消息流和本地会话。 */
+  function appendAgentMessage(conversationId: string, agentMessage: Message) {
+    setMessages((items) => items.some((item) => item.id === agentMessage.id) ? items : [...items, agentMessage]);
+    setConversations((items) => items.map((conversation) =>
+      conversation.id === conversationId && !conversation.messages.some((message) => message.id === agentMessage.id)
+        ? { ...conversation, messages: [...conversation.messages, agentMessage] }
+        : conversation,
+    ));
+  }
+
+  /** 同步更新当前消息流和会话中的管理操作消息。 */
+  function updateAgentMessage(messageId: number, updater: (message: Message) => Message) {
+    setMessages((items) => items.map((message) => message.id === messageId ? updater(message) : message));
+    setConversations((items) => items.map((conversation) => ({
+      ...conversation,
+      messages: conversation.messages.map((message) => message.id === messageId ? updater(message) : message),
+    })));
+  }
+
+  /** 确认后只清理预览时列出的候选记录，后端会再次校验 PDF 状态。 */
+  async function confirmMissingPdfCleanup(message: Message) {
+    const action = message.maintenanceAction;
+    if (!action || action.kind !== "cleanup-missing-pdfs" || action.status !== "pending") return;
+    updateAgentMessage(message.id, (current) => ({
+      ...current,
+      maintenanceAction: current.maintenanceAction ? { ...current.maintenanceAction, status: "running" } : undefined,
+    }));
+    try {
+      const response = await fetch(buildApiUrl("/api/papers/cleanup-missing-pdfs"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: action.candidateIds }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || "清理无 PDF 文献失败");
+      const removedCount = Number(payload.removedCount ?? 0);
+      const keptCount = Number(payload.keptCount ?? 0);
+      const referenceCount = Number(payload.removedProjectReferenceCount ?? 0);
+      updateAgentMessage(message.id, (current) => ({
+        ...current,
+        content: `清理完成：删除 ${removedCount} 条无有效本地 PDF 的文献记录，并移除 ${referenceCount} 条项目关联。${keptCount ? `另有 ${keptCount} 条记录因已绑定有效 PDF 而被保留。` : ""}`,
+        maintenanceAction: current.maintenanceAction ? { ...current.maintenanceAction, status: "completed" } : undefined,
+      }));
+      await refreshProjects();
+    } catch (cleanupError) {
+      updateAgentMessage(message.id, (current) => ({
+        ...current,
+        content: `清理失败：${cleanupError instanceof Error ? cleanupError.message : "未知错误"}。候选记录尚未删除，你可以重试或取消。`,
+        maintenanceAction: current.maintenanceAction ? { ...current.maintenanceAction, status: "pending" } : undefined,
+      }));
+    }
+  }
+
+  /** 取消当前清理确认，不调用任何删除接口。 */
+  function cancelMissingPdfCleanup(message: Message) {
+    updateAgentMessage(message.id, (current) => ({
+      ...current,
+      content: "已取消清理，没有删除任何文献记录。",
+      maintenanceAction: current.maintenanceAction ? { ...current.maintenanceAction, status: "cancelled" } : undefined,
+    }));
+  }
+
   /** 提交持久化研究任务；后台完成后直接写入对应会话。 */
   async function send(value = input) {
     const prompt = value.trim();
@@ -256,6 +332,31 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
     setThinking(true);
     setThinkingText("正在判断如何处理你的问题…");
     try {
+      if (isMissingPdfCleanupRequest(prompt)) {
+        setThinkingText("正在扫描数据集中的本地 PDF 状态…");
+        const response = await fetch(buildApiUrl("/api/papers/cleanup-missing-pdfs/preview"), { cache: "no-store" });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.detail || "扫描无 PDF 文献失败");
+        const candidates = (Array.isArray(payload.candidates) ? payload.candidates : []) as Array<{ id?: string; title?: string }>;
+        const candidateIds = candidates.map((candidate) => String(candidate.id || "").trim()).filter(Boolean);
+        const previewTitles = candidates.slice(0, 8).map((candidate, index) => `${index + 1}. ${candidate.title || "未命名文献"}`).join("\n");
+        const remainingCount = Math.max(0, candidateIds.length - 8);
+        const content = candidateIds.length
+          ? `扫描完成：找到 ${candidateIds.length} 条没有有效本地 PDF 的文献记录。\n\n${previewTitles}${remainingCount ? `\n…以及另外 ${remainingCount} 条` : ""}\n\n确认后只会删除这些元数据及其项目关联，不会删除任何已有的有效 PDF 文件。`
+          : `扫描完成：当前没有需要清理的记录。数据集中 ${Number(payload.keptCount ?? 0)} 条文献都已绑定有效的本地 PDF。`;
+        appendAgentMessage(conversationId, {
+          id: id + 1,
+          role: "agent",
+          content,
+          responseMode: "direct",
+          maintenanceAction: candidateIds.length ? {
+            kind: "cleanup-missing-pdfs",
+            candidateIds,
+            status: "pending",
+          } : undefined,
+        });
+        return;
+      }
       const job = await submitJob("research_chat", {
         question: prompt,
         project_id: activeProjectId,
@@ -304,20 +405,10 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
         contextSources: payload.retrievedSources ?? payload.sources,
         responseMode: result.action === "direct" ? "direct" : "research",
       };
-      setMessages((items) => items.some((item) => item.id === agentMessage.id) ? items : [...items, agentMessage]);
-      setConversations((items) => items.map((conversation) =>
-        conversation.id === conversationId && !conversation.messages.some((message) => message.id === agentMessage.id)
-          ? { ...conversation, messages: [...conversation.messages, agentMessage] }
-          : conversation,
-      ));
+      appendAgentMessage(conversationId, agentMessage);
     } catch (error) {
       const agentMessage: Message = { id: id + 1, role: "agent", content: error instanceof Error ? `请求失败：${error.message}` : "研究对话请求失败，请稍后重试。" };
-      setMessages((items) => [...items, agentMessage]);
-      setConversations((items) => items.map((conversation) =>
-        conversation.id === conversationId
-          ? { ...conversation, messages: [...conversation.messages, agentMessage] }
-          : conversation,
-      ));
+      appendAgentMessage(conversationId, agentMessage);
     } finally {
       setThinking(false);
     }
@@ -511,7 +602,7 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
             {messages.map((message) => <article className={`research-message ${message.role}`} key={message.id}>
               <div className="research-avatar">{message.role === "agent" ? <AutoAwesomeRounded /> : "LX"}</div>
               <div><header><strong>{message.role === "agent" ? "Research Agent" : "你"}</strong><span>{message.id <= 2 ? "10:24" : "刚刚"}</span></header><MessageContent content={message.content} />
-                {message.role === "agent" && <>{message.sources?.length ? <div className="research-citations">{message.sources.map((source) => <button key={`${message.id}-${source.index}`}>{source.index} · {source.title}</button>)}</div> : null}<footer><button onClick={() => { navigator.clipboard?.writeText(message.content); setCopied(message.id); }}><ContentCopyRounded />{copied === message.id ? "已复制" : "复制"}</button><button><ThumbUpAltOutlined />有帮助</button><button onClick={() => saveResearchRecord(message)}><BookmarkAddOutlined />{researchRecords.some((record) => record.conversationId === activeConversationId && record.messageId === message.id) ? "已保存" : "保存到研究记录"}</button></footer></>}
+                {message.role === "agent" && <>{message.sources?.length ? <div className="research-citations">{message.sources.map((source) => <button key={`${message.id}-${source.index}`}>{source.index} · {source.title}</button>)}</div> : null}{message.maintenanceAction?.status === "pending" || message.maintenanceAction?.status === "running" ? <div className="research-maintenance-action"><button type="button" className="is-danger" disabled={message.maintenanceAction.status === "running"} onClick={() => void confirmMissingPdfCleanup(message)}>{message.maintenanceAction.status === "running" ? "正在清理…" : `确认删除 ${message.maintenanceAction.candidateIds.length} 条`}</button><button type="button" disabled={message.maintenanceAction.status === "running"} onClick={() => cancelMissingPdfCleanup(message)}>取消</button></div> : null}<footer><button onClick={() => { navigator.clipboard?.writeText(message.content); setCopied(message.id); }}><ContentCopyRounded />{copied === message.id ? "已复制" : "复制"}</button><button><ThumbUpAltOutlined />有帮助</button><button onClick={() => saveResearchRecord(message)}><BookmarkAddOutlined />{researchRecords.some((record) => record.conversationId === activeConversationId && record.messageId === message.id) ? "已保存" : "保存到研究记录"}</button></footer></>}
               </div>
             </article>)}
             {thinking && <div className="research-thinking"><i /><i /><i />{thinkingText}</div>}

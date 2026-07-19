@@ -60,15 +60,7 @@ export function ProjectLiteraturePanel({
   onSaveMembers,
 }: ProjectLiteraturePanelProps) {
   return (
-    <section aria-labelledby="project-literature-title">
-      <div className="domain-tree-card-head">
-        <div>
-          <p>项目关联</p>
-          <h2 id="project-literature-title">项目文献</h2>
-        </div>
-        <span>{memberDraftIds.length} 篇已选择</span>
-      </div>
-
+    <section aria-label="项目文献管理">
       <section className="domain-tree-project-bar" aria-label="当前研究项目">
         <label>
           <span>当前项目</span>
