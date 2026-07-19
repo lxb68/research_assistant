@@ -6,20 +6,20 @@ import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import AddRounded from "@mui/icons-material/AddRounded";
 import ArticleOutlined from "@mui/icons-material/ArticleOutlined";
 import AutoAwesomeRounded from "@mui/icons-material/AutoAwesomeRounded";
-import BoltRounded from "@mui/icons-material/BoltRounded";
 import BookmarkAddOutlined from "@mui/icons-material/BookmarkAddOutlined";
 import CheckRounded from "@mui/icons-material/CheckRounded";
+import CloseRounded from "@mui/icons-material/CloseRounded";
 import ContentCopyRounded from "@mui/icons-material/ContentCopyRounded";
 import DataObjectRounded from "@mui/icons-material/DataObjectRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import DownloadRounded from "@mui/icons-material/DownloadRounded";
+import EditRounded from "@mui/icons-material/EditRounded";
 import FolderOpenRounded from "@mui/icons-material/FolderOpenRounded";
 import HistoryRounded from "@mui/icons-material/HistoryRounded";
 import MenuRounded from "@mui/icons-material/MenuRounded";
 import MoreHorizRounded from "@mui/icons-material/MoreHorizRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
 import SendRounded from "@mui/icons-material/SendRounded";
-import SettingsOutlined from "@mui/icons-material/SettingsOutlined";
 import ThumbUpAltOutlined from "@mui/icons-material/ThumbUpAltOutlined";
 import { buildApiUrl } from "@/lib/api";
 import { useBackgroundTasks } from "@/app/_components/BackgroundTaskProvider";
@@ -27,7 +27,7 @@ import { fetchJob } from "@/lib/background-jobs";
 import MessageContent from "@/app/_components/MessageContent";
 import { useProjects } from "@/app/_components/ProjectProvider";
 
-type Props = { onOpenDownload: () => void; onOpenBrowse: () => void; onOpenDomainTree: () => void; onOpenSettings: () => void };
+type Props = { onOpenBrowse: () => void; onOpenDomainTree: () => void };
 type Source = {
   index: number;
   recordId?: string;
@@ -58,7 +58,7 @@ type OrchestratorResult = {
   };
 };
 
-type Conversation = { id: string; title: string; date: string; messages: Message[] };
+type Conversation = { id: string; title: string; date: string; messages: Message[]; projectId?: string };
 type ResearchRecord = {
   id: string;
   conversationId: string;
@@ -68,6 +68,8 @@ type ResearchRecord = {
   content: string;
   sources: Source[];
   createdAt: string;
+  projectId?: string;
+  projectName?: string;
 };
 
 const CONVERSATIONS_KEY = "research-agent.conversations";
@@ -91,9 +93,9 @@ function usableHistory(messages: Message[]) {
 }
 
 /** 管理研究对话、流式响应和本地会话记录。 */
-export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomainTree, onOpenSettings }: Props) {
+export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) {
   const { jobs, submitJob } = useBackgroundTasks();
-  const { activeProjectId, activeProject } = useProjects();
+  const { projects, activeProjectId, activeProject, isLoadingProjects, selectProject } = useProjects();
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
@@ -105,6 +107,9 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
   const [thinking, setThinking] = useState(false);
   const [thinkingText, setThinkingText] = useState("正在检索知识库并组织证据…");
   const [sidebar, setSidebar] = useState(true);
+  const [renamingConversationId, setRenamingConversationId] = useState("");
+  const [renameDraft, setRenameDraft] = useState("");
+  const [renameError, setRenameError] = useState("");
   const [copied, setCopied] = useState<number | null>(null);
   const nextMessageId = useRef(1);
   const activeAgentMessage = [...messages].reverse().find((message) => message.role === "agent");
@@ -237,11 +242,11 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
       if (existing) {
         return items.map((conversation) =>
           conversation.id === conversationId
-            ? { ...conversation, date: "刚刚", messages: [...conversation.messages, userMessage] }
+            ? { ...conversation, projectId: conversation.projectId || activeProjectId, date: "刚刚", messages: [...conversation.messages, userMessage] }
             : conversation,
         );
       }
-      return [{ id: conversationId, title, date: "刚刚", messages: [userMessage] }, ...items];
+      return [{ id: conversationId, title, date: "刚刚", messages: [userMessage], projectId: activeProjectId }, ...items];
     });
     if (!activeConversationId) {
       setActiveConversationId(conversationId);
@@ -327,6 +332,9 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
   function openConversation(id: string) {
     const conversation = conversations.find((item) => item.id === id);
     if (!conversation || thinking) return;
+    if (conversation.projectId && projects.some((project) => project.id === conversation.projectId)) {
+      selectProject(conversation.projectId);
+    }
     setWorkspaceView("chat");
     setActiveConversationId(conversation.id);
     setConversationTitle(conversation.title);
@@ -344,6 +352,53 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
     setInput("");
   }
 
+  /** 在最近对话列表中开始编辑标题，避免依赖浏览器原生弹窗。 */
+  function beginRenameConversation(conversation: Conversation) {
+    if (thinking) return;
+    setRenamingConversationId(conversation.id);
+    setRenameDraft(conversation.title);
+    setRenameError("");
+  }
+
+  /** 同时更新后端会话与前端缓存，防止下次同步恢复为旧标题。 */
+  async function saveConversationRename(id: string) {
+    const title = renameDraft.trim().slice(0, 80);
+    if (!title) {
+      setRenameError("标题不能为空");
+      return;
+    }
+    try {
+      const response = await fetch(buildApiUrl(`/api/conversations/${encodeURIComponent(id)}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      if (!response.ok && response.status !== 404) throw new Error(`重命名失败（${response.status}）`);
+      setConversations((items) => items.map((conversation) => (
+        conversation.id === id ? { ...conversation, title } : conversation
+      )));
+      if (activeConversationId === id) setConversationTitle(title);
+      setRenamingConversationId("");
+      setRenameDraft("");
+      setRenameError("");
+    } catch (error) {
+      setRenameError(error instanceof Error ? error.message : "重命名失败，请稍后重试");
+    }
+  }
+
+  function cancelConversationRename() {
+    setRenamingConversationId("");
+    setRenameDraft("");
+    setRenameError("");
+  }
+
+  /** 切换知识空间时开启空白会话，避免不同项目的历史上下文相互污染。 */
+  function changeResearchProject(projectId: string) {
+    if (thinking || projectId === activeProjectId) return;
+    selectProject(projectId);
+    startNewConversation();
+  }
+
   /** 删除指定会话并选择新的活动会话。 */
   function deleteConversation(id: string) {
     if (thinking) return;
@@ -352,6 +407,9 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
     if (activeConversationId !== id) return;
     const nextConversation = remaining[0];
     if (nextConversation) {
+      if (nextConversation.projectId && projects.some((project) => project.id === nextConversation.projectId)) {
+        selectProject(nextConversation.projectId);
+      }
       setActiveConversationId(nextConversation.id);
       setConversationTitle(nextConversation.title);
       setMessages(nextConversation.messages);
@@ -384,6 +442,8 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
       content: message.content,
       sources: message.sources ?? [],
       createdAt: new Date().toLocaleString("zh-CN"),
+      projectId: activeProjectId,
+      projectName: activeProject?.name,
     }, ...items]);
   }
 
@@ -402,42 +462,34 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
   return (
     <div className={`research-chat ${sidebar ? "" : "is-collapsed"}${workspaceView === "records" ? " is-records" : ""}`}>
       <aside className="research-sidebar">
-        <div className="research-brand"><span><AutoAwesomeRounded /></span><div><strong>Research Agent</strong><small>知识驱动的研究伙伴</small></div><button onClick={() => setSidebar(false)}><MenuRounded /></button></div>
+        <div className="research-brand"><span className="research-agent-mark"><AutoAwesomeRounded /></span><div><small>知识驱动的研究伙伴</small></div><button onClick={() => setSidebar(false)}><MenuRounded /></button></div>
         <button className="research-new" onClick={startNewConversation}><AddRounded />新建研究对话</button>
         <label>工作区</label>
         <nav className="research-nav">
           <button className={workspaceView === "chat" ? "active" : ""} onClick={() => setWorkspaceView("chat")}><AutoAwesomeRounded />研究对话{conversations.length > 0 ? <em>{conversations.length}</em> : null}</button>
-          <button onClick={onOpenDownload}><DownloadRounded />下载数据集</button>
-          <button onClick={onOpenBrowse}><FolderOpenRounded />浏览数据集</button>
-          <button onClick={onOpenDomainTree}><DataObjectRounded />领域图谱</button>
           <button className={workspaceView === "records" ? "active" : ""} onClick={() => setWorkspaceView("records")}><HistoryRounded />研究记录{researchRecords.length > 0 ? <em>{researchRecords.length}</em> : null}</button>
         </nav>
         <label>最近对话</label>
         <div className="research-recents">
           {conversations.map((conversation) => (
             <div className={`research-recent-item ${activeConversationId === conversation.id ? "active" : ""}`} key={conversation.id}>
-              <button className="research-recent-open" onClick={() => openConversation(conversation.id)}>
-                <span>{conversation.title}</span><small>{conversation.date}</small>
-              </button>
-              <button className="research-recent-delete" onClick={() => deleteConversation(conversation.id)} aria-label={`删除对话：${conversation.title}`} title="删除对话">
-                <DeleteOutlineRounded />
-              </button>
+              {renamingConversationId === conversation.id ? <form className="research-recent-edit" onSubmit={(event) => { event.preventDefault(); void saveConversationRename(conversation.id); }}><input value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") cancelConversationRename(); }} maxLength={80} autoFocus aria-label="对话标题" title="按 Enter 保存" /><button type="button" onClick={cancelConversationRename} aria-label="取消重命名" title="取消重命名"><CloseRounded /></button>{renameError ? <small>{renameError}</small> : null}</form> : <><button className="research-recent-open" onClick={() => openConversation(conversation.id)}><span>{conversation.title}</span><small>{[projects.find((project) => project.id === conversation.projectId)?.name, conversation.date].filter(Boolean).join(" · ")}</small></button><div className="research-recent-actions"><button className="research-recent-rename" onClick={() => beginRenameConversation(conversation)} aria-label={`重命名对话：${conversation.title}`} title="重命名对话"><EditRounded /></button><button className="research-recent-delete" onClick={() => deleteConversation(conversation.id)} aria-label={`删除对话：${conversation.title}`} title="删除对话"><DeleteOutlineRounded /></button></div></>}
             </div>
           ))}
           {conversations.length === 0 ? <div className="research-recent-empty">暂无最近对话</div> : null}
         </div>
-        <div className="research-side-bottom"><button onClick={onOpenSettings}><SettingsOutlined />设置</button><div><span>LX</span><p><strong>研究工作区</strong><small>个人专业版</small></p><MoreHorizRounded /></div></div>
+        <div className="research-side-bottom"><div><span>LX</span><p><strong>研究工作区</strong><small>个人专业版</small></p></div></div>
       </aside>
 
       <main className="research-main">
         <header className="research-topbar">
           {!sidebar && <button className="research-icon" onClick={() => setSidebar(true)}><MenuRounded /></button>}
-          <div><h1>{workspaceView === "records" ? "成果档案" : conversationTitle}</h1><span><i />{workspaceView === "records" ? `${researchRecords.length} 条已保存成果` : "已自动保存"}</span></div>
-          {workspaceView === "chat" ? <><button className="research-export"><DownloadRounded />导出报告</button><button className="research-icon"><MoreHorizRounded /></button></> : null}
+          <div className="research-topbar-title"><h1>{workspaceView === "records" ? "成果档案" : conversationTitle}</h1><span><i />{workspaceView === "records" ? `${researchRecords.length} 条已保存成果` : "已自动保存"}</span></div>
+          {workspaceView === "chat" ? <><label className="research-project-picker"><DataObjectRounded /><span>知识空间</span><select value={activeProjectId} onChange={(event) => changeResearchProject(event.target.value)} disabled={thinking || isLoadingProjects}>{projects.length ? projects.map((project) => <option key={project.id} value={project.id}>{project.name}（{project.paperCount} 篇）</option>) : <option value={activeProjectId}>{isLoadingProjects ? "正在加载项目…" : "暂无可用项目"}</option>}</select></label><button className="research-export"><DownloadRounded />导出报告</button></> : null}
         </header>
         {workspaceView === "records" ? (
           <section className="research-records-page">
-            <header><div><small>Research Archive</small><h2>研究记录</h2><p>沉淀值得长期保留的研究结论、原始问题与引用证据，形成可回溯的成果档案。</p></div><button onClick={() => setWorkspaceView("chat")}><AutoAwesomeRounded />返回研究对话</button></header>
+            <header><div><small>Research Archive</small><h2>研究记录</h2><p>沉淀值得长期保留的研究结论、原始问题与引用证据，形成可回溯的成果档案。</p></div></header>
             {researchRecords.length > 0 ? (
               <div className="research-record-grid">
                 {researchRecords.map((record) => (
@@ -445,7 +497,7 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
                     <header><div><small>{record.createdAt}</small><h3>{record.title}</h3></div><button onClick={() => deleteResearchRecord(record.id)} aria-label={`删除研究记录：${record.title}`} title="删除研究记录"><DeleteOutlineRounded /></button></header>
                     <strong>{record.question}</strong>
                     <p>{record.content}</p>
-                    <footer><span>{record.sources.length} 个引用来源</span><button onClick={() => openRecordConversation(record)} disabled={!record.conversationId || !conversations.some((conversation) => conversation.id === record.conversationId)}>打开原对话</button></footer>
+                    <footer><span>{[record.projectName, `${record.sources.length} 个引用来源`].filter(Boolean).join(" · ")}</span><button onClick={() => openRecordConversation(record)} disabled={!record.conversationId || !conversations.some((conversation) => conversation.id === record.conversationId)}>打开原对话</button></footer>
                   </article>
                 ))}
               </div>
@@ -455,7 +507,7 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
           </section>
         ) : <div className="research-body">
           <section className="research-thread">
-            {!messages.length && <div className="research-empty"><span><AutoAwesomeRounded /></span><h2>今天想研究什么？</h2><p>我会从你的知识库中检索、分析并标注每一处引用。</p></div>}
+            {!messages.length && <div className="research-empty"><span className="research-agent-mark"><AutoAwesomeRounded /></span><h2>今天想研究什么？</h2><p>我会从“{activeProject?.name || "当前知识空间"}”中检索、分析并标注每一处引用。</p></div>}
             {messages.map((message) => <article className={`research-message ${message.role}`} key={message.id}>
               <div className="research-avatar">{message.role === "agent" ? <AutoAwesomeRounded /> : "LX"}</div>
               <div><header><strong>{message.role === "agent" ? "Research Agent" : "你"}</strong><span>{message.id <= 2 ? "10:24" : "刚刚"}</span></header><MessageContent content={message.content} />
@@ -466,7 +518,7 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
           </section>
           <div className="research-compose-wrap">
             
-            <form className="research-compose" onSubmit={submit}><textarea rows={2} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={keyDown} placeholder="继续追问，或给 Research Agent 一个任务…" /><div><button type="button"><AddRounded /></button><button type="button" className="library-pill" onClick={onOpenDomainTree}><FolderOpenRounded />{activeProject?.name || "当前项目"} <span>{activeProject?.paperCount ?? 0} 篇</span></button><button className="research-send" disabled={!input.trim() || thinking}><SendRounded /></button></div></form>
+            <form className="research-compose" onSubmit={submit}><textarea rows={2} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={keyDown} placeholder={messages.length ? "继续追问，或给 Research Agent 一个任务…" : "输入研究问题，或给 Research Agent 一个任务…"} /><div><button type="button"><AddRounded /></button><button type="button" className="library-pill" onClick={onOpenDomainTree}><FolderOpenRounded />{activeProject?.name || "当前项目"} <span>{activeProject?.paperCount ?? 0} 篇</span></button><button className="research-send" disabled={!input.trim() || thinking}><SendRounded /></button></div></form>
             <small className="research-note">{isDirectAnswer ? "本次为普通对话，未调用研究 Agent 或知识库。" : "研究内容由 AI 基于所选知识库生成，请核验关键结论与原始文献。"}</small>
           </div>
         </div>}
@@ -489,7 +541,7 @@ export default function ResearchChat({ onOpenDownload, onOpenBrowse, onOpenDomai
             )) : <div className="research-source-empty">发送研究问题后，此处将显示回答引用的真实来源。</div>}
           </div>
           <div className="research-section-title"><strong>知识库范围</strong><button onClick={onOpenBrowse}>管理</button></div>
-          <div className="research-library"><span><FolderOpenRounded /></span><p><strong>医疗大模型研究</strong><small>42 篇文献 · 更新于今天</small></p><CheckRounded /></div>
+          <div className="research-library"><span><FolderOpenRounded /></span><p><strong>{activeProject?.name || "当前知识空间"}</strong><small>{activeProject?.paperCount ?? 0} 篇文献 · 当前对话范围</small></p><CheckRounded /></div>
           <button className="research-add-source" onClick={onOpenBrowse}><AddRounded />添加知识来源</button>
         </>}
       </aside> : null}

@@ -13,10 +13,8 @@ export default function ResearchChatPage() {
   return (
     <StandalonePageShell>
       <ResearchChat
-        onOpenDownload={() => router.push("/dataset-download")}
         onOpenBrowse={() => router.push("/dataset-brower")}
         onOpenDomainTree={() => router.push("/domain-tree")}
-        onOpenSettings={() => router.push("/setting")}
       />
     </StandalonePageShell>
   );

@@ -152,6 +152,16 @@ class ConversationStore:
             ).fetchone()
             return self._public(connection, row) if row else None
 
+    def rename(self, conversation_id: str, title: str) -> bool:
+        """更新会话标题；返回会话是否存在。"""
+        timestamp = _now()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+                (title, timestamp, conversation_id),
+            )
+            return cursor.rowcount > 0
+
     def _public(self, connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         messages = connection.execute(
             "SELECT * FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, rowid",

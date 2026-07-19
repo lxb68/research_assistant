@@ -88,6 +88,14 @@ class ModelDiscoveryRequest(BaseModel):
     api_key: str = ""
 
 
+class ModelConnectionTestRequest(ModelConfigRequest):
+    pass
+
+
+class EnvConfigUpdateRequest(BaseModel):
+    values: dict[str, str | int | float | bool | None] = Field(default_factory=dict, max_length=100)
+
+
 class ChatSource(BaseModel):
     index: int = Field(..., ge=1, le=1000)
     record_id: str = Field("", max_length=200)
@@ -120,7 +128,7 @@ class OrchestratorRequest(BaseModel):
 __all__ = [
     "DatasetDownloadRequest", "DeduplicatePapersRequest", "DeletePapersRequest",
     "DomainTreeGenerateOptions", "DomainTreeGenerateRequest", "ImportPaperRequest", "ManualPdfLinkRequest",
-    "ModelConfigRequest", "ModelDiscoveryRequest", "OrchestratorRequest",
+    "EnvConfigUpdateRequest", "ModelConfigRequest", "ModelConnectionTestRequest", "ModelDiscoveryRequest", "OrchestratorRequest",
     "ProjectCreateRequest", "ProjectPapersRequest",
     "ResearchChatRequest",
 ]

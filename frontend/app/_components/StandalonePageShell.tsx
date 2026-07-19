@@ -1,10 +1,9 @@
-/* 为独立功能页提供返回入口、品牌区和当前路由导航。 */
+/* 为独立功能页提供品牌入口和当前路由导航。 */
 
 "use client";
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import ArrowBackRoundedIcon from "@mui/icons-material/ArrowBackRounded";
 
 const pages = [
   { href: "/research-chat", label: "研究对话" },
@@ -20,10 +19,6 @@ export default function StandalonePageShell({ children }: { children: React.Reac
   return (
     <div className="standalone-page-shell">
       <header className="workspace-topbar standalone-page-topbar">
-        <Link className="standalone-back-button" href="/" aria-label="返回首页">
-          <ArrowBackRoundedIcon />
-          <span>返回首页</span>
-        </Link>
         <Link className="workspace-brand" href="/">
           <span className="workspace-logo">R</span>
           <span>Research Agent</span>

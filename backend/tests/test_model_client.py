@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -265,6 +266,51 @@ class ModelConfigStoreTest(unittest.TestCase):
             self.assertTrue(store.load_runtime()["allow_heuristic_fallback"])
             saved = json.loads(store.config_path.read_text(encoding="utf-8"))
             self.assertTrue(saved["allowHeuristicFallback"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI 仅在 Windows 上可用")
+    def test_api_key_is_protected_with_windows_dpapi(self) -> None:
+        """新保存的云模型密钥不能再以明文出现在配置文件中。"""
+        with tempfile.TemporaryDirectory() as directory:
+            store = ModelConfigStore(directory)
+            store.save(
+                provider="openai",
+                protocol="openai_compatible",
+                model="gpt-test",
+                base_url="https://api.openai.com/v1",
+                api_key="test-secret-value",
+            )
+
+            saved_text = store.config_path.read_text(encoding="utf-8")
+            saved = json.loads(saved_text)
+            self.assertNotIn("test-secret-value", saved_text)
+            self.assertTrue(saved["apiKeyProtected"].startswith("dpapi:v1:"))
+            self.assertEqual(store.load_runtime()["api_key"], "test-secret-value")
+
+    def test_environment_api_key_is_not_copied_into_saved_config(self) -> None:
+        """环境变量密钥可用于校验，但保存普通字段时不应复制到文件。"""
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "app.services.model_config.settings.llm_translation_api_key",
+            "environment-secret",
+        ), patch(
+            "app.services.model_config.settings.llm_translation_base_url",
+            "https://api.openai.com/v1",
+        ), patch(
+            "app.services.model_config.settings.llm_translation_model",
+            "gpt-env",
+        ):
+            store = ModelConfigStore(directory)
+            public = store.save(
+                provider="openai",
+                protocol="openai_compatible",
+                model="gpt-updated",
+                base_url="https://api.openai.com/v1",
+                api_key="",
+            )
+
+            saved = json.loads(store.config_path.read_text(encoding="utf-8"))
+            self.assertTrue(public["configured"])
+            self.assertNotIn("apiKey", saved)
+            self.assertNotIn("apiKeyProtected", saved)
 
 
 if __name__ == "__main__":

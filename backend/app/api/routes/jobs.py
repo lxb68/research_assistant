@@ -29,6 +29,10 @@ class JobCreateRequest(BaseModel):
     dedupe_key: str | None = Field(None, alias="dedupeKey", max_length=500)
 
 
+class ConversationRenameRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=80)
+
+
 def _submit(
     job_type: str,
     payload: dict[str, Any],
@@ -192,6 +196,16 @@ def get_conversation(conversation_id: str) -> dict[str, Any]:
     if not conversation:
         raise HTTPException(status_code=404, detail="研究对话不存在")
     return conversation
+
+
+@router.patch("/api/conversations/{conversation_id}")
+def rename_conversation(conversation_id: str, payload: ConversationRenameRequest) -> dict[str, Any]:
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="对话标题不能为空")
+    if not conversation_store.rename(conversation_id, title):
+        raise HTTPException(status_code=404, detail="研究对话不存在")
+    return {"id": conversation_id, "title": title}
 
 
 __all__ = ["router"]

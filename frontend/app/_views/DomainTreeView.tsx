@@ -230,6 +230,13 @@ const ACTION_LABELS: Record<DomainTreeAction, string> = {
   keep: "保持不变",
 };
 
+/* 提交按钮直接说明预期结果，避免只写“更新”而无法对应当前执行模式。 */
+const ACTION_BUTTON_LABELS: Record<DomainTreeAction, string> = {
+  revise: "应用修改并更新领域树",
+  rebuild: "重新生成领域树",
+  keep: "保留结构并刷新结果",
+};
+
 const ACTION_DESCRIPTIONS: Record<DomainTreeAction, string> = {
   revise: "根据新增或删除的文档调整当前领域树，只影响发生变更的部分。",
   rebuild: "基于当前全部文档重新生成一棵全新的领域树。",
@@ -1369,7 +1376,7 @@ function DomainTreeProjectPage({
                 void handleGenerate();
               }}
             >
-              {isGenerating ? "后台处理中..." : result ? "更新领域树" : "生成领域树"}
+              {isGenerating ? "后台处理中..." : result ? ACTION_BUTTON_LABELS[generationMode] : "生成领域树"}
             </button>
             {isGenerating && activeJobId ? (
               <button

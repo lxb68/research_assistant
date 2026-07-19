@@ -15,6 +15,7 @@ from app.services.model_client import (
     requires_api_key,
     validate_base_url,
 )
+from app.services.secret_store import WindowsDpapiProtector
 
 
 SYSTEM_SECURITY_CONSTRAINT = (
@@ -31,6 +32,7 @@ class ModelConfigStore:
         self.storage_dir = Path(storage_dir or settings.backend_storage_dir).resolve()
         self.config_path = self.storage_dir / "settings" / "model_config.json"
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.secret_protector = WindowsDpapiProtector()
 
     def load_saved(self) -> dict[str, Any]:
         """读取原始保存配置；文件缺失或损坏时返回空配置。"""
@@ -45,8 +47,11 @@ class ModelConfigStore:
     def load_runtime(self) -> dict[str, Any]:
         """合并保存配置与环境变量，得到运行时模型配置。"""
         saved = self.load_saved()
+        protected_key = str(saved.get("apiKeyProtected") or "").strip()
+        protected_value = self.secret_protector.unprotect(protected_key) if protected_key else ""
         api_key = str(
-            saved.get("apiKey")
+            protected_value
+            or saved.get("apiKey")
             or saved.get("api_key")
             or settings.llm_translation_api_key
             or "",
@@ -103,6 +108,7 @@ class ModelConfigStore:
         normalized_base_url = str(base_url).strip().rstrip("/")
         normalized_api_key = str(api_key).strip()
         existing = self.load_saved()
+        current_runtime = self.load_runtime()
         normalized_provider = str(provider or infer_provider(normalized_base_url)).strip().lower()
         provider_config = get_provider(normalized_provider)
         normalized_protocol = normalize_protocol(protocol, normalized_provider)
@@ -111,14 +117,23 @@ class ModelConfigStore:
         ).strip().lower()
         if not normalized_base_url:
             normalized_base_url = str(provider_config["baseUrl"]).strip().rstrip("/")
-        if not normalized_api_key and normalized_provider == existing_provider:
-            normalized_api_key = str(existing.get("apiKey") or existing.get("api_key") or "").strip()
+        key_to_persist = normalized_api_key
+        if not key_to_persist and normalized_provider == existing_provider:
+            protected_key = str(existing.get("apiKeyProtected") or "").strip()
+            key_to_persist = (
+                self.secret_protector.unprotect(protected_key)
+                if protected_key
+                else str(existing.get("apiKey") or existing.get("api_key") or "").strip()
+            )
+        effective_api_key = key_to_persist
+        if not effective_api_key and normalized_provider == current_runtime["provider"]:
+            effective_api_key = str(current_runtime["api_key"] or "").strip()
         if not normalized_model:
             raise ValueError("请先填写模型名称")
         if not normalized_base_url:
             raise ValueError("请先填写模型 Base URL")
         normalized_base_url = validate_base_url(normalized_base_url)
-        if requires_api_key(normalized_provider, normalized_protocol) and not normalized_api_key:
+        if requires_api_key(normalized_provider, normalized_protocol) and not effective_api_key:
             raise ValueError(f"{provider_config['name']} 需要填写 API Key")
 
         payload = {
@@ -126,9 +141,10 @@ class ModelConfigStore:
             "protocol": normalized_protocol,
             "model": normalized_model,
             "baseUrl": normalized_base_url,
-            "apiKey": normalized_api_key,
             "allowHeuristicFallback": bool(allow_heuristic_fallback),
         }
+        if key_to_persist:
+            payload["apiKeyProtected"] = self.secret_protector.protect(key_to_persist)
         self.config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return self.get_public_config()
 
@@ -151,10 +167,20 @@ class ModelConfigStore:
             "baseUrl": runtime["base_url"],
             "requiresApiKey": runtime["requires_api_key"],
             "hasApiKey": bool(runtime["api_key"]),
+            "secretStorage": self._secret_storage(saved=self.load_saved(), runtime=runtime),
             "allowHeuristicFallback": runtime["allow_heuristic_fallback"],
             "maskedApiKey": self._mask_secret(runtime["api_key"]),
             "systemConstraint": SYSTEM_SECURITY_CONSTRAINT,
         }
+
+    def _secret_storage(self, *, saved: dict[str, Any], runtime: dict[str, Any]) -> str:
+        if saved.get("apiKeyProtected"):
+            return self.secret_protector.storage_label
+        if saved.get("apiKey") or saved.get("api_key"):
+            return "legacy_plaintext"
+        if runtime.get("api_key"):
+            return "environment"
+        return "none"
 
     def build_model_payload(self) -> dict[str, Any] | None:
         """构造模型调用参数，配置不完整时返回空值。"""
