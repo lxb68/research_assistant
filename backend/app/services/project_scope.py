@@ -56,7 +56,11 @@ class ProjectScopeService:
 
         return {
             "history": scoped_history,
-            "paper_ids": requested or project_paper_ids,
+            # paper_ids 只表示用户明确指定的论文，不能承载项目授权范围。
+            # 否则下游会把整个项目误认为必须逐篇覆盖的检索目标。
+            "paper_ids": requested,
+            "authorized_paper_ids": project_paper_ids,
+            # 暂时保留旧字段，兼容仍在读取项目范围的后台任务与历史调用方。
             "project_paper_ids": project_paper_ids,
             "project_id": selected_project_ids[0],
             "project_ids": selected_project_ids,

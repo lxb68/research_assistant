@@ -8,6 +8,7 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 _MODEL_OUTPUT_PREVIEW_CHARS = 2000
 _CACHE_SCHEMA_VERSION = "semantic-graph-v2-source-language"
+_TYPE_MAPPING_SCHEMA_VERSION = "entity-type-mapping-v1-dynamic"
 
 
 def _log_text_preview(value: Any, *, limit: int = _MODEL_OUTPUT_PREVIEW_CHARS) -> str:
@@ -276,7 +278,9 @@ class SemanticGraphExtractor:
             state["failedChunkCount"],
         )
 
-        entities = sorted(state["entities"].values(), key=lambda item: (item["type"], item["name"].lower()))
+        entities = list(state["entities"].values())
+        type_normalization = self._canonicalize_entity_types(entities)
+        entities = sorted(entities, key=lambda item: (item["type"], item["name"].lower()))
         relations = sorted(
             state["relations"].values(),
             key=lambda item: (item["relationType"], item["predicate"], item["source"], item["target"]),
@@ -317,6 +321,7 @@ class SemanticGraphExtractor:
                 "semanticRelationCount": len(relations),
                 "citationCount": len(citations),
                 "evidenceCount": len(evidence),
+                **type_normalization,
             },
         }
 
@@ -673,17 +678,20 @@ class SemanticGraphExtractor:
             for normalized in normalized_names:
                 local_entity_ids[normalized] = entity_id
             attributes = self._normalize_attributes(raw_entity.get("attributes"), evidence_id)
+            observed_type = str(raw_entity.get("type") or "entity").strip() or "entity"
             existing = state["entities"].get(entity_id)
             if existing:
                 existing["aliases"] = sorted(set(existing["aliases"] + aliases + [mention]) - {existing["name"]})
                 existing["attributes"] = self._merge_attributes(existing["attributes"], attributes)
                 existing["evidenceIds"] = sorted(set(existing["evidenceIds"] + ([evidence_id] if evidence_id else [])))
                 existing["documentIds"] = sorted(set(existing["documentIds"] + [document.record_id]))
+                existing["typeCounts"][observed_type] = existing["typeCounts"].get(observed_type, 0) + 1
                 continue
             state["entities"][entity_id] = {
                 "id": entity_id,
                 "name": name,
-                "type": str(raw_entity.get("type") or "entity").strip() or "entity",
+                "type": observed_type,
+                "typeCounts": {observed_type: 1},
                 "aliases": sorted(set(aliases + ([mention] if mention != name else []))),
                 "attributes": attributes,
                 "evidenceIds": [evidence_id] if evidence_id else [],
@@ -729,6 +737,189 @@ class SemanticGraphExtractor:
                 "evidenceIds": [evidence_id],
                 "documentIds": [document.record_id],
             }
+
+    def _canonicalize_entity_types(self, entities: list[dict[str, Any]]) -> dict[str, Any]:
+        """根据本次抽取结果动态归并实体类型，不依赖预设领域词表。"""
+        raw_type_counts: dict[str, int] = {}
+        for entity in entities:
+            counts = entity.get("typeCounts") if isinstance(entity.get("typeCounts"), dict) else {}
+            if not counts:
+                fallback = str(entity.get("type") or "entity").strip() or "entity"
+                counts = {fallback: 1}
+            for raw_type, count in counts.items():
+                label = str(raw_type or "").strip()
+                if label:
+                    raw_type_counts[label] = raw_type_counts.get(label, 0) + max(1, int(count or 1))
+
+        if not raw_type_counts:
+            return {
+                "entityTypeCountBefore": 0,
+                "entityTypeCountAfter": 0,
+                "entityTypeNormalizationMode": "none",
+            }
+
+        # 第一阶段只处理 Unicode 形式、大小写、首尾标点和空白，不判断语义同义关系。
+        deterministic_mapping = {
+            raw_type: self._normalize_type_label(raw_type)
+            for raw_type in raw_type_counts
+        }
+        normalized_type_counts: dict[str, int] = {}
+        for raw_type, count in raw_type_counts.items():
+            normalized = deterministic_mapping[raw_type]
+            normalized_type_counts[normalized] = normalized_type_counts.get(normalized, 0) + count
+
+        semantic_mapping = {label: label for label in normalized_type_counts}
+        mode = "deterministic"
+        if len(normalized_type_counts) > 1 and self.runtime:
+            inferred_mapping = self._infer_type_mapping(normalized_type_counts)
+            if inferred_mapping is not None:
+                semantic_mapping.update(inferred_mapping)
+                mode = "dynamic_model"
+
+        for entity in entities:
+            counts = entity.pop("typeCounts", None)
+            if not isinstance(counts, dict) or not counts:
+                raw_type = str(entity.get("type") or "entity").strip() or "entity"
+                counts = {raw_type: 1}
+            canonical_counts: dict[str, int] = {}
+            raw_types: list[str] = []
+            for raw_type, count in counts.items():
+                label = str(raw_type or "").strip()
+                if not label:
+                    continue
+                raw_types.append(label)
+                normalized = deterministic_mapping.get(label, self._normalize_type_label(label))
+                canonical = semantic_mapping.get(normalized, normalized)
+                canonical_counts[canonical] = canonical_counts.get(canonical, 0) + max(1, int(count or 1))
+            if canonical_counts:
+                entity["type"] = min(
+                    canonical_counts,
+                    key=lambda label: (-canonical_counts[label], label),
+                )
+            entity["rawTypes"] = sorted(set(raw_types), key=lambda label: label.casefold())
+
+        final_types = {str(entity.get("type") or "") for entity in entities if entity.get("type")}
+        logger.info(
+            "实体类型归并完成：mode=%s before=%s deterministic=%s after=%s",
+            mode,
+            len(raw_type_counts),
+            len(normalized_type_counts),
+            len(final_types),
+        )
+        return {
+            "entityTypeCountBefore": len(raw_type_counts),
+            "entityTypeCountAfter": len(final_types),
+            "entityTypeNormalizationMode": mode,
+        }
+
+    def _infer_type_mapping(self, type_counts: dict[str, int]) -> dict[str, str] | None:
+        """让模型仅对本次出现的类型进行开放式等价归并，并严格校验返回标签。"""
+        labels = sorted(type_counts)
+        cache_key = self._type_mapping_cache_key(type_counts)
+        cached = self._load_cached_payload(cache_key)
+        if cached is not None:
+            mapping = self._validate_type_mapping(cached, labels)
+            if mapping is not None:
+                return mapping
+
+        prompt = f"""请归并下面这些科研知识图谱实体类型标签中的语义等价项。
+
+输入标签及出现次数：
+{json.dumps(type_counts, ensure_ascii=False, sort_keys=True)}
+
+要求：
+1. 只合并含义相同的类型；上位类、下位类或相关类型不得合并。
+2. 大小写、单复数、缩写和跨语言翻译可在确实等价时合并。
+3. canonical 必须逐字选自输入标签，禁止创造新类型。
+4. 每个输入标签必须且只能出现一次。
+5. 优先选择出现次数较多、表达清晰的标签作为 canonical。
+6. 只返回合法 JSON，不要解释。
+
+返回结构：
+{{"groups":[{{"canonical":"输入中的一个标签","members":["等价标签1","等价标签2"]}}]}}
+"""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是知识图谱类型归并器。根据输入数据动态建立等价组，"
+                    "不得使用预设类型表，不得新增、翻译或改写标签。"
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
+        self._report_progress(
+            stage="semantic_type_normalization",
+            message=f"正在归并 {len(labels)} 个实体类型",
+        )
+        try:
+            answer = call_with_retry(
+                lambda: self.chat_fn(
+                    self.runtime,
+                    messages,
+                    temperature=0.0,
+                    timeout=settings.request_timeout,
+                ),
+                max_attempts=settings.domain_tree_retry_attempts,
+                base_delay_seconds=settings.domain_tree_retry_base_delay_seconds,
+                cancel_event=self.cancel_event,
+            )
+            payload = self._extract_json_object(answer)
+            mapping = self._validate_type_mapping(payload, labels)
+            if mapping is None:
+                logger.warning("模型返回的实体类型映射未通过完整性校验，使用确定性归一化")
+                return None
+            self._save_cached_payload(cache_key, payload)
+            return mapping
+        except DomainTreeGenerationCancelled:
+            raise
+        except Exception as error:
+            logger.warning("实体类型动态归并失败，使用确定性归一化：%s", error)
+            return None
+
+    def _validate_type_mapping(
+        self,
+        payload: dict[str, Any],
+        labels: list[str],
+    ) -> dict[str, str] | None:
+        """只接受覆盖全部输入且未引入新标签的类型分组。"""
+        groups = payload.get("groups") if isinstance(payload.get("groups"), list) else []
+        allowed = set(labels)
+        mapping: dict[str, str] = {}
+        for group in groups:
+            if not isinstance(group, dict):
+                return None
+            canonical = self._normalize_type_label(str(group.get("canonical") or ""))
+            members = group.get("members") if isinstance(group.get("members"), list) else []
+            normalized_members = [self._normalize_type_label(str(member or "")) for member in members]
+            if canonical not in allowed or canonical not in normalized_members:
+                return None
+            for member in normalized_members:
+                if member not in allowed or member in mapping:
+                    return None
+                mapping[member] = canonical
+        return mapping if set(mapping) == allowed else None
+
+    def _type_mapping_cache_key(self, type_counts: dict[str, int]) -> str:
+        """按模型与实际类型集合缓存动态归并结果。"""
+        payload = {
+            "schema": _TYPE_MAPPING_SCHEMA_VERSION,
+            "kind": "entity_type_mapping",
+            "provider": self.runtime.get("provider", ""),
+            "protocol": self.runtime.get("protocol", ""),
+            "model": self.runtime.get("model", ""),
+            "base_url": self.runtime.get("base_url", ""),
+            "types": type_counts,
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _normalize_type_label(self, value: str) -> str:
+        """以语言无关的形式统一类型标签表面差异。"""
+        normalized = unicodedata.normalize("NFKC", str(value or ""))
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        normalized = normalized.strip(".,;:!?-_–—/\\|()[]{}<>《》【】（）")
+        return normalized.casefold() or "entity"
 
     def _add_evidence(
         self,

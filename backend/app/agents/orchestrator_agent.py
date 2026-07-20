@@ -1008,15 +1008,42 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             args.get("graph_project_id")
             or (project_id if not args.get("project_ids") else "")
         ).strip()
-        project_scope_ids = list(dict.fromkeys(
+        authorized_scope_ids = list(dict.fromkeys(
             str(paper_id).strip()
-            for paper_id in args.get("project_paper_ids") or []
+            for paper_id in (
+                args.get("authorized_paper_ids")
+                or args.get("project_paper_ids")
+                or []
+            )
             if str(paper_id).strip()
         ))
-        project_paper_ids = set(project_scope_ids)
-        paper_ids = list(args.get("paper_ids") or []) or None
+        authorized_paper_ids = set(authorized_scope_ids)
+        explicit_paper_ids = list(dict.fromkeys(
+            str(paper_id).strip()
+            for paper_id in args.get("paper_ids") or []
+            if str(paper_id).strip()
+        ))
         trace: list[dict[str, Any]] = []
         research_agent = ResearchChatAgent(log_callback=self.log_callback)
+
+        outside_explicit_ids = [
+            paper_id
+            for paper_id in explicit_paper_ids
+            if authorized_paper_ids and paper_id not in authorized_paper_ids
+        ]
+        if outside_explicit_ids:
+            return {
+                "agent": "orchestrator",
+                "action": "request_user_action",
+                "result": {
+                    "status": "needs_user_action",
+                    "message": f"请求的文献不在当前检索项目范围内：{', '.join(outside_explicit_ids[:10])}。请先将文献加入检索项目。",
+                    "requiredAction": "add_paper_to_scope",
+                    "outsidePaperIds": outside_explicit_ids,
+                    "trace": trace,
+                    "runLog": self.run_logger.public_info(),
+                },
+            }
 
         try:
             raise_if_task_cancelled(cancel_event)
@@ -1024,7 +1051,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 research_agent.plan_retrieval,
                 task,
                 history,
-                explicit_paper_ids=paper_ids,
+                explicit_paper_ids=explicit_paper_ids or None,
             )
             raise_if_task_cancelled(cancel_event)
             self.run_logger.log(
@@ -1070,7 +1097,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 "standaloneQuestion": task,
                 "questionType": "simple_fact",
                 "complexity": "simple",
-                "targetPaperIds": list(paper_ids or []),
+                "targetPaperIds": list(explicit_paper_ids),
                 "targetChunks": [],
                 "documentRequirements": {},
                 "retrievalFacets": [
@@ -1106,25 +1133,74 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 },
             }
 
-        paper_ids = list(plan.get("targetPaperIds") or paper_ids or []) or None
-        if project_paper_ids:
-            paper_ids = [paper_id for paper_id in paper_ids or [] if paper_id in project_paper_ids] or project_scope_ids
+        resolved_target_ids = list(dict.fromkeys(
+            str(paper_id).strip()
+            for paper_id in (plan.get("targetPaperIds") or explicit_paper_ids)
+            if str(paper_id).strip()
+        ))
+        outside_target_ids = [
+            paper_id
+            for paper_id in resolved_target_ids
+            if authorized_paper_ids and paper_id not in authorized_paper_ids
+        ]
+        if outside_target_ids:
+            self.run_logger.log(
+                "OrchestratorAgent",
+                "规划器解析出的目标文献不在当前授权范围内",
+                event="research_scope_rejected",
+                data={
+                    "outsidePaperIds": outside_target_ids,
+                    "authorizedPaperCount": len(authorized_scope_ids),
+                },
+            )
+            return {
+                "agent": "orchestrator",
+                "action": "request_user_action",
+                "result": {
+                    "status": "needs_user_action",
+                    "message": f"识别到的目标文献不在当前检索项目范围内：{', '.join(outside_target_ids[:10])}。请先将文献加入检索项目。",
+                    "requiredAction": "add_paper_to_scope",
+                    "outsidePaperIds": outside_target_ids,
+                    "trace": trace,
+                    "runLog": self.run_logger.public_info(),
+                },
+            }
+
+        # 检索范围与证据覆盖目标必须分离：没有具体目标时可以在全部授权论文中检索，
+        # 但不能因此要求回答逐篇覆盖整个项目。
+        retrieval_paper_ids = resolved_target_ids or authorized_scope_ids or None
+        required_paper_ids = resolved_target_ids or None
         target_chunks = list(plan.get("targetChunks") or [])
-        if project_paper_ids:
-            target_chunks = [
-                item
-                for item in target_chunks
-                if str(item.get("record_id") or item.get("recordId") or "").strip() in project_paper_ids
-            ]
+        outside_chunk_ids = list(dict.fromkeys(
+            record_id
+            for item in target_chunks
+            if (record_id := str(item.get("record_id") or item.get("recordId") or "").strip())
+            and authorized_paper_ids
+            and record_id not in authorized_paper_ids
+        ))
+        if outside_chunk_ids:
+            return {
+                "agent": "orchestrator",
+                "action": "request_user_action",
+                "result": {
+                    "status": "needs_user_action",
+                    "message": f"识别到的引用片段不在当前检索项目范围内：{', '.join(outside_chunk_ids[:10])}。请先将对应文献加入检索项目。",
+                    "requiredAction": "add_paper_to_scope",
+                    "outsidePaperIds": outside_chunk_ids,
+                    "trace": trace,
+                    "runLog": self.run_logger.public_info(),
+                },
+            }
         document_requirements = dict(plan.get("documentRequirements") or {})
         if document_requirements:
-            paper_ids, document_scope = await asyncio.to_thread(
+            retrieval_paper_ids, document_scope = await asyncio.to_thread(
                 research_agent.resolve_document_scope,
-                paper_ids,
+                retrieval_paper_ids,
                 document_requirements,
             )
-            plan["targetPaperIds"] = list(paper_ids)
-            filtered_ids = set(paper_ids)
+            required_paper_ids = list(retrieval_paper_ids)
+            plan["targetPaperIds"] = list(retrieval_paper_ids)
+            filtered_ids = set(retrieval_paper_ids)
             target_chunks = [
                 item
                 for item in target_chunks
@@ -1142,7 +1218,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 "status": "completed",
                 **document_scope,
             })
-            if not paper_ids:
+            if not retrieval_paper_ids:
                 return {
                     "agent": "orchestrator",
                     "action": "request_materials",
@@ -1163,7 +1239,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         retrieval_facets = list(plan.get("retrievalFacets") or [])
         question_type = str(plan.get("questionType") or "simple_fact")
         target_evidence_count = int(plan.get("targetEvidenceCount") or settings.orchestrator_min_evidence)
-        allow_search = bool(args.get("allow_external_search", True)) and not paper_ids and not target_chunks
+        allow_search = bool(args.get("allow_external_search", True)) and not retrieval_paper_ids and not target_chunks
         retrieval_query = str(plan.get("standaloneQuestion") or task).strip()
 
         self._log("正在判断本地知识库证据是否充分")
@@ -1173,7 +1249,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             research_agent.retrieve_evidence,
             task,
             history=history,
-            paper_ids=paper_ids,
+            paper_ids=retrieval_paper_ids,
             retrieval_query=retrieval_query,
             target_chunks=target_chunks,
             retrieval_facets=retrieval_facets,
@@ -1187,7 +1263,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             diagnostics,
             evidence=evidence,
             plan=plan,
-            required_paper_ids=paper_ids,
+            required_paper_ids=required_paper_ids,
             required_chunk_refs=target_chunks,
         )
         sufficient = bool(evaluation["sufficient"])
@@ -1227,7 +1303,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                     research_agent.retrieve_evidence,
                     task,
                     history=history,
-                    paper_ids=paper_ids,
+                    paper_ids=retrieval_paper_ids,
                     retrieval_query=retrieval_query,
                     target_chunks=target_chunks,
                     retrieval_facets=refinement_facets,
@@ -1242,7 +1318,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                     diagnostics,
                     evidence=evidence,
                     plan=plan,
-                    required_paper_ids=paper_ids,
+                    required_paper_ids=required_paper_ids,
                     required_chunk_refs=target_chunks,
                 )
                 sufficient = bool(evaluation["sufficient"])
@@ -1380,7 +1456,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             )
 
         full_text_available = bool(diagnostics.get("fullTextAvailable"))
-        if not sufficient and full_text_available and paper_ids:
+        if not sufficient and full_text_available and retrieval_paper_ids:
             self._log("本地全文已存在但部分深层细节仍未完全覆盖，将基于现有证据生成有边界的回答")
             trace.append(
                 {
@@ -1458,7 +1534,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                     research_agent.run,
                     task,
                     history=history,
-                    paper_ids=paper_ids,
+                    paper_ids=retrieval_paper_ids,
                     retrieval_query=retrieval_query,
                     evidence=evidence,
                     answer_requirements=list(plan.get("coreRequirements") or plan.get("answerRequirements") or []),

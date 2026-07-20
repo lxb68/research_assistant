@@ -236,6 +236,93 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
         self.assertIn("predicate 必须使用原文语言", prompt)
         self.assertIn("evidenceQuote 必须保持原文语言", prompt)
 
+    def test_dynamically_merges_equivalent_entity_types_without_fixed_taxonomy(self) -> None:
+        """类型归并应依据本次模型映射合并大小写与跨语言等价标签。"""
+        def fake_chat(*args: object, **kwargs: object) -> str:
+            messages = args[1]
+            self.assertIn("知识图谱类型归并器", messages[0]["content"])
+            return json.dumps(
+                {
+                    "groups": [
+                        {"canonical": "algorithm", "members": ["algorithm", "算法"]},
+                        {"canonical": "dataset", "members": ["dataset"]},
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+        entities = [
+            {"name": "A", "type": "Algorithm", "typeCounts": {"Algorithm": 1}},
+            {"name": "B", "type": "algorithm", "typeCounts": {"algorithm": 1}},
+            {"name": "C", "type": "算法", "typeCounts": {"算法": 1}},
+            {"name": "D", "type": "Dataset", "typeCounts": {"Dataset": 1}},
+        ]
+        extractor = SemanticGraphExtractor({"model": "test"}, chat_fn=fake_chat)
+
+        stats = extractor._canonicalize_entity_types(entities)
+
+        self.assertEqual([entity["type"] for entity in entities], ["algorithm", "algorithm", "algorithm", "dataset"])
+        self.assertEqual(stats["entityTypeCountBefore"], 4)
+        self.assertEqual(stats["entityTypeCountAfter"], 2)
+        self.assertEqual(stats["entityTypeNormalizationMode"], "dynamic_model")
+        self.assertEqual(entities[0]["rawTypes"], ["Algorithm"])
+
+    def test_type_normalization_falls_back_without_guessing_semantic_synonyms(self) -> None:
+        """没有模型时只统一表面形式，不通过固定词表猜测跨语言同义词。"""
+        entities = [
+            {"name": "A", "type": "Algorithm", "typeCounts": {"Algorithm": 1}},
+            {"name": "B", "type": "algorithm", "typeCounts": {"algorithm": 1}},
+            {"name": "C", "type": "算法", "typeCounts": {"算法": 1}},
+        ]
+        extractor = SemanticGraphExtractor(None)
+
+        stats = extractor._canonicalize_entity_types(entities)
+
+        self.assertEqual([entity["type"] for entity in entities], ["algorithm", "algorithm", "算法"])
+        self.assertEqual(stats["entityTypeCountAfter"], 2)
+        self.assertEqual(stats["entityTypeNormalizationMode"], "deterministic")
+
+    def test_reuses_dynamic_type_mapping_cache(self) -> None:
+        """相同模型和类型集合不应重复请求类型归并。"""
+        calls = 0
+
+        def fake_chat(*args: object, **kwargs: object) -> str:
+            nonlocal calls
+            calls += 1
+            return json.dumps(
+                {"groups": [{"canonical": "algorithm", "members": ["algorithm", "算法"]}]},
+                ensure_ascii=False,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            extractor = SemanticGraphExtractor(
+                {"model": "test", "provider": "custom"},
+                chat_fn=fake_chat,
+                cache_dir=directory,
+            )
+            for _ in range(2):
+                entities = [
+                    {"name": "A", "type": "Algorithm", "typeCounts": {"Algorithm": 1}},
+                    {"name": "B", "type": "算法", "typeCounts": {"算法": 1}},
+                ]
+                extractor._canonicalize_entity_types(entities)
+                self.assertEqual([entity["type"] for entity in entities], ["algorithm", "algorithm"])
+
+        self.assertEqual(calls, 1)
+
+    def test_rejects_type_mapping_that_invents_a_taxonomy_label(self) -> None:
+        """模型不得把动态归并变成引入新类型的隐式固定分类体系。"""
+        extractor = SemanticGraphExtractor(None)
+        mapping = extractor._validate_type_mapping(
+            {
+                "groups": [
+                    {"canonical": "technique", "members": ["algorithm", "算法"]},
+                ]
+            },
+            ["algorithm", "算法"],
+        )
+        self.assertIsNone(mapping)
+
     def test_reuses_persistent_chunk_cache(self) -> None:
         """相同模型和原文的第二次抽取应直接复用磁盘缓存。"""
         calls = 0

@@ -102,8 +102,16 @@ class ProjectIsolationTest(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(arguments["paper_ids"], ["paper-a"])
+        self.assertEqual(arguments["paper_ids"], [])
+        self.assertEqual(arguments["authorized_paper_ids"], ["paper-a"])
         self.assertEqual(arguments["history"][0]["sources"], [{"record_id": "paper-a", "index": 1}])
+        explicit_arguments = scope.build_research_arguments(
+            project_id=project["id"],
+            requested_paper_ids=["paper-a"],
+            history=[],
+        )
+        self.assertEqual(explicit_arguments["paper_ids"], ["paper-a"])
+        self.assertEqual(explicit_arguments["authorized_paper_ids"], ["paper-a"])
         with self.assertRaises(ValueError):
             scope.build_research_arguments(
                 project_id=project["id"],
@@ -124,7 +132,8 @@ class ProjectIsolationTest(unittest.TestCase):
         )
 
         self.assertEqual(arguments["project_ids"], [project_a["id"], project_b["id"]])
-        self.assertEqual(arguments["paper_ids"], ["paper-a", "paper-b"])
+        self.assertEqual(arguments["paper_ids"], [])
+        self.assertEqual(arguments["authorized_paper_ids"], ["paper-a", "paper-b"])
         self.assertEqual(arguments["project_paper_ids"], ["paper-a", "paper-b"])
         self.assertEqual(arguments["graph_project_id"], "")
 

@@ -214,6 +214,21 @@ type ReadableGraphDocument = {
   sections: string[];
 };
 
+type KnowledgeBrowserRelation = {
+  id: string;
+  sourceId: string;
+  sourceName: string;
+  sourceType: string;
+  targetId: string;
+  targetName: string;
+  targetType: string;
+  predicate: string;
+  relationType: string;
+  confidence?: number;
+  evidence: SemanticEvidence[];
+  documentIds: string[];
+};
+
 const RELATION_TYPE_LABELS: Record<string, string> = {
   general: "一般关系",
   causal: "因果关系",
@@ -433,6 +448,13 @@ function DomainTreeProjectPage({
   const [selectedSecondaryKey, setSelectedSecondaryKey] = useState("");
   const [selectedSecondaryLabel, setSelectedSecondaryLabel] = useState("");
   const [matchedChunks, setMatchedChunks] = useState<ChunkMatch[]>([]);
+  const [graphQuery, setGraphQuery] = useState("");
+  const [graphEntityType, setGraphEntityType] = useState("all");
+  const [graphRelationType, setGraphRelationType] = useState("all");
+  const [graphDocumentId, setGraphDocumentId] = useState("all");
+  const [graphDomain, setGraphDomain] = useState("all");
+  const [selectedGraphRelationId, setSelectedGraphRelationId] = useState("");
+  const [visibleGraphRelationCount, setVisibleGraphRelationCount] = useState(20);
 
   const markdownReadyPapers = useMemo(
     () => papers.filter((paper) => Boolean(paper.id && (paper.markdownPath || paper.markdownOutputDir))),
@@ -641,6 +663,150 @@ function DomainTreeProjectPage({
       extraction: graph?.extraction,
     };
   }, [result]);
+
+  const knowledgeBrowser = useMemo(() => {
+    const graph = result?.knowledgeGraph;
+    const nodes = graph?.nodes ?? [];
+    const entities = graph?.entities ?? [];
+    const evidence = graph?.evidence ?? [];
+    const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+    const entityMap = new Map(entities.map((entity) => [entity.id, entity]));
+    const evidenceMap = new Map(evidence.map((item) => [item.id, item]));
+
+    const semanticRelations: KnowledgeBrowserRelation[] = (graph?.semanticRelations ?? []).map((relation) => {
+      const relationEvidence = (relation.evidenceIds ?? [])
+        .map((evidenceId) => evidenceMap.get(evidenceId))
+        .filter((item): item is SemanticEvidence => Boolean(item));
+      const source = entityMap.get(relation.source);
+      const target = entityMap.get(relation.target);
+      return {
+        id: relation.id,
+        sourceId: relation.source,
+        sourceName: source?.name || relation.source,
+        sourceType: source?.type || "未分类实体",
+        targetId: relation.target,
+        targetName: target?.name || relation.target,
+        targetType: target?.type || "未分类实体",
+        predicate: relation.predicate || "关联",
+        relationType: relation.relationType || "general",
+        confidence: relation.confidence,
+        evidence: relationEvidence,
+        documentIds: uniqueStrings([
+          ...(relation.documentIds ?? []),
+          ...relationEvidence.map((item) => item.documentId),
+        ]).map((documentId) => documentId.replace(/^doc:/, "")),
+      };
+    });
+
+    // 兼容尚未重建语义层的历史图谱，至少让结构边可被检索和阅读。
+    const structuralRelations: KnowledgeBrowserRelation[] = (graph?.edges ?? []).map((edge, index) => {
+      const source = nodeMap.get(edge.source);
+      const target = nodeMap.get(edge.target);
+      const relationEvidence = (edge.evidenceIds ?? [])
+        .map((evidenceId) => evidenceMap.get(evidenceId))
+        .filter((item): item is SemanticEvidence => Boolean(item));
+      const endpointDocumentIds = [source, target]
+        .filter((node): node is GraphNode => Boolean(node?.type === "document"))
+        .map((node) => node.id.replace(/^doc:/, ""));
+      return {
+        id: `structure-${edge.source}-${edge.target}-${index}`,
+        sourceId: edge.source,
+        sourceName: source?.name || edge.source,
+        sourceType: source?.type || "未知节点",
+        targetId: edge.target,
+        targetName: target?.name || edge.target,
+        targetType: target?.type || "未知节点",
+        predicate: edge.predicate || edge.relation || "关联",
+        relationType: edge.relationType || edge.relation || "general",
+        confidence: edge.confidence,
+        evidence: relationEvidence,
+        documentIds: uniqueStrings([
+          ...endpointDocumentIds,
+          ...relationEvidence.map((item) => item.documentId.replace(/^doc:/, "")),
+        ]),
+      };
+    });
+
+    const relations = semanticRelations.length > 0 ? semanticRelations : structuralRelations;
+    const entityTypes = uniqueStrings(relations.flatMap((relation) => [relation.sourceType, relation.targetType]))
+      .sort((left, right) => left.localeCompare(right, "zh-CN"));
+    const relationTypes = uniqueStrings(relations.map((relation) => relation.relationType))
+      .sort((left, right) => left.localeCompare(right, "zh-CN"));
+    const documentTitleMap = new Map<string, string>();
+    for (const document of result?.manifest?.documents ?? []) {
+      documentTitleMap.set(document.recordId.replace(/^doc:/, ""), document.title || document.recordId);
+    }
+    for (const document of readableGraph.documents) {
+      documentTitleMap.set(document.id.replace(/^doc:/, ""), document.title);
+    }
+    for (const relation of relations) {
+      for (const documentId of relation.documentIds) {
+        if (!documentTitleMap.has(documentId)) {
+          documentTitleMap.set(documentId, documentId);
+        }
+      }
+    }
+
+    return {
+      relations,
+      entityMap,
+      entityTypes,
+      relationTypes,
+      documentOptions: Array.from(documentTitleMap, ([id, title]) => ({ id, title }))
+        .sort((left, right) => left.title.localeCompare(right.title, "zh-CN")),
+      domainOptions: readableGraph.domains.map((domain) => domain.name),
+    };
+  }, [readableGraph, result]);
+
+  const filteredGraphRelations = useMemo(() => {
+    const normalizedQuery = graphQuery.trim().toLowerCase();
+    const domainDocumentIds = graphDomain === "all"
+      ? null
+      : new Set(
+          readableGraph.documents
+            .filter((document) => document.domains.includes(graphDomain))
+            .map((document) => document.id.replace(/^doc:/, "")),
+        );
+
+    return knowledgeBrowser.relations.filter((relation) => {
+      if (graphEntityType !== "all" && relation.sourceType !== graphEntityType && relation.targetType !== graphEntityType) {
+        return false;
+      }
+      if (graphRelationType !== "all" && relation.relationType !== graphRelationType) {
+        return false;
+      }
+      if (graphDocumentId !== "all" && !relation.documentIds.includes(graphDocumentId)) {
+        return false;
+      }
+      if (domainDocumentIds && !relation.documentIds.some((documentId) => domainDocumentIds.has(documentId))) {
+        return false;
+      }
+      if (!normalizedQuery) {
+        return true;
+      }
+      return [relation.sourceName, relation.targetName, relation.predicate, relation.sourceType, relation.targetType]
+        .some((value) => value.toLowerCase().includes(normalizedQuery));
+    });
+  }, [graphDocumentId, graphDomain, graphEntityType, graphQuery, graphRelationType, knowledgeBrowser.relations, readableGraph.documents]);
+
+  const selectedGraphRelation = filteredGraphRelations.find((relation) => relation.id === selectedGraphRelationId)
+    ?? filteredGraphRelations[0]
+    ?? null;
+
+  const selectedGraphContext = useMemo(() => {
+    if (!selectedGraphRelation) {
+      return null;
+    }
+    const documentIdSet = new Set(selectedGraphRelation.documentIds);
+    return {
+      source: knowledgeBrowser.entityMap.get(selectedGraphRelation.sourceId),
+      target: knowledgeBrowser.entityMap.get(selectedGraphRelation.targetId),
+      documents: knowledgeBrowser.documentOptions.filter((document) => documentIdSet.has(document.id)),
+      citations: semanticOverview.citations
+        .filter((citation) => documentIdSet.has(citation.documentId.replace(/^doc:/, "")))
+        .slice(0, 6),
+    };
+  }, [knowledgeBrowser.documentOptions, knowledgeBrowser.entityMap, selectedGraphRelation, semanticOverview.citations]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1221,6 +1387,7 @@ function DomainTreeProjectPage({
         </div>
 
         {viewMode === "project" ? (
+          <>
           <ProjectLiteraturePanel
             projects={projects}
             activeProjectId={activeProjectId}
@@ -1262,10 +1429,6 @@ function DomainTreeProjectPage({
             }}
             onSaveMembers={() => void handleSaveProjectMembers()}
           />
-        ) : null}
-
-        {viewMode !== "project" ? (
-          <>
 
         {isModelConfigurationMissing && !isLoadingModelStatus ? (
           <div className="domain-tree-empty domain-tree-config-empty">
@@ -1429,7 +1592,11 @@ function DomainTreeProjectPage({
             <span>{error}</span>
           </div>
         ) : null}
+          </>
+        ) : null}
 
+        {viewMode !== "project" ? (
+          <>
         {isLoadingPapers || isLoadingExisting ? (
           <div className="domain-tree-empty">
             <strong>正在准备数据...</strong>
@@ -1531,255 +1698,268 @@ function DomainTreeProjectPage({
           </DomainTreePanel>
         ) : (
           <KnowledgeGraphPanel>
-          <div className="domain-tree-graph-page">
-            <article className="domain-tree-card">
-              <div className="domain-tree-card-head">
-                <div>
-                  <p>知识图谱</p>
-                  <h2>可读版结构概览</h2>
-                </div>
-                <div className="domain-tree-meta">
-                  <span>{graphStats.nodeCount} 个节点</span>
-                  <span>{graphStats.edgeCount} 条关系</span>
-                </div>
-              </div>
-
-              <div className="domain-tree-graph-summary">
-                {Object.entries(graphStats.typeSummary).map(([type, count]) => (
-                  <div key={type} className="domain-tree-chip">
-                    <strong>{count}</strong>
-                    <span>{type}</span>
-                  </div>
-                ))}
-              </div>
-
-              <div className="domain-tree-readable-grid">
-                <section className="domain-tree-readable-column">
-                  <article className="domain-tree-readable-card">
-                    <div className="domain-tree-card-head">
-                      <div>
-                        <p>领域结构</p>
-                        <h2>主题与子方向</h2>
-                      </div>
-                    </div>
-                    <div className="domain-tree-readable-stack">
-                      {readableGraph.domains.map((domain) => (
-                        <article key={domain.id} className="domain-tree-readable-item">
-                          <strong>{domain.name}</strong>
-                          {domain.subdomains.length > 0 ? (
-                            <div className="domain-tree-readable-tags">
-                              {domain.subdomains.map((subdomain) => (
-                                <span key={`${domain.id}-sub-${subdomain}`}>{subdomain}</span>
-                              ))}
-                            </div>
-                          ) : (
-                            <span className="domain-tree-readable-empty">暂无细分子方向</span>
-                          )}
-                        </article>
-                      ))}
-                    </div>
-                  </article>
-
-                  <article className="domain-tree-readable-card">
-                    <div className="domain-tree-card-head">
-                      <div>
-                        <p>关系摘要</p>
-                        <h2>图谱里实际连接了什么</h2>
-                      </div>
-                    </div>
-                    <div className="domain-tree-readable-stack">
-                      {readableGraph.relationSummary.map((item) => (
-                        <article key={item.label} className="domain-tree-readable-item">
-                          <strong>{item.label}</strong>
-                          <span>{item.count} 条</span>
-                        </article>
-                      ))}
-                    </div>
-                  </article>
-                </section>
-
-                <section className="domain-tree-readable-column">
-                  <article className="domain-tree-readable-card">
-                    <div className="domain-tree-card-head">
-                      <div>
-                        <p>文献关联</p>
-                        <h2>每篇文献在图谱中的定位</h2>
-                      </div>
-                    </div>
-                    <div className="domain-tree-readable-stack">
-                      {readableGraph.documents.map((document) => (
-                        <article key={document.id} className="domain-tree-readable-item">
-                          <strong>{document.title}</strong>
-                          {document.domains.length > 0 ? (
-                            <div className="domain-tree-readable-meta">
-                              <label>所属领域</label>
-                              <div className="domain-tree-readable-tags">
-                                {document.domains.map((domain) => (
-                                  <span key={`${document.id}-domain-${domain}`}>{domain}</span>
-                                ))}
-                              </div>
-                            </div>
-                          ) : null}
-                          {document.topics.length > 0 ? (
-                            <div className="domain-tree-readable-meta">
-                              <label>命中主题</label>
-                              <div className="domain-tree-readable-tags">
-                                {document.topics.slice(0, 8).map((topic) => (
-                                  <span key={`${document.id}-topic-${topic}`}>{topic}</span>
-                                ))}
-                              </div>
-                            </div>
-                          ) : null}
-                          {document.sections.length > 0 ? (
-                            <div className="domain-tree-readable-meta">
-                              <label>关键章节</label>
-                              <ul className="domain-tree-readable-list">
-                                {document.sections.map((section) => (
-                                  <li key={`${document.id}-section-${section}`}>{section}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          ) : (
-                            <span className="domain-tree-readable-empty">当前没有章节级关联信息</span>
-                          )}
-                        </article>
-                      ))}
-                    </div>
-                  </article>
-                </section>
-              </div>
-
-              <div className="domain-tree-semantic-section">
-                <div className="domain-tree-card-head">
+            <div className="domain-tree-graph-page">
+              <article className="domain-tree-card knowledge-browser">
+                <header className="knowledge-browser-header">
                   <div>
-                    <p>全文语义层</p>
-                    <h2>实体、关系、原文证据与引用</h2>
+                    <p>知识图谱</p>
+                    <h2>关系浏览器</h2>
+                    <span>筛选关系后，在右侧核对实体属性、关联文献和原文证据。</span>
                   </div>
-                  {semanticOverview.extraction ? (
-                    <div className="domain-tree-meta">
-                      <span>{semanticOverview.extraction.processedChunkCount ?? 0} 个成功分块</span>
-                      <span>{semanticOverview.extraction.failedChunkCount ?? 0} 个失败分块</span>
-                      <span>{semanticOverview.extraction.evidenceCount ?? 0} 条证据</span>
+                  <div className="knowledge-browser-metrics" aria-label="知识图谱概览">
+                    <div><span>节点</span><strong>{graphStats.nodeCount}</strong></div>
+                    <div><span>可读关系</span><strong>{knowledgeBrowser.relations.length}</strong></div>
+                    <div><span>文献</span><strong>{knowledgeBrowser.documentOptions.length}</strong></div>
+                    <div><span>证据</span><strong>{semanticOverview.extraction?.evidenceCount ?? 0}</strong></div>
+                  </div>
+                </header>
+
+                <div className="knowledge-browser-layout">
+                  <aside className="knowledge-browser-filters" aria-label="关系筛选">
+                    <div className="knowledge-browser-section-head">
+                      <div><span>浏览范围</span><strong>筛选</strong></div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGraphQuery("");
+                          setGraphEntityType("all");
+                          setGraphRelationType("all");
+                          setGraphDocumentId("all");
+                          setGraphDomain("all");
+                          setVisibleGraphRelationCount(20);
+                        }}
+                      >
+                        重置
+                      </button>
                     </div>
-                  ) : null}
+                    <label>
+                      <span>搜索实体或关系</span>
+                      <input
+                        value={graphQuery}
+                        onChange={(event) => {
+                          setGraphQuery(event.target.value);
+                          setVisibleGraphRelationCount(20);
+                        }}
+                        placeholder="输入名称或关系词"
+                      />
+                    </label>
+                    <label>
+                      <span>实体类型</span>
+                      <select
+                        value={graphEntityType}
+                        onChange={(event) => {
+                          setGraphEntityType(event.target.value);
+                          setVisibleGraphRelationCount(20);
+                        }}
+                      >
+                        <option value="all">全部实体类型</option>
+                        {knowledgeBrowser.entityTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      <span>关系类型</span>
+                      <select
+                        value={graphRelationType}
+                        onChange={(event) => {
+                          setGraphRelationType(event.target.value);
+                          setVisibleGraphRelationCount(20);
+                        }}
+                      >
+                        <option value="all">全部关系类型</option>
+                        {knowledgeBrowser.relationTypes.map((type) => (
+                          <option key={type} value={type}>{RELATION_TYPE_LABELS[type] ?? type}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>研究领域</span>
+                      <select
+                        value={graphDomain}
+                        onChange={(event) => {
+                          setGraphDomain(event.target.value);
+                          setVisibleGraphRelationCount(20);
+                        }}
+                      >
+                        <option value="all">全部领域</option>
+                        {knowledgeBrowser.domainOptions.map((domain) => <option key={domain} value={domain}>{domain}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      <span>关联文献</span>
+                      <select
+                        value={graphDocumentId}
+                        onChange={(event) => {
+                          setGraphDocumentId(event.target.value);
+                          setVisibleGraphRelationCount(20);
+                        }}
+                      >
+                        <option value="all">全部文献</option>
+                        {knowledgeBrowser.documentOptions.map((document) => (
+                          <option key={document.id} value={document.id}>{document.title}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="knowledge-browser-type-summary">
+                      <span>节点构成</span>
+                      {Object.entries(graphStats.typeSummary).map(([type, count]) => (
+                        <div key={type}><span>{type}</span><strong>{count}</strong></div>
+                      ))}
+                    </div>
+                  </aside>
+
+                  <section className="knowledge-browser-relations" aria-label="关系列表">
+                    <div className="knowledge-browser-section-head">
+                      <div><span>匹配结果</span><strong>关系列表</strong></div>
+                      <span>{filteredGraphRelations.length} 条</span>
+                    </div>
+                    {filteredGraphRelations.length === 0 ? (
+                      <div className="knowledge-browser-empty">
+                        <strong>没有符合条件的关系</strong>
+                        <span>尝试减少筛选条件或更换搜索词。</span>
+                      </div>
+                    ) : (
+                      <div className="knowledge-browser-relation-list">
+                        {filteredGraphRelations.slice(0, visibleGraphRelationCount).map((relation) => (
+                          <button
+                            key={relation.id}
+                            type="button"
+                            className={`knowledge-browser-relation-row${selectedGraphRelation?.id === relation.id ? " is-active" : ""}`}
+                            onClick={() => setSelectedGraphRelationId(relation.id)}
+                          >
+                            <span className="knowledge-browser-entity">
+                              <strong>{relation.sourceName}</strong>
+                              <small>{relation.sourceType}</small>
+                            </span>
+                            <span className="knowledge-browser-predicate">
+                              <small>{RELATION_TYPE_LABELS[relation.relationType] ?? relation.relationType}</small>
+                              <strong>— {relation.predicate} →</strong>
+                            </span>
+                            <span className="knowledge-browser-entity">
+                              <strong>{relation.targetName}</strong>
+                              <small>{relation.targetType}</small>
+                            </span>
+                            <span className="knowledge-browser-row-meta">
+                              {relation.confidence === undefined ? "结构关系" : `置信度 ${Math.round(relation.confidence * 100)}%`}
+                              {relation.evidence.length > 0 ? ` · ${relation.evidence.length} 条证据` : ""}
+                            </span>
+                          </button>
+                        ))}
+                        {visibleGraphRelationCount < filteredGraphRelations.length ? (
+                          <button
+                            type="button"
+                            className="knowledge-browser-more"
+                            onClick={() => setVisibleGraphRelationCount((count) => count + 20)}
+                          >
+                            再显示 {Math.min(20, filteredGraphRelations.length - visibleGraphRelationCount)} 条
+                          </button>
+                        ) : null}
+                      </div>
+                    )}
+                  </section>
+
+                  <aside className="knowledge-browser-detail" aria-label="关系详情">
+                    <div className="knowledge-browser-section-head">
+                      <div><span>当前选择</span><strong>详情</strong></div>
+                    </div>
+                    {!selectedGraphRelation || !selectedGraphContext ? (
+                      <div className="knowledge-browser-empty">
+                        <strong>尚未选择关系</strong>
+                        <span>从中间列表选择一条关系后查看详细依据。</span>
+                      </div>
+                    ) : (
+                      <div className="knowledge-browser-detail-stack">
+                        <section className="knowledge-browser-detail-summary">
+                          <span>{RELATION_TYPE_LABELS[selectedGraphRelation.relationType] ?? selectedGraphRelation.relationType}</span>
+                          <strong>{selectedGraphRelation.sourceName} —{selectedGraphRelation.predicate}→ {selectedGraphRelation.targetName}</strong>
+                          {selectedGraphRelation.confidence !== undefined ? (
+                            <small>置信度 {Math.round(selectedGraphRelation.confidence * 100)}%</small>
+                          ) : null}
+                        </section>
+
+                        <section>
+                          <h3>实体属性</h3>
+                          <div className="knowledge-browser-endpoints">
+                            {[
+                              { role: "起点", id: selectedGraphRelation.sourceId, entity: selectedGraphContext.source, fallbackName: selectedGraphRelation.sourceName, fallbackType: selectedGraphRelation.sourceType },
+                              { role: "终点", id: selectedGraphRelation.targetId, entity: selectedGraphContext.target, fallbackName: selectedGraphRelation.targetName, fallbackType: selectedGraphRelation.targetType },
+                            ].map((item) => (
+                              <article key={`${item.role}-${item.id}`}>
+                                <span>{item.role} · {item.entity?.type || item.fallbackType}</span>
+                                <strong>{item.entity?.name || item.fallbackName}</strong>
+                                {(item.entity?.aliases ?? []).length > 0 ? <small>别名：{item.entity?.aliases?.join("、")}</small> : null}
+                                {(item.entity?.attributes ?? []).map((attribute, index) => (
+                                  <small key={`${item.id}-attribute-${index}`}>
+                                    {attribute.name}：{attribute.value}{attribute.unit ? ` ${attribute.unit}` : ""}
+                                  </small>
+                                ))}
+                              </article>
+                            ))}
+                          </div>
+                        </section>
+
+                        <section>
+                          <h3>关联文献</h3>
+                          {selectedGraphContext.documents.length > 0 ? (
+                            <ul className="knowledge-browser-document-list">
+                              {selectedGraphContext.documents.map((document) => <li key={document.id}>{document.title}</li>)}
+                            </ul>
+                          ) : <span className="domain-tree-readable-empty">当前关系未记录文献来源。</span>}
+                        </section>
+
+                        <section>
+                          <h3>原文证据</h3>
+                          {selectedGraphRelation.evidence.length > 0 ? selectedGraphRelation.evidence.map((item) => (
+                            <blockquote key={item.id} className="domain-tree-evidence-quote">
+                              <span>{item.section || "正文"} · 第 {item.lineStart ?? "?"} 行</span>
+                              {item.quote}
+                            </blockquote>
+                          )) : <span className="domain-tree-readable-empty">当前关系没有可展示的原文证据。</span>}
+                        </section>
+
+                        {selectedGraphContext.citations.length > 0 ? (
+                          <section>
+                            <h3>相关引用</h3>
+                            <div className="knowledge-browser-citations">
+                              {selectedGraphContext.citations.map((citation) => (
+                                <article key={citation.id}>
+                                  <strong>{citation.marker} {citation.title || "未识别标题"}</strong>
+                                  <span>{citation.documentTitle}{citation.year ? ` · ${citation.year}` : ""}</span>
+                                </article>
+                              ))}
+                            </div>
+                          </section>
+                        ) : null}
+                      </div>
+                    )}
+                  </aside>
                 </div>
 
-                {semanticOverview.entities.length === 0 && semanticOverview.citations.length === 0 ? (
-                  <div className="domain-tree-empty">
-                    <strong>当前图谱尚未包含全文语义层</strong>
-                    <span>重新构建领域树后，系统会从 Markdown 全文抽取实体关系、原文证据和引用。</span>
-                  </div>
-                ) : (
-                  <div className="domain-tree-readable-grid">
-                    <section className="domain-tree-readable-column">
-                      <article className="domain-tree-readable-card">
-                        <div className="domain-tree-card-head">
-                          <div>
-                            <p>实体清单</p>
-                            <h2>{semanticOverview.entities.length} 个规范化实体</h2>
-                          </div>
-                        </div>
-                        <div className="domain-tree-graph-summary">
-                          {Object.entries(semanticOverview.entityTypes).map(([type, count]) => (
-                            <div key={type} className="domain-tree-chip">
-                              <strong>{count}</strong>
-                              <span>{type}</span>
-                            </div>
-                          ))}
-                        </div>
-                        <div className="domain-tree-readable-stack">
-                          {semanticOverview.entities.slice(0, 80).map((entity) => (
-                            <article key={entity.id} className="domain-tree-readable-item">
-                              <strong>{entity.name}</strong>
-                              <span>{entity.type || "未分类实体"}</span>
-                              {(entity.aliases ?? []).length > 0 ? (
-                                <div className="domain-tree-readable-tags">
-                                  {(entity.aliases ?? []).map((alias) => (
-                                    <span key={`${entity.id}-alias-${alias}`}>{alias}</span>
-                                  ))}
-                                </div>
-                              ) : null}
-                              {(entity.attributes ?? []).length > 0 ? (
-                                <ul className="domain-tree-readable-list">
-                                  {(entity.attributes ?? []).map((attribute, index) => (
-                                    <li key={`${entity.id}-attribute-${index}`}>
-                                      {attribute.name}：{attribute.value}{attribute.unit ? ` ${attribute.unit}` : ""}
-                                    </li>
-                                  ))}
-                                </ul>
-                              ) : null}
-                            </article>
-                          ))}
-                        </div>
-                        {semanticOverview.entities.length > 80 ? (
-                          <span className="domain-tree-readable-empty">为保证页面流畅，此处展示前 80 个实体，完整数据保存在图谱结果中。</span>
-                        ) : null}
-                      </article>
-
-                      <article className="domain-tree-readable-card">
-                        <div className="domain-tree-card-head">
-                          <div>
-                            <p>引用解析</p>
-                            <h2>{semanticOverview.citations.length} 条参考文献</h2>
-                          </div>
-                        </div>
-                        <div className="domain-tree-readable-stack">
-                          {semanticOverview.citations.slice(0, 80).map((citation) => (
-                            <article key={citation.id} className="domain-tree-readable-item">
-                              <strong>{citation.marker} {citation.title || "未识别标题"}</strong>
-                              <span>
-                                来源：{citation.documentTitle}
-                                {citation.year ? ` · ${citation.year}` : ""}
-                                {citation.matchedDocumentId ? " · 已链接本地文献" : ""}
-                              </span>
-                              {citation.doi ? <span>DOI：{citation.doi}</span> : null}
-                              {(citation.contexts ?? []).slice(0, 2).map((context, index) => (
-                                <blockquote key={`${citation.id}-context-${index}`} className="domain-tree-evidence-quote">
-                                  <span>{context.section || "正文"} · 第 {context.lineStart ?? "?"} 行</span>
-                                  {context.quote}
-                                </blockquote>
-                              ))}
-                            </article>
-                          ))}
-                        </div>
-                      </article>
-                    </section>
-
-                    <section className="domain-tree-readable-column">
-                      <article className="domain-tree-readable-card">
-                        <div className="domain-tree-card-head">
-                          <div>
-                            <p>语义三元组</p>
-                            <h2>{semanticOverview.relations.length} 条实体关系</h2>
-                          </div>
-                        </div>
-                        <div className="domain-tree-readable-stack">
-                          {semanticOverview.relations.slice(0, 100).map((relation) => (
-                            <article key={relation.id} className="domain-tree-readable-item">
-                              <strong>{relation.sourceName} —{relation.predicate}→ {relation.targetName}</strong>
-                              <span>
-                                {RELATION_TYPE_LABELS[relation.relationType] ?? relation.relationType}
-                                {` · 置信度 ${Math.round((relation.confidence ?? 0) * 100)}%`}
-                              </span>
-                              {relation.evidence.slice(0, 3).map((item) => (
-                                <blockquote key={item.id} className="domain-tree-evidence-quote">
-                                  <span>{item.section || "正文"} · 第 {item.lineStart ?? "?"} 行</span>
-                                  {item.quote}
-                                </blockquote>
-                              ))}
-                            </article>
-                          ))}
-                        </div>
-                        {semanticOverview.relations.length > 100 ? (
-                          <span className="domain-tree-readable-empty">为保证页面流畅，此处展示前 100 条关系，完整数据保存在图谱结果中。</span>
-                        ) : null}
-                      </article>
-                    </section>
-                  </div>
-                )}
-              </div>
-            </article>
-          </div>
+                <div className="knowledge-browser-supporting">
+                  <details>
+                    <summary>领域结构 <span>{readableGraph.domains.length} 个领域</span></summary>
+                    <div className="knowledge-browser-supporting-grid">
+                      {readableGraph.domains.map((domain) => (
+                        <article key={domain.id}>
+                          <strong>{domain.name}</strong>
+                          <span>{domain.subdomains.length > 0 ? domain.subdomains.join("、") : "暂无细分子方向"}</span>
+                        </article>
+                      ))}
+                    </div>
+                  </details>
+                  <details>
+                    <summary>文献定位 <span>{readableGraph.documents.length} 篇文献</span></summary>
+                    <div className="knowledge-browser-supporting-grid">
+                      {readableGraph.documents.map((document) => (
+                        <article key={document.id}>
+                          <strong>{document.title}</strong>
+                          <span>{document.domains.length > 0 ? document.domains.join("、") : "暂未匹配领域"}</span>
+                        </article>
+                      ))}
+                    </div>
+                  </details>
+                </div>
+              </article>
+            </div>
           </KnowledgeGraphPanel>
         )}
           </>

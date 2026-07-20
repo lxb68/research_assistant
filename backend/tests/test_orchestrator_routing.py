@@ -437,6 +437,117 @@ class OrchestratorRoutingTest(unittest.IsolatedAsyncioTestCase):
         )
 
     @patch("app.agents.orchestrator_agent.ResearchChatAgent")
+    async def test_planner_target_is_not_overridden_by_authorized_project_scope(
+        self,
+        research_agent_class: Mock,
+    ) -> None:
+        """项目授权范围只限制访问，不能覆盖规划器解析出的单篇目标。"""
+        research_agent = research_agent_class.return_value
+        research_agent.plan_retrieval.return_value = (
+            {
+                "standaloneQuestion": "CamVLA 如何实现自我定位？",
+                "targetPaperIds": ["paper-target"],
+                "targetChunks": [],
+                "needsClarification": False,
+            },
+            "{}",
+        )
+        evidence = [
+            {"record_id": "paper-target", "chunk_index": 1, "title": "Target", "text": "evidence", "score": 1.0},
+        ]
+        research_agent.retrieve_evidence.return_value = (
+            evidence,
+            {"paperCount": 1, "evidenceCount": 1, "selectedPaperIds": ["paper-target"]},
+        )
+        research_agent.run.return_value = {"answer": "回答 [1]", "sources": []}
+        agent = OrchestratorAgent()
+        agent.run_logger = Mock()
+        agent._evaluate_retrieved_evidence = AsyncMock(return_value={"sufficient": True, "reasons": []})
+
+        result = await agent._run_research_pipeline(
+            "CamVLM 如何实现自我定位？",
+            {
+                "paper_ids": [],
+                "authorized_paper_ids": ["paper-target", "paper-other"],
+                "allow_external_search": False,
+            },
+        )
+
+        self.assertEqual(result["action"], "chat")
+        self.assertIsNone(research_agent.plan_retrieval.call_args.kwargs["explicit_paper_ids"])
+        self.assertEqual(research_agent.retrieve_evidence.call_args.kwargs["paper_ids"], ["paper-target"])
+        self.assertEqual(
+            agent._evaluate_retrieved_evidence.call_args.kwargs["required_paper_ids"],
+            ["paper-target"],
+        )
+
+    @patch("app.agents.orchestrator_agent.ResearchChatAgent")
+    async def test_authorized_scope_is_searchable_without_becoming_required_coverage(
+        self,
+        research_agent_class: Mock,
+    ) -> None:
+        """没有解析出具体目标时检索全部授权论文，但不要求逐篇覆盖。"""
+        research_agent = research_agent_class.return_value
+        research_agent.plan_retrieval.return_value = (
+            {
+                "standaloneQuestion": "这些论文有哪些共同结论？",
+                "targetPaperIds": [],
+                "targetChunks": [],
+                "needsClarification": False,
+            },
+            "{}",
+        )
+        evidence = [
+            {"record_id": "paper-a", "chunk_index": 1, "title": "A", "text": "evidence", "score": 1.0},
+        ]
+        research_agent.retrieve_evidence.return_value = (
+            evidence,
+            {"paperCount": 1, "evidenceCount": 1, "selectedPaperIds": ["paper-a"]},
+        )
+        research_agent.run.return_value = {"answer": "回答 [1]", "sources": []}
+        agent = OrchestratorAgent()
+        agent.run_logger = Mock()
+        agent._evaluate_retrieved_evidence = AsyncMock(return_value={"sufficient": True, "reasons": []})
+
+        result = await agent._run_research_pipeline(
+            "这些论文有哪些共同结论？",
+            {"authorized_paper_ids": ["paper-a", "paper-b"], "allow_external_search": False},
+        )
+
+        self.assertEqual(result["action"], "chat")
+        self.assertEqual(research_agent.retrieve_evidence.call_args.kwargs["paper_ids"], ["paper-a", "paper-b"])
+        self.assertIsNone(agent._evaluate_retrieved_evidence.call_args.kwargs["required_paper_ids"])
+
+    @patch("app.agents.orchestrator_agent.ResearchChatAgent")
+    async def test_planner_target_outside_authorized_scope_is_rejected(
+        self,
+        research_agent_class: Mock,
+    ) -> None:
+        """越权目标必须明确报错，不能静默回退为整个项目。"""
+        research_agent = research_agent_class.return_value
+        research_agent.plan_retrieval.return_value = (
+            {
+                "standaloneQuestion": "介绍外部论文",
+                "targetPaperIds": ["paper-outside"],
+                "targetChunks": [],
+                "needsClarification": False,
+            },
+            "{}",
+        )
+        agent = OrchestratorAgent()
+        agent.run_logger = Mock()
+
+        result = await agent._run_research_pipeline(
+            "介绍外部论文",
+            {"authorized_paper_ids": ["paper-inside"], "allow_external_search": False},
+        )
+
+        self.assertEqual(result["action"], "request_user_action")
+        self.assertEqual(result["result"]["requiredAction"], "add_paper_to_scope")
+        self.assertEqual(result["result"]["outsidePaperIds"], ["paper-outside"])
+        research_agent.retrieve_evidence.assert_not_called()
+
+    @patch("app.agents.orchestrator_agent.ResearchChatAgent")
     async def test_pipeline_stops_when_context_plan_needs_clarification(self, research_agent_class: Mock) -> None:
         """指代不唯一时应请求澄清，不能退化为全库盲检索。"""
         research_agent = research_agent_class.return_value
