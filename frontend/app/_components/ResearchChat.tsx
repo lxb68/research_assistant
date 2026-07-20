@@ -10,7 +10,6 @@ import BookmarkAddOutlined from "@mui/icons-material/BookmarkAddOutlined";
 import CheckRounded from "@mui/icons-material/CheckRounded";
 import CloseRounded from "@mui/icons-material/CloseRounded";
 import ContentCopyRounded from "@mui/icons-material/ContentCopyRounded";
-import DataObjectRounded from "@mui/icons-material/DataObjectRounded";
 import DeleteOutlineRounded from "@mui/icons-material/DeleteOutlineRounded";
 import DownloadRounded from "@mui/icons-material/DownloadRounded";
 import EditRounded from "@mui/icons-material/EditRounded";
@@ -37,6 +36,12 @@ type Source = {
   section?: string;
   chunkIndex?: number;
   excerpt?: string;
+  graphBacked?: boolean;
+  retrievalChannels?: string[];
+  graphEvidenceIds?: string[];
+  graphRelationIds?: string[];
+  graphNavigationClaims?: string[];
+  graphQuotes?: string[];
 };
 type Message = {
   id: number;
@@ -45,6 +50,7 @@ type Message = {
   sources?: Source[];
   contextSources?: Source[];
   responseMode?: "direct" | "research";
+  jobId?: string;
   maintenanceAction?: {
     kind: "cleanup-missing-pdfs";
     candidateIds: string[];
@@ -60,10 +66,16 @@ type OrchestratorResult = {
     status?: string;
     message?: string;
     requiredMaterials?: Array<{ description: string }>;
+    retrievalDiagnostics?: {
+      evidenceCount?: number;
+      distinctPaperCount?: number;
+      retrievalMode?: string;
+      facetCoverage?: number;
+    };
   };
 };
 
-type Conversation = { id: string; title: string; date: string; messages: Message[]; projectId?: string };
+type Conversation = { id: string; title: string; date: string; messages: Message[]; projectId?: string; projectIds?: string[] };
 type ResearchRecord = {
   id: string;
   conversationId: string;
@@ -81,6 +93,13 @@ const CONVERSATIONS_KEY = "research-agent.conversations";
 // 三组键分别保存会话列表、当前会话和归档研究记录。
 const ACTIVE_CONVERSATION_KEY = "research-agent.active-conversation";
 const RESEARCH_RECORDS_KEY = "research-agent.research-records";
+const RESEARCH_STAGE_ORDER = ["planning", "retrieving", "validating", "composing", "persisting", "completed"];
+const RESEARCH_STAGE_ITEMS = [
+  { stage: "planning", label: "理解问题与规划" },
+  { stage: "retrieving", label: "检索知识库" },
+  { stage: "validating", label: "交叉验证证据" },
+  { stage: "composing", label: "生成综合结论" },
+];
 
 /** 识别明确要求清理无 PDF 文献记录的管理意图。 */
 function isMissingPdfCleanupRequest(value: string) {
@@ -106,9 +125,14 @@ function usableHistory(messages: Message[]) {
   return cleaned;
 }
 
+/** 主项目排在首位，其余附加项目去重后组成当前对话的检索范围。 */
+function listUniqueProjectIds(primaryProjectId: string, selectedProjectIds: string[]) {
+  return [...new Set([primaryProjectId, ...selectedProjectIds].map((value) => value.trim()).filter(Boolean))];
+}
+
 /** 管理研究对话、流式响应和本地会话记录。 */
 export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) {
-  const { jobs, submitJob } = useBackgroundTasks();
+  const { jobs, submitJob, openCenter } = useBackgroundTasks();
   const { projects, activeProjectId, activeProject, isLoadingProjects, selectProject, refreshProjects } = useProjects();
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -119,16 +143,37 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
   const [hasHydrated, setHasHydrated] = useState(false);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
+  const [activeResearchJobId, setActiveResearchJobId] = useState("");
   const [thinkingText, setThinkingText] = useState("正在检索知识库并组织证据…");
   const [sidebar, setSidebar] = useState(true);
+  const [projectScopeIds, setProjectScopeIds] = useState<string[]>([activeProjectId]);
+  const [isProjectScopeOpen, setIsProjectScopeOpen] = useState(false);
   const [renamingConversationId, setRenamingConversationId] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
   const [renameError, setRenameError] = useState("");
+  const [deletingConversationId, setDeletingConversationId] = useState("");
+  const [deleteError, setDeleteError] = useState("");
   const [copied, setCopied] = useState<number | null>(null);
+  const [selectedSource, setSelectedSource] = useState<Source | null>(null);
   const nextMessageId = useRef(1);
+  const deletedConversationIds = useRef(new Set<string>());
   const activeAgentMessage = [...messages].reverse().find((message) => message.role === "agent");
   const activeSources = activeAgentMessage?.sources ?? [];
   const isDirectAnswer = activeAgentMessage?.responseMode === "direct";
+  const researchJobId = activeResearchJobId || activeAgentMessage?.jobId || "";
+  const researchJob = jobs.find((job) => job.jobId === researchJobId);
+  const researchStatus = researchJob?.status ?? (thinking ? "running" : activeAgentMessage ? "completed" : "queued");
+  const researchProgress = researchJob?.progress ?? (activeAgentMessage ? 100 : thinking ? 3 : 0);
+  const currentStageIndex = researchStatus === "completed"
+    ? RESEARCH_STAGE_ORDER.length - 1
+    : Math.max(0, RESEARCH_STAGE_ORDER.indexOf(researchJob?.stage ?? "planning"));
+  const researchStatusText = researchJob?.message
+    || (researchStatus === "failed" ? researchJob?.error || "研究任务执行失败" : "等待开始研究任务");
+  const researchResult = researchJob?.result as OrchestratorResult | null | undefined;
+  const researchDiagnostics = researchResult?.result?.retrievalDiagnostics;
+  const scopedProjects = projectScopeIds
+    .map((projectId) => projects.find((project) => project.id === projectId))
+    .filter((project) => project !== undefined);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -143,6 +188,10 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
           setActiveConversationId(activeConversation.id);
           setConversationTitle(activeConversation.title);
           setMessages(activeConversation.messages);
+          setActiveResearchJobId([...activeConversation.messages].reverse().find((message) => message.jobId)?.jobId ?? "");
+          setProjectScopeIds(activeConversation.projectIds?.length
+            ? activeConversation.projectIds
+            : activeConversation.projectId ? [activeConversation.projectId] : []);
         }
         const highestMessageId = storedConversations.reduce(
           (highest, conversation) => Math.max(highest, ...conversation.messages.map((message) => message.id)),
@@ -159,6 +208,10 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    setProjectScopeIds((current) => current.includes(activeProjectId) ? current : [activeProjectId]);
+  }, [activeProjectId]);
 
   useEffect(() => {
     if (!hasHydrated) return;
@@ -185,34 +238,48 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
       })
       .then((payload: { conversations?: Array<{ id: string; title: string; messages: Array<Record<string, unknown>> }> }) => {
         if (cancelled) return;
-        const serverConversations: Conversation[] = (payload.conversations ?? []).map((conversation) => ({
-          id: conversation.id,
-          title: conversation.title,
-          date: "已同步",
-          messages: conversation.messages.map((raw, index) => {
-            const numericId = Number(raw.id);
-            const rawSources = Array.isArray(raw.sources) ? raw.sources as Array<Record<string, unknown>> : [];
-            const rawContext = Array.isArray(raw.contextSources) ? raw.contextSources as Array<Record<string, unknown>> : [];
-            const normalizeSources = (sources: Array<Record<string, unknown>>) => sources.map((source, sourceIndex) => ({
-              index: Number(source.index ?? sourceIndex + 1),
-              recordId: String(source.recordId ?? source.record_id ?? ""),
-              title: String(source.title ?? ""),
-              year: String(source.year ?? ""),
-              source: String(source.source ?? ""),
-              section: String(source.section ?? ""),
-              chunkIndex: Number(source.chunkIndex ?? source.chunk_index ?? 0),
-              excerpt: String(source.excerpt ?? ""),
-            }));
-            return {
-              id: Number.isFinite(numericId) ? numericId : Date.now() + index,
-              role: raw.role === "assistant" ? "agent" : "user",
-              content: String(raw.content ?? ""),
-              sources: normalizeSources(rawSources),
-              contextSources: normalizeSources(rawContext),
-              responseMode: raw.responseMode === "direct" ? "direct" : "research",
-            } satisfies Message;
-          }),
-        }));
+        const serverConversations: Conversation[] = (payload.conversations ?? [])
+          .filter((conversation) => !deletedConversationIds.current.has(conversation.id))
+          .map((conversation) => ({
+            id: conversation.id,
+            title: conversation.title,
+            date: "已同步",
+            messages: conversation.messages.map((raw, index) => {
+              const numericId = Number(raw.id);
+              const rawSources = Array.isArray(raw.sources) ? raw.sources as Array<Record<string, unknown>> : [];
+              const rawContext = Array.isArray(raw.contextSources) ? raw.contextSources as Array<Record<string, unknown>> : [];
+              const normalizeSources = (sources: Array<Record<string, unknown>>) => sources.map((source, sourceIndex) => ({
+                index: Number(source.index ?? sourceIndex + 1),
+                recordId: String(source.recordId ?? source.record_id ?? ""),
+                title: String(source.title ?? ""),
+                year: String(source.year ?? ""),
+                source: String(source.source ?? ""),
+                section: String(source.section ?? ""),
+                chunkIndex: Number(source.chunkIndex ?? source.chunk_index ?? 0),
+                excerpt: String(source.excerpt ?? ""),
+                graphBacked: Boolean(source.graphBacked ?? source.graph_backed),
+                retrievalChannels: Array.isArray(source.retrievalChannels ?? source.retrieval_channels)
+                  ? (source.retrievalChannels ?? source.retrieval_channels) as string[] : [],
+                graphEvidenceIds: Array.isArray(source.graphEvidenceIds ?? source.graph_evidence_ids)
+                  ? (source.graphEvidenceIds ?? source.graph_evidence_ids) as string[] : [],
+                graphRelationIds: Array.isArray(source.graphRelationIds ?? source.graph_relation_ids)
+                  ? (source.graphRelationIds ?? source.graph_relation_ids) as string[] : [],
+                graphNavigationClaims: Array.isArray(source.graphNavigationClaims ?? source.graph_navigation_claims)
+                  ? (source.graphNavigationClaims ?? source.graph_navigation_claims) as string[] : [],
+                graphQuotes: Array.isArray(source.graphQuotes ?? source.graph_quotes)
+                  ? (source.graphQuotes ?? source.graph_quotes) as string[] : [],
+              }));
+              return {
+                id: Number.isFinite(numericId) ? numericId : Date.now() + index,
+                role: raw.role === "assistant" ? "agent" : "user",
+                content: String(raw.content ?? ""),
+                sources: normalizeSources(rawSources),
+                contextSources: normalizeSources(rawContext),
+                responseMode: raw.responseMode === "direct" ? "direct" : "research",
+                jobId: String(raw.jobId ?? ""),
+              } satisfies Message;
+            }),
+          }));
         setConversations((current) => {
           const byId = new Map(current.map((conversation) => [conversation.id, conversation]));
           for (const incoming of serverConversations) {
@@ -312,17 +379,18 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
     const userMessage: Message = { id, role: "user", content: prompt };
     const conversationId = activeConversationId || `local-${id}`;
     const title = activeConversationId ? conversationTitle : prompt.length > 22 ? `${prompt.slice(0, 22)}…` : prompt;
+    const selectedProjectIds = listUniqueProjectIds(activeProjectId, projectScopeIds);
     setMessages((items) => [...items, userMessage]);
     setConversations((items) => {
       const existing = items.find((conversation) => conversation.id === conversationId);
       if (existing) {
         return items.map((conversation) =>
           conversation.id === conversationId
-            ? { ...conversation, projectId: conversation.projectId || activeProjectId, date: "刚刚", messages: [...conversation.messages, userMessage] }
+            ? { ...conversation, projectId: activeProjectId, projectIds: selectedProjectIds, date: "刚刚", messages: [...conversation.messages, userMessage] }
             : conversation,
         );
       }
-      return [{ id: conversationId, title, date: "刚刚", messages: [userMessage], projectId: activeProjectId }, ...items];
+      return [{ id: conversationId, title, date: "刚刚", messages: [userMessage], projectId: activeProjectId, projectIds: selectedProjectIds }, ...items];
     });
     if (!activeConversationId) {
       setActiveConversationId(conversationId);
@@ -330,6 +398,8 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
     }
     setInput("");
     setThinking(true);
+    setSelectedSource(null);
+    setActiveResearchJobId("");
     setThinkingText("正在判断如何处理你的问题…");
     try {
       if (isMissingPdfCleanupRequest(prompt)) {
@@ -360,6 +430,7 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
       const job = await submitJob("research_chat", {
         question: prompt,
         project_id: activeProjectId,
+        project_ids: selectedProjectIds,
         title,
         history: usableHistory(messages).slice(-8).map((message) => ({
           role: message.role === "agent" ? "assistant" : "user",
@@ -381,6 +452,7 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
         messageId: String(id),
         responseMessageId: String(id + 1),
       });
+      setActiveResearchJobId(job.jobId);
       let current = job;
       while (!["completed", "failed", "cancelled", "interrupted"].includes(current.status)) {
         setThinkingText(current.message || "研究任务正在后台执行…");
@@ -404,6 +476,7 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
         sources: payload.sources,
         contextSources: payload.retrievedSources ?? payload.sources,
         responseMode: result.action === "direct" ? "direct" : "research",
+        jobId: current.jobId,
       };
       appendAgentMessage(conversationId, agentMessage);
     } catch (error) {
@@ -419,6 +492,22 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
   /** 处理输入框回车发送和换行行为。 */
   function keyDown(event: KeyboardEvent<HTMLTextAreaElement>) { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } }
 
+  /** 打开引用证据详情；由详情层继续定位原文或展示图谱导航依据。 */
+  function openSource(source: Source) {
+    setSelectedSource((current) => (
+      current?.index === source.index && current.recordId === source.recordId ? null : source
+    ));
+  }
+
+  function openSourceChunk(source: Source) {
+    const recordId = source.recordId?.trim();
+    if (!recordId) return;
+    const query = new URLSearchParams();
+    if (Number.isInteger(source.chunkIndex)) query.set("chunk", String(source.chunkIndex));
+    const suffix = query.size ? `?${query.toString()}` : "";
+    window.location.assign(`/dataset-brower/view/${encodeURIComponent(recordId)}${suffix}`);
+  }
+
   /** 切换到指定历史会话。 */
   function openConversation(id: string) {
     const conversation = conversations.find((item) => item.id === id);
@@ -426,10 +515,17 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
     if (conversation.projectId && projects.some((project) => project.id === conversation.projectId)) {
       selectProject(conversation.projectId);
     }
+    setProjectScopeIds(listUniqueProjectIds(
+      conversation.projectId || activeProjectId,
+      conversation.projectIds ?? [],
+    ));
+    setIsProjectScopeOpen(false);
     setWorkspaceView("chat");
     setActiveConversationId(conversation.id);
     setConversationTitle(conversation.title);
     setMessages(conversation.messages);
+    setSelectedSource(null);
+    setActiveResearchJobId([...conversation.messages].reverse().find((message) => message.jobId)?.jobId ?? "");
     setInput("");
   }
 
@@ -440,6 +536,10 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
     setActiveConversationId("");
     setConversationTitle("新建研究对话");
     setMessages([]);
+    setSelectedSource(null);
+    setActiveResearchJobId("");
+    setProjectScopeIds([activeProjectId]);
+    setIsProjectScopeOpen(false);
     setInput("");
   }
 
@@ -483,16 +583,26 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
     setRenameError("");
   }
 
-  /** 切换知识空间时开启空白会话，避免不同项目的历史上下文相互污染。 */
-  function changeResearchProject(projectId: string) {
-    if (thinking || projectId === activeProjectId) return;
-    selectProject(projectId);
-    startNewConversation();
+  /** 为当前对话添加或移除检索项目；移除主项目时自动提升下一个项目。 */
+  function toggleScopeProject(projectId: string) {
+    if (thinking) return;
+    const isSelected = projectScopeIds.includes(projectId);
+    if (isSelected && projectScopeIds.length === 1) return;
+    const next = isSelected
+      ? projectScopeIds.filter((value) => value !== projectId)
+      : [...projectScopeIds, projectId];
+    const nextPrimaryProjectId = next.includes(activeProjectId) ? activeProjectId : next[0];
+    if (nextPrimaryProjectId !== activeProjectId) selectProject(nextPrimaryProjectId);
+    setProjectScopeIds(next);
+    if (activeConversationId) {
+      setConversations((items) => items.map((conversation) => conversation.id === activeConversationId
+        ? { ...conversation, projectId: nextPrimaryProjectId, projectIds: next }
+        : conversation));
+    }
   }
 
-  /** 删除指定会话并选择新的活动会话。 */
-  function deleteConversation(id: string) {
-    if (thinking) return;
+  /** 从本地状态移除已持久化删除的会话，并选择新的活动会话。 */
+  function removeConversationLocally(id: string) {
     const remaining = conversations.filter((conversation) => conversation.id !== id);
     setConversations(remaining);
     if (activeConversationId !== id) return;
@@ -501,15 +611,45 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
       if (nextConversation.projectId && projects.some((project) => project.id === nextConversation.projectId)) {
         selectProject(nextConversation.projectId);
       }
+      setProjectScopeIds(listUniqueProjectIds(
+        nextConversation.projectId || activeProjectId,
+        nextConversation.projectIds ?? [],
+      ));
       setActiveConversationId(nextConversation.id);
       setConversationTitle(nextConversation.title);
       setMessages(nextConversation.messages);
+      setActiveResearchJobId([...nextConversation.messages].reverse().find((message) => message.jobId)?.jobId ?? "");
     } else {
       setActiveConversationId("");
       setConversationTitle("新建研究对话");
       setMessages([]);
+      setActiveResearchJobId("");
+      setProjectScopeIds([activeProjectId]);
     }
+    setIsProjectScopeOpen(false);
     setInput("");
+  }
+
+  /** 先删除后端持久化会话，再同步更新前端缓存，避免列表同步时恢复已删项。 */
+  async function deleteConversation(id: string) {
+    if (thinking || deletingConversationId) return;
+    // 删除请求完成前可能仍有旧的列表请求返回；墓碑可阻止旧响应把该项重新合并回来。
+    deletedConversationIds.current.add(id);
+    setDeletingConversationId(id);
+    setDeleteError("");
+    try {
+      const response = await fetch(buildApiUrl(`/api/conversations/${encodeURIComponent(id)}`), {
+        method: "DELETE",
+      });
+      // 清理确认等纯本地对话从未写入后端，404 时仍应允许移除本地副本。
+      if (!response.ok && response.status !== 404) throw new Error(`删除失败（${response.status}）`);
+      removeConversationLocally(id);
+    } catch (error) {
+      deletedConversationIds.current.delete(id);
+      setDeleteError(error instanceof Error ? error.message : "删除失败，请稍后重试");
+    } finally {
+      setDeletingConversationId("");
+    }
   }
 
   /** 把回答保存为研究归档记录。 */
@@ -564,9 +704,10 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
         <div className="research-recents">
           {conversations.map((conversation) => (
             <div className={`research-recent-item ${activeConversationId === conversation.id ? "active" : ""}`} key={conversation.id}>
-              {renamingConversationId === conversation.id ? <form className="research-recent-edit" onSubmit={(event) => { event.preventDefault(); void saveConversationRename(conversation.id); }}><input value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") cancelConversationRename(); }} maxLength={80} autoFocus aria-label="对话标题" title="按 Enter 保存" /><button type="button" onClick={cancelConversationRename} aria-label="取消重命名" title="取消重命名"><CloseRounded /></button>{renameError ? <small>{renameError}</small> : null}</form> : <><button className="research-recent-open" onClick={() => openConversation(conversation.id)}><span>{conversation.title}</span><small>{[projects.find((project) => project.id === conversation.projectId)?.name, conversation.date].filter(Boolean).join(" · ")}</small></button><div className="research-recent-actions"><button className="research-recent-rename" onClick={() => beginRenameConversation(conversation)} aria-label={`重命名对话：${conversation.title}`} title="重命名对话"><EditRounded /></button><button className="research-recent-delete" onClick={() => deleteConversation(conversation.id)} aria-label={`删除对话：${conversation.title}`} title="删除对话"><DeleteOutlineRounded /></button></div></>}
+              {renamingConversationId === conversation.id ? <form className="research-recent-edit" onSubmit={(event) => { event.preventDefault(); void saveConversationRename(conversation.id); }}><input value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") cancelConversationRename(); }} maxLength={80} autoFocus aria-label="对话标题" title="按 Enter 保存" /><button type="button" onClick={cancelConversationRename} aria-label="取消重命名" title="取消重命名"><CloseRounded /></button>{renameError ? <small>{renameError}</small> : null}</form> : <><button className="research-recent-open" onClick={() => openConversation(conversation.id)}><span>{conversation.title}</span><small>{[projects.find((project) => project.id === conversation.projectId)?.name, conversation.date].filter(Boolean).join(" · ")}</small></button><div className="research-recent-actions"><button className="research-recent-rename" onClick={() => beginRenameConversation(conversation)} aria-label={`重命名对话：${conversation.title}`} title="重命名对话"><EditRounded /></button><button className="research-recent-delete" disabled={deletingConversationId === conversation.id} onClick={() => void deleteConversation(conversation.id)} aria-label={`删除对话：${conversation.title}`} title="删除对话"><DeleteOutlineRounded /></button></div></>}
             </div>
           ))}
+          {deleteError ? <div className="research-recent-error" role="alert">{deleteError}</div> : null}
           {conversations.length === 0 ? <div className="research-recent-empty">暂无最近对话</div> : null}
         </div>
         <div className="research-side-bottom"><div><span>LX</span><p><strong>研究工作区</strong><small>个人专业版</small></p></div></div>
@@ -576,7 +717,7 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
         <header className="research-topbar">
           {!sidebar && <button className="research-icon" onClick={() => setSidebar(true)}><MenuRounded /></button>}
           <div className="research-topbar-title"><h1>{workspaceView === "records" ? "成果档案" : conversationTitle}</h1><span><i />{workspaceView === "records" ? `${researchRecords.length} 条已保存成果` : "已自动保存"}</span></div>
-          {workspaceView === "chat" ? <><label className="research-project-picker"><DataObjectRounded /><span>知识空间</span><select value={activeProjectId} onChange={(event) => changeResearchProject(event.target.value)} disabled={thinking || isLoadingProjects}>{projects.length ? projects.map((project) => <option key={project.id} value={project.id}>{project.name}（{project.paperCount} 篇）</option>) : <option value={activeProjectId}>{isLoadingProjects ? "正在加载项目…" : "暂无可用项目"}</option>}</select></label><button className="research-export"><DownloadRounded />导出报告</button></> : null}
+          {workspaceView === "chat" ? <button className="research-export"><DownloadRounded />导出报告</button> : null}
         </header>
         {workspaceView === "records" ? (
           <section className="research-records-page">
@@ -598,18 +739,25 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
           </section>
         ) : <div className="research-body">
           <section className="research-thread">
-            {!messages.length && <div className="research-empty"><span className="research-agent-mark"><AutoAwesomeRounded /></span><h2>今天想研究什么？</h2><p>我会从“{activeProject?.name || "当前知识空间"}”中检索、分析并标注每一处引用。</p></div>}
+            {!messages.length && <div className="research-empty"><span className="research-agent-mark"><AutoAwesomeRounded /></span><h2>今天想研究什么？</h2><p>我会从{projectScopeIds.length > 1 ? `所选 ${projectScopeIds.length} 个项目` : `“${activeProject?.name || "当前知识空间"}”`}的文献中检索、分析并标注每一处引用。</p></div>}
             {messages.map((message) => <article className={`research-message ${message.role}`} key={message.id}>
               <div className="research-avatar">{message.role === "agent" ? <AutoAwesomeRounded /> : "LX"}</div>
               <div><header><strong>{message.role === "agent" ? "Research Agent" : "你"}</strong><span>{message.id <= 2 ? "10:24" : "刚刚"}</span></header><MessageContent content={message.content} />
-                {message.role === "agent" && <>{message.sources?.length ? <div className="research-citations">{message.sources.map((source) => <button key={`${message.id}-${source.index}`}>{source.index} · {source.title}</button>)}</div> : null}{message.maintenanceAction?.status === "pending" || message.maintenanceAction?.status === "running" ? <div className="research-maintenance-action"><button type="button" className="is-danger" disabled={message.maintenanceAction.status === "running"} onClick={() => void confirmMissingPdfCleanup(message)}>{message.maintenanceAction.status === "running" ? "正在清理…" : `确认删除 ${message.maintenanceAction.candidateIds.length} 条`}</button><button type="button" disabled={message.maintenanceAction.status === "running"} onClick={() => cancelMissingPdfCleanup(message)}>取消</button></div> : null}<footer><button onClick={() => { navigator.clipboard?.writeText(message.content); setCopied(message.id); }}><ContentCopyRounded />{copied === message.id ? "已复制" : "复制"}</button><button><ThumbUpAltOutlined />有帮助</button><button onClick={() => saveResearchRecord(message)}><BookmarkAddOutlined />{researchRecords.some((record) => record.conversationId === activeConversationId && record.messageId === message.id) ? "已保存" : "保存到研究记录"}</button></footer></>}
+                {message.role === "agent" && <>{message.sources?.length ? <div className="research-citations">{message.sources.map((source) => <button type="button" disabled={!source.recordId} onClick={() => openSource(source)} title={source.recordId ? `查看文献：${source.title}` : "该来源没有本地文献记录"} key={`${message.id}-${source.index}`}>{source.index} · {source.title}</button>)}</div> : null}{message.maintenanceAction?.status === "pending" || message.maintenanceAction?.status === "running" ? <div className="research-maintenance-action"><button type="button" className="is-danger" disabled={message.maintenanceAction.status === "running"} onClick={() => void confirmMissingPdfCleanup(message)}>{message.maintenanceAction.status === "running" ? "正在清理…" : `确认删除 ${message.maintenanceAction.candidateIds.length} 条`}</button><button type="button" disabled={message.maintenanceAction.status === "running"} onClick={() => cancelMissingPdfCleanup(message)}>取消</button></div> : null}<footer><button onClick={() => { navigator.clipboard?.writeText(message.content); setCopied(message.id); }}><ContentCopyRounded />{copied === message.id ? "已复制" : "复制"}</button><button><ThumbUpAltOutlined />有帮助</button><button onClick={() => saveResearchRecord(message)}><BookmarkAddOutlined />{researchRecords.some((record) => record.conversationId === activeConversationId && record.messageId === message.id) ? "已保存" : "保存到研究记录"}</button></footer></>}
               </div>
             </article>)}
             {thinking && <div className="research-thinking"><i /><i /><i />{thinkingText}</div>}
           </section>
           <div className="research-compose-wrap">
-            
-            <form className="research-compose" onSubmit={submit}><textarea rows={2} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={keyDown} placeholder={messages.length ? "继续追问，或给 Research Agent 一个任务…" : "输入研究问题，或给 Research Agent 一个任务…"} /><div><button type="button"><AddRounded /></button><button type="button" className="library-pill" onClick={onOpenDomainTree}><FolderOpenRounded />{activeProject?.name || "当前项目"} <span>{activeProject?.paperCount ?? 0} 篇</span></button><button className="research-send" disabled={!input.trim() || thinking}><SendRounded /></button></div></form>
+            {isProjectScopeOpen ? (
+              <section className="research-project-scope-menu" role="dialog" aria-label="选择当前对话的检索项目">
+                <header><span className="research-project-scope-icon"><FolderOpenRounded /></span><div><strong>检索项目</strong><small>组合多个项目，后续追问将持续检索它们的文献并集。</small></div><button type="button" onClick={() => setIsProjectScopeOpen(false)} aria-label="关闭项目选择"><CloseRounded /></button></header>
+                <div className="research-project-scope-summary"><span>当前范围</span><strong>{projectScopeIds.length} 个项目</strong></div>
+                <div className="research-project-scope-list">{projects.map((project) => { const isSelected = projectScopeIds.includes(project.id); return <label className={isSelected ? "is-selected" : ""} key={project.id}><input type="checkbox" checked={isSelected} disabled={thinking || (isSelected && projectScopeIds.length === 1)} onChange={() => toggleScopeProject(project.id)} /><span><strong>{project.name}</strong><small>{project.paperCount} 篇文献{project.id === activeProjectId ? " · 当前主项目" : ""}</small></span>{isSelected ? <CheckRounded /> : null}</label>; })}</div>
+                <footer><span>{isLoadingProjects ? "正在读取项目…" : "至少保留一个项目作为检索范围"}</span><button type="button" onClick={() => setIsProjectScopeOpen(false)}>完成</button></footer>
+              </section>
+            ) : null}
+            <form className="research-compose" onSubmit={submit}><textarea rows={2} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={keyDown} placeholder={messages.length ? "继续追问，或给 Research Agent 一个任务…" : "输入研究问题，或给 Research Agent 一个任务…"} /><div><button type="button" className="research-source-action" onClick={() => setIsProjectScopeOpen((current) => !current)} aria-expanded={isProjectScopeOpen} aria-label="添加检索项目" title="添加其他项目到当前对话的检索范围"><AddRounded />项目</button><button type="button" className="library-pill" onClick={onOpenDomainTree} aria-label={`管理项目文献：${activeProject?.name || "当前项目"}`} title="在项目知识空间管理项目文献"><FolderOpenRounded />{activeProject?.name || "当前项目"} <span>{projectScopeIds.length > 1 ? `${projectScopeIds.length} 个项目` : `${activeProject?.paperCount ?? 0} 篇`}</span></button><button className="research-send" disabled={!input.trim() || thinking}><SendRounded /></button></div></form>
             <small className="research-note">{isDirectAnswer ? "本次为普通对话，未调用研究 Agent 或知识库。" : "研究内容由 AI 基于所选知识库生成，请核验关键结论与原始文献。"}</small>
           </div>
         </div>}
@@ -620,20 +768,59 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
         {isDirectAnswer ? (
           <section className="research-progress-card"><div><span><AutoAwesomeRounded /></span><p><strong>直接回答</strong><small>无需调用研究 Agent 或检索论文</small></p><CheckRounded /></div></section>
         ) : <>
-          <section className="research-progress-card"><div><span><SearchRounded /></span><p><strong>深度研究</strong><small>已分析 {activeSources.length} 个相关来源</small></p><CheckRounded /></div><progress value="100" max="100" /><ul><li><CheckRounded />理解问题与规划</li><li><CheckRounded />检索知识库</li><li><CheckRounded />交叉验证证据</li><li><CheckRounded />生成综合结论</li></ul></section>
+          <section className={`research-progress-card is-${researchStatus}`}>
+            <button type="button" className="research-progress-summary" onClick={openCenter} title="在后台任务中心查看研究任务详情">
+              <span><SearchRounded /></span>
+              <p><strong>深度研究</strong><small>{researchStatus === "completed" ? `已引用 ${activeSources.length} 个来源 · 点击查看任务详情` : researchStatusText}</small></p>
+              {researchStatus === "completed" ? <CheckRounded /> : researchStatus === "failed" ? <CloseRounded /> : <em>{researchProgress}%</em>}
+            </button>
+            <progress value={researchProgress} max="100" />
+            <ul>{RESEARCH_STAGE_ITEMS.map((item) => {
+              const itemIndex = RESEARCH_STAGE_ORDER.indexOf(item.stage);
+              const isComplete = researchStatus === "completed" || currentStageIndex > itemIndex;
+              const isActive = researchStatus !== "completed" && researchStatus !== "failed" && currentStageIndex === itemIndex;
+              return <li className={isComplete ? "is-complete" : isActive ? "is-active" : "is-pending"} key={item.stage}>{isComplete ? <CheckRounded /> : <i />}{item.label}</li>;
+            })}</ul>
+            {researchDiagnostics ? <div className="research-progress-metrics">
+              <span><strong>{researchDiagnostics.evidenceCount ?? 0}</strong> 条证据</span>
+              <span><strong>{researchDiagnostics.distinctPaperCount ?? 0}</strong> 篇文献</span>
+              <span><strong>{Math.round((researchDiagnostics.facetCoverage ?? 0) * 100)}%</strong> 检索维度覆盖</span>
+              {researchDiagnostics.retrievalMode ? <small>{researchDiagnostics.retrievalMode}</small> : null}
+            </div> : null}
+          </section>
           <div className="research-section-title"><strong>引用来源</strong><button onClick={onOpenBrowse}>查看全部</button></div>
           <div className="research-sources">
             {activeSources.length ? activeSources.map((source) => (
-              <button key={`context-source-${source.index}`}>
-                <span><ArticleOutlined /></span>
-                <p><strong>{source.title}</strong><small>{[source.source, source.year].filter(Boolean).join(" · ") || "本地知识库"}</small></p>
-                <em>{source.index}</em>
-              </button>
+              <div className={`research-source-item${selectedSource?.index === source.index && selectedSource.recordId === source.recordId ? " is-expanded" : ""}`} key={`context-source-${source.index}`}>
+                <button type="button" disabled={!source.recordId} onClick={() => openSource(source)} title={source.recordId ? `查看引用证据：${source.title}` : "该来源没有本地文献记录"}>
+                  <span><ArticleOutlined /></span>
+                  <p><strong>{source.title}</strong><small>{[source.source, source.year].filter(Boolean).join(" · ") || "本地知识库"}</small></p>
+                  <em>{source.index}</em>
+                </button>
+                {selectedSource?.index === source.index && selectedSource.recordId === source.recordId ? <section className="research-source-inline-detail">
+                  <div className="research-source-inline-meta">
+                    <strong>{source.graphBacked ? "图谱增强证据" : "全文检索片段"}</strong>
+                    {Number.isInteger(source.chunkIndex) ? <span>分块 {Number(source.chunkIndex) + 1}</span> : null}
+                  </div>
+                  {source.section ? <small className="research-source-inline-section">{source.section}</small> : null}
+                  <blockquote>{source.excerpt || "该引用没有返回可预览的原文，请打开文献查看对应分块。"}</blockquote>
+                  {source.graphBacked ? <div className="research-source-inline-graph">
+                    <strong>知识图谱依据</strong>
+                    {(source.graphNavigationClaims ?? []).length ? <ul>{source.graphNavigationClaims?.map((claim) => <li key={claim}>{claim}</li>)}</ul> : <p>该片段由知识图谱关系导航命中。</p>}
+                    {(source.graphQuotes ?? []).slice(0, 2).map((quote, index) => <blockquote key={`${source.index}-graph-quote-${index}`}>{quote}</blockquote>)}
+                    <small>{(source.graphRelationIds ?? []).length} 条关系 · {(source.graphEvidenceIds ?? []).length} 条图谱证据</small>
+                  </div> : null}
+                  <footer>
+                    {source.graphBacked ? <button type="button" onClick={onOpenDomainTree}>知识图谱</button> : null}
+                    <button type="button" className="is-primary" disabled={!source.recordId} onClick={() => openSourceChunk(source)}>查看原文分块</button>
+                  </footer>
+                </section> : null}
+              </div>
             )) : <div className="research-source-empty">发送研究问题后，此处将显示回答引用的真实来源。</div>}
           </div>
           <div className="research-section-title"><strong>知识库范围</strong><button onClick={onOpenBrowse}>管理</button></div>
-          <div className="research-library"><span><FolderOpenRounded /></span><p><strong>{activeProject?.name || "当前知识空间"}</strong><small>{activeProject?.paperCount ?? 0} 篇文献 · 当前对话范围</small></p><CheckRounded /></div>
-          <button className="research-add-source" onClick={onOpenBrowse}><AddRounded />添加知识来源</button>
+          <div className="research-library"><span><FolderOpenRounded /></span><p><strong>{scopedProjects.map((project) => project.name).join("、") || activeProject?.name || "当前知识空间"}</strong><small>{projectScopeIds.length} 个项目 · 文献并集作为当前对话范围</small></p><CheckRounded /></div>
+          <button className="research-add-source" onClick={() => setIsProjectScopeOpen(true)}><AddRounded />添加检索项目</button>
         </>}
       </aside> : null}
     </div>

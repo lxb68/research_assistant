@@ -21,6 +21,7 @@ export type BackgroundJob = {
   request?: Record<string, unknown>;
   result?: Record<string, unknown> | null;
   error?: string;
+  retryOf?: string | null;
   retryable?: boolean;
   createdAt: string;
   startedAt?: string | null;

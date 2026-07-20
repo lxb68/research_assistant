@@ -4,10 +4,19 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import PdfViewer from "@/components/PdfViewer";
 import { buildApiUrl } from "@/lib/api";
 import { SavedPaper } from "@/lib/papers";
+
+function subscribeToLocation() {
+  return () => undefined;
+}
+
+function readFocusedChunk() {
+  const requestedChunk = Number(new URLSearchParams(window.location.search).get("chunk"));
+  return Number.isInteger(requestedChunk) && requestedChunk >= 0 ? requestedChunk : -1;
+}
 
 /** 加载论文记录并展示对应 PDF。 */
 export default function PaperViewerPage() {
@@ -17,6 +26,8 @@ export default function PaperViewerPage() {
   const [paper, setPaper] = useState<SavedPaper | null>(null);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const chunkRefs = useRef<Array<HTMLDetailsElement | null>>([]);
+  const focusChunkIndex = useSyncExternalStore(subscribeToLocation, readFocusedChunk, () => -1);
 
   useEffect(() => {
     if (!hasRecordId) {
@@ -39,6 +50,14 @@ export default function PaperViewerPage() {
         setIsLoading(false);
       });
   }, [hasRecordId, recordId]);
+
+  useEffect(() => {
+    if (isLoading || focusChunkIndex < 0) return;
+    const target = chunkRefs.current[focusChunkIndex];
+    if (!target) return;
+    target.open = true;
+    window.requestAnimationFrame(() => target.scrollIntoView({ behavior: "smooth", block: "center" }));
+  }, [focusChunkIndex, isLoading, paper]);
 
   const pdfViewerUrl = recordId
     ? buildApiUrl(`/api/papers/${encodeURIComponent(recordId)}/pdf`).toString()
@@ -104,9 +123,10 @@ export default function PaperViewerPage() {
               <div className="paper-viewer-split-list">
                 {splitChunks.map((chunk, index) => (
                   <details
-                    className="paper-viewer-split-card"
+                    className={`paper-viewer-split-card${index === focusChunkIndex ? " is-citation-target" : ""}`}
                     key={`${chunk.summary || "chunk"}-${index}`}
-                    open={index === 0}
+                    ref={(element) => { chunkRefs.current[index] = element; }}
+                    open={index === focusChunkIndex || (focusChunkIndex < 0 && index === 0)}
                   >
                     <summary className="paper-viewer-split-summary">
                       <div>

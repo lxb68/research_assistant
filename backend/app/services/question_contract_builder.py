@@ -11,6 +11,7 @@ from app.services.retrieval_contracts import (
     normalize_requirement,
     normalize_section_types,
 )
+from app.services.document_capabilities import normalize_document_requirements
 
 
 @dataclass(slots=True)
@@ -22,6 +23,7 @@ class QuestionContract:
     complexity: str
     targetPaperIds: list[str] = field(default_factory=list)
     targetChunks: list[dict[str, Any]] = field(default_factory=list)
+    documentRequirements: dict[str, bool] = field(default_factory=dict)
     retrievalFacets: list[dict[str, Any]] = field(default_factory=list)
     coreRequirements: list[str] = field(default_factory=list)
     requirementSpecs: list[dict[str, Any]] = field(default_factory=list)
@@ -86,6 +88,10 @@ class QuestionContractBuilder:
             if reference["record_id"] not in target_ids:
                 target_ids.append(reference["record_id"])
 
+        document_requirements = normalize_document_requirements(
+            payload.get("document_requirements") or payload.get("documentRequirements")
+        )
+
         standalone = str(payload.get("standalone_question") or question).strip()
         question_type = str(payload.get("question_type") or "simple_fact").strip().lower()
         if question_type not in self.ALLOWED_QUESTION_TYPES:
@@ -144,6 +150,7 @@ class QuestionContractBuilder:
             complexity=complexity,
             targetPaperIds=target_ids,
             targetChunks=target_chunks,
+            documentRequirements=document_requirements,
             retrievalFacets=facets,
             coreRequirements=core_requirements,
             requirementSpecs=requirement_specs,

@@ -37,8 +37,9 @@ class QueryPlanningAgent:
 6. complex 问题应动态拆成 2 至 5 个互补 retrieval_facets。每个 facet 描述一个回答所需的信息缺口，不能针对某篇固定论文套用预设关键词。
 7. preferred_section_types 使用通用语义类型，例如 abstract、introduction、contribution、method、framework、experiment、result、conclusion。
 8. 必须保持用户原问题的粒度，不得把“介绍、怎么做、主要流程”等概述问题擅自扩大成完整协议复现、精确通信轮次或全部安全性证明。
-9. core_requirements 只列出回答用户原问题不可缺少的要点，并为每项声明 evidence_intent、preferred_section_types 和 minimum_direct_evidence；optional_details 可列出有则更好的深入细节。可选细节缺失不能导致整个问题不可回答。
-10. 不要回答用户问题，不要调用工具，不要输出 Markdown 或额外文字。
+9. document_requirements 只表达用户明确要求的文献内容能力；has_pdf、has_abstract、has_parsed_full_text 的值只能为 true、false 或 null。未明确要求的字段必须为 null。PDF 存在与全文已解析是两种不同能力。
+10. core_requirements 只列出回答用户原问题不可缺少的要点，并为每项声明 evidence_intent、preferred_section_types 和 minimum_direct_evidence；optional_details 可列出有则更好的深入细节。可选细节缺失不能导致整个问题不可回答。
+11. 不要回答用户问题，不要调用工具，不要输出 Markdown 或额外文字。
 
 只输出一个 JSON 对象：
 {
@@ -47,6 +48,7 @@ class QueryPlanningAgent:
   "complexity":"simple|complex",
   "target_paper_ids":[],
   "target_chunks":[{"record_id":"...","chunk_index":0}],
+  "document_requirements":{"has_pdf":null,"has_abstract":null,"has_parsed_full_text":null},
   "retrieval_facets":[{"id":"facet-1","goal":"...","query":"...","concepts":[],"phrases":[],"preferred_section_types":[]}],
   "core_requirements":[{"id":"req-1","description":"...","evidence_intent":"fact|mechanism|comparison|evaluation|synthesis","preferred_section_types":[],"minimum_direct_evidence":1}],
   "optional_details":[],

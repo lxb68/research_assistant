@@ -162,6 +162,19 @@ class ConversationStore:
             )
             return cursor.rowcount > 0
 
+    def delete(self, conversation_id: str) -> bool:
+        """原子删除会话及其消息；返回会话是否存在。"""
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM conversation_messages WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            cursor = connection.execute(
+                "DELETE FROM conversations WHERE id = ?",
+                (conversation_id,),
+            )
+            return cursor.rowcount > 0
+
     def _public(self, connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         messages = connection.execute(
             "SELECT * FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, rowid",

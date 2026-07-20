@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
@@ -206,6 +206,13 @@ def rename_conversation(conversation_id: str, payload: ConversationRenameRequest
     if not conversation_store.rename(conversation_id, title):
         raise HTTPException(status_code=404, detail="研究对话不存在")
     return {"id": conversation_id, "title": title}
+
+
+@router.delete("/api/conversations/{conversation_id}", status_code=204)
+def delete_conversation(conversation_id: str) -> Response:
+    if not conversation_store.delete(conversation_id):
+        raise HTTPException(status_code=404, detail="研究对话不存在")
+    return Response(status_code=204)
 
 
 __all__ = ["router"]

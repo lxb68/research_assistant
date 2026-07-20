@@ -33,6 +33,7 @@ import type { BackgroundJob } from "@/lib/background-jobs";
 const RECENT_JOB_IDS_KEY = "research-agent.background-job-ids";
 const TASK_BUTTON_POSITION_KEY = "research-agent.task-button-position";
 const TASK_BUTTON_VIEWPORT_MARGIN = 8;
+const MAX_RECENT_JOBS = 10;
 const ACTIVE = new Set(["queued", "running", "cancelling"]);
 const TYPE_LABELS: Record<string, string> = {
   dataset_download: "数据集下载",
@@ -78,6 +79,33 @@ const BackgroundTaskContext = createContext<BackgroundTaskContextValue | null>(n
 async function readError(response: Response, fallback: string) {
   const payload = await response.json().catch(() => ({}));
   return payload.detail || payload.error || fallback;
+}
+
+/** 将同一重试链折叠为最新状态，并限制任务中心的展示数量。 */
+function normalizeRecentJobs(jobs: BackgroundJob[]): BackgroundJob[] {
+  const byId = new Map(jobs.map((job) => [job.jobId, job]));
+  const sorted = [...byId.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const visibleRoots = new Set<string>();
+  const visibleJobs: BackgroundJob[] = [];
+
+  for (const job of sorted) {
+    let rootId = job.jobId;
+    let current = job;
+    const visited = new Set([job.jobId]);
+    while (current.retryOf && !visited.has(current.retryOf)) {
+      rootId = current.retryOf;
+      visited.add(rootId);
+      const parent = byId.get(rootId);
+      if (!parent) break;
+      current = parent;
+    }
+    if (visibleRoots.has(rootId)) continue;
+    visibleRoots.add(rootId);
+    visibleJobs.push(job);
+    if (visibleJobs.length === MAX_RECENT_JOBS) break;
+  }
+
+  return visibleJobs;
 }
 
 /** 将浮动按钮限制在当前视口内，避免拖动后无法找回。 */
@@ -216,14 +244,17 @@ export function BackgroundTaskProvider({ children }: { children: React.ReactNode
     setJobs((current) => {
       const byId = new Map(current.map((job) => [job.jobId, job]));
       for (const job of incoming) byId.set(job.jobId, job);
-      return [...byId.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      return normalizeRecentJobs([...byId.values()]);
     });
+  }, []);
+
+  useEffect(() => {
     try {
-      window.localStorage.setItem(RECENT_JOB_IDS_KEY, JSON.stringify(incoming.slice(0, 100).map((job) => job.jobId)));
+      window.localStorage.setItem(RECENT_JOB_IDS_KEY, JSON.stringify(jobs.map((job) => job.jobId)));
     } catch {
       // localStorage 只是最近任务索引缓存，失败时仍以服务端为准。
     }
-  }, []);
+  }, [jobs]);
 
   const refresh = useCallback(async () => {
     const response = await fetch(buildApiUrl("/api/jobs?sessionId=local&limit=100"), { cache: "no-store" });
@@ -237,8 +268,8 @@ export function BackgroundTaskProvider({ children }: { children: React.ReactNode
       }
       previousStatuses.current.set(job.jobId, job.status);
     }
-    mergeJobs(nextJobs);
-  }, [mergeJobs]);
+    setJobs(normalizeRecentJobs(nextJobs));
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void refresh().catch(() => undefined), 0);

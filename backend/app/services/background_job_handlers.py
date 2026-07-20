@@ -18,6 +18,7 @@ from app.services.project_scope import ProjectScopeService
 def _research_arguments(payload: ResearchChatRequest) -> dict[str, Any]:
     return ProjectScopeService(settings.hunter_metadata_db).build_research_arguments(
         project_id=payload.project_id,
+        project_ids=payload.project_ids,
         requested_paper_ids=payload.paper_ids,
         history=[message.model_dump() for message in payload.history],
     )
@@ -56,8 +57,11 @@ def _research_chat(context: BackgroundJobContext, raw: dict[str, Any]) -> dict[s
     def log(message: str) -> None:
         context.log(message)
 
+    def report(progress: int, stage: str, message: str) -> None:
+        context.progress(progress, stage=stage, message=message)
+
     result = asyncio.run(
-        OrchestratorAgent(log_callback=log).run(
+        OrchestratorAgent(log_callback=log, progress_callback=report).run(
             payload.question,
             action="auto",
             arguments=_research_arguments(payload),

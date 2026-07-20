@@ -24,6 +24,9 @@ from app.services.retrieval_refiner import RetrievalRefiner
 from app.tools import ToolRegistry, build_research_tool_registry
 
 
+ProgressCallback = Callable[[int, str, str], None]
+
+
 class OrchestratorAgent:
     """受限编排器：只允许调用已注册的研究工具。"""
 
@@ -69,10 +72,12 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         self,
         *,
         log_callback: Callable[[str], None] | None = None,
+        progress_callback: ProgressCallback | None = None,
         tool_registry: ToolRegistry | None = None,
     ) -> None:
         """初始化当前对象所需的配置与运行状态。"""
         self.ui_log_callback = log_callback
+        self.progress_callback = progress_callback
         self.run_logger = RunLogger(settings.agent_run_log_dir)
         self.tool_registry = tool_registry or build_research_tool_registry()
         self.log_callback = self._child_log
@@ -999,6 +1004,10 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         """依次评估本地证据、补充论文并生成研究回答。"""
         history = self._clean_history(list(args.get("history") or []))
         project_id = str(args.get("project_id") or "workspace-domain-tree").strip()
+        graph_project_id = str(
+            args.get("graph_project_id")
+            or (project_id if not args.get("project_ids") else "")
+        ).strip()
         project_scope_ids = list(dict.fromkeys(
             str(paper_id).strip()
             for paper_id in args.get("project_paper_ids") or []
@@ -1063,6 +1072,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 "complexity": "simple",
                 "targetPaperIds": list(paper_ids or []),
                 "targetChunks": [],
+                "documentRequirements": {},
                 "retrievalFacets": [
                     {"id": "facet-1", "goal": task, "query": task, "preferredSectionTypes": []},
                 ],
@@ -1081,6 +1091,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             data=plan,
         )
         trace.append({"step": "query_planning", "agent": "query_planning", "status": "completed", **plan})
+        self._progress(22, "planning", "研究问题与检索计划已就绪")
         if plan.get("needsClarification"):
             self._log("当前研究追问存在无法唯一确定的指代，需要用户澄清")
             return {
@@ -1105,6 +1116,50 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 for item in target_chunks
                 if str(item.get("record_id") or item.get("recordId") or "").strip() in project_paper_ids
             ]
+        document_requirements = dict(plan.get("documentRequirements") or {})
+        if document_requirements:
+            paper_ids, document_scope = await asyncio.to_thread(
+                research_agent.resolve_document_scope,
+                paper_ids,
+                document_requirements,
+            )
+            plan["targetPaperIds"] = list(paper_ids)
+            filtered_ids = set(paper_ids)
+            target_chunks = [
+                item
+                for item in target_chunks
+                if str(item.get("record_id") or item.get("recordId") or "").strip() in filtered_ids
+            ]
+            self.run_logger.log(
+                "OrchestratorAgent",
+                "文献能力约束已应用",
+                event="document_scope_filter",
+                data=document_scope,
+            )
+            trace.append({
+                "step": "document_scope_filter",
+                "agent": "orchestrator",
+                "status": "completed",
+                **document_scope,
+            })
+            if not paper_ids:
+                return {
+                    "agent": "orchestrator",
+                    "action": "request_materials",
+                    "result": {
+                        "status": "needs_materials",
+                        "message": "当前所选项目中没有满足内容条件的文献，请补充或解析相关 PDF 后重试。",
+                        "requiredMaterials": [
+                            {
+                                "type": "document_capability",
+                                "description": "请补充满足所选内容条件的文献，或先完成现有 PDF 的全文解析。",
+                            }
+                        ],
+                        "documentScopeDiagnostics": document_scope,
+                        "trace": trace,
+                        "runLog": self.run_logger.public_info(),
+                    },
+                }
         retrieval_facets = list(plan.get("retrievalFacets") or [])
         question_type = str(plan.get("questionType") or "simple_fact")
         target_evidence_count = int(plan.get("targetEvidenceCount") or settings.orchestrator_min_evidence)
@@ -1112,6 +1167,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         retrieval_query = str(plan.get("standaloneQuestion") or task).strip()
 
         self._log("正在判断本地知识库证据是否充分")
+        self._progress(38, "retrieving", "正在检索所选知识库")
         raise_if_task_cancelled(cancel_event)
         evidence, diagnostics = await asyncio.to_thread(
             research_agent.retrieve_evidence,
@@ -1123,9 +1179,10 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             retrieval_facets=retrieval_facets,
             question_type=question_type,
             target_evidence_count=target_evidence_count,
-            **({"graph_project_id": project_id} if args.get("project_id") else {}),
+            **({"graph_project_id": graph_project_id} if graph_project_id else {}),
         )
         raise_if_task_cancelled(cancel_event)
+        self._progress(58, "validating", "正在交叉验证检索证据")
         evaluation = await self._evaluate_retrieved_evidence(
             diagnostics,
             evidence=evidence,
@@ -1164,6 +1221,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         refinement_facets = self.retrieval_refiner.refine(plan, evaluation) if not sufficient else []
         if not sufficient and max_retrieval_rounds > 1 and refinement_facets:
                 self._log("首轮证据存在覆盖缺口，正在执行一次补偿检索")
+                self._progress(66, "retrieving", "正在补偿检索证据缺口")
                 raise_if_task_cancelled(cancel_event)
                 evidence, diagnostics = await asyncio.to_thread(
                     research_agent.retrieve_evidence,
@@ -1179,6 +1237,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                     **({"graph_project_id": project_id} if args.get("project_id") else {}),
                 )
                 raise_if_task_cancelled(cancel_event)
+                self._progress(72, "validating", "正在验证补偿检索结果")
                 evaluation = await self._evaluate_retrieved_evidence(
                     diagnostics,
                     evidence=evidence,
@@ -1354,6 +1413,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             if sufficient
             else "将基于已验证证据生成有边界的回答"
         )
+        self._progress(84, "composing", "正在基于已验证证据生成回答")
         evidence_indices = {
             f"{str(item.get('record_id') or '')}:{int(item.get('chunk_index') or 0)}": index
             for index, item in enumerate(evidence, start=1)
@@ -1431,6 +1491,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             "status": "completed",
             "recoveryTrace": recovery_trace,
         })
+        self._progress(94, "composing", "研究回答已生成，正在整理引用")
         return {
             "agent": "orchestrator",
             "action": "chat",
@@ -1641,6 +1702,11 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         self.run_logger.log(component, message)
         if self.ui_log_callback:
             self.ui_log_callback(message)
+
+    def _progress(self, value: int, stage: str, message: str) -> None:
+        """向任务层上报结构化研究阶段，不让界面猜测日志文本。"""
+        if self.progress_callback:
+            self.progress_callback(value, stage, message)
 
 
 __all__ = ["OrchestratorAgent"]

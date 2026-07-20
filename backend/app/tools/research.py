@@ -10,6 +10,7 @@ from typing import Any, Callable
 from app.core.config import settings
 from app.services.ccf_catalog import CcfCatalog
 from app.services.domain_tree_store import DomainTreeStore
+from app.services.document_capabilities import paper_capabilities
 from app.services.paper_repository import PaperRepository
 from app.services.paper_search import SUPPORTED_SOURCES, search_papers
 from app.services.rag_factory import build_default_rag_retriever
@@ -352,9 +353,10 @@ class ResearchReadOnlyTools:
         return paper
 
     def _paper_summary(self, paper: dict[str, Any]) -> dict[str, Any]:
-        has_abstract = bool(str(paper.get("abstract") or "").strip())
-        has_pdf = self._has_pdf(paper)
-        has_parsed_full_text = self._has_full_text(paper)
+        capabilities = paper_capabilities(paper)
+        has_abstract = capabilities["hasAbstract"]
+        has_pdf = capabilities["hasPdf"]
+        has_parsed_full_text = capabilities["hasParsedFullText"]
         return {
             "recordId": paper.get("id", ""), "title": paper.get("title", ""),
             "authors": list(paper.get("authors") or [])[:20], "year": paper.get("year", ""),
@@ -464,17 +466,11 @@ class ResearchReadOnlyTools:
 
     @staticmethod
     def _has_pdf(paper: dict[str, Any]) -> bool:
-        path = str(paper.get("pdfPath") or paper.get("pdf_path") or "").strip()
-        return bool(path and Path(path).is_file())
+        return paper_capabilities(paper)["hasPdf"]
 
     @staticmethod
     def _has_full_text(paper: dict[str, Any]) -> bool:
-        for key in ("markdownPath", "markdown_path"):
-            path = str(paper.get(key) or "").strip()
-            if path and Path(path).is_file():
-                return True
-        output_dir = str(paper.get("markdownOutputDir") or paper.get("markdown_output_dir") or "").strip()
-        return bool(output_dir and (Path(output_dir) / "full.md").is_file())
+        return paper_capabilities(paper)["hasParsedFullText"]
 
 
 def build_research_tool_registry() -> ToolRegistry:

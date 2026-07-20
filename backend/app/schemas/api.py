@@ -121,6 +121,7 @@ class ResearchChatRequest(BaseModel):
     history: list[ChatMessage] = Field(default_factory=list, max_length=20)
     paper_ids: list[str] = Field(default_factory=list, max_length=100)
     project_id: str = Field("workspace-domain-tree", min_length=1, max_length=200)
+    project_ids: list[str] = Field(default_factory=list, max_length=20)
 
 
 class OrchestratorRequest(BaseModel):

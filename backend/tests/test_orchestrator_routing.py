@@ -377,8 +377,64 @@ class OrchestratorRoutingTest(unittest.IsolatedAsyncioTestCase):
             retrieval_facets=[],
             question_type="simple_fact",
             target_evidence_count=2,
+            graph_project_id="workspace-domain-tree",
         )
         self.assertEqual(research_agent.run.call_args.kwargs["evidence"], evidence)
+
+    @patch("app.agents.orchestrator_agent.ResearchChatAgent")
+    async def test_pipeline_filters_capability_scope_before_evidence_validation(
+        self,
+        research_agent_class: Mock,
+    ) -> None:
+        """项目授权范围不能被误当成需要逐篇覆盖的证据目标。"""
+        research_agent = research_agent_class.return_value
+        research_agent.plan_retrieval.return_value = (
+            {
+                "standaloneQuestion": "介绍有完整全文并解析的文献",
+                "targetPaperIds": ["parsed-a", "unparsed", "parsed-b"],
+                "targetChunks": [],
+                "documentRequirements": {"hasParsedFullText": True},
+                "needsClarification": False,
+            },
+            "{}",
+        )
+        research_agent.resolve_document_scope.return_value = (
+            ["parsed-a", "parsed-b"],
+            {
+                "requirements": {"hasParsedFullText": True},
+                "candidatePaperCount": 3,
+                "matchedPaperCount": 2,
+                "matchedPaperIds": ["parsed-a", "parsed-b"],
+            },
+        )
+        evidence = [
+            {"record_id": "parsed-a", "chunk_index": 1, "title": "A", "text": "A", "score": 1.0},
+            {"record_id": "parsed-b", "chunk_index": 1, "title": "B", "text": "B", "score": 1.0},
+        ]
+        research_agent.retrieve_evidence.return_value = (
+            evidence,
+            {"paperCount": 2, "evidenceCount": 2, "selectedPaperIds": ["parsed-a", "parsed-b"]},
+        )
+        research_agent.run.return_value = {"answer": "回答 [1][2]", "sources": []}
+        agent = OrchestratorAgent()
+        agent.run_logger = Mock()
+        agent._evaluate_retrieved_evidence = AsyncMock(return_value={"sufficient": True, "reasons": []})
+
+        result = await agent._run_research_pipeline(
+            "介绍有完整全文并解析的文献",
+            {"project_paper_ids": ["parsed-a", "unparsed", "parsed-b"], "allow_external_search": False},
+        )
+
+        self.assertEqual(result["action"], "chat")
+        self.assertEqual(research_agent.retrieve_evidence.call_args.kwargs["paper_ids"], ["parsed-a", "parsed-b"])
+        self.assertEqual(
+            agent._evaluate_retrieved_evidence.call_args.kwargs["required_paper_ids"],
+            ["parsed-a", "parsed-b"],
+        )
+        self.assertEqual(
+            agent._evaluate_retrieved_evidence.call_args.kwargs["plan"]["targetPaperIds"],
+            ["parsed-a", "parsed-b"],
+        )
 
     @patch("app.agents.orchestrator_agent.ResearchChatAgent")
     async def test_pipeline_stops_when_context_plan_needs_clarification(self, research_agent_class: Mock) -> None:

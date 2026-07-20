@@ -111,6 +111,23 @@ class ProjectIsolationTest(unittest.TestCase):
                 history=[],
             )
 
+    def test_research_scope_merges_multiple_projects_without_cross_project_graph(self) -> None:
+        project_a = self.projects.create(name="项目 A", paper_ids=["paper-a"])
+        project_b = self.projects.create(name="项目 B", paper_ids=["paper-b"])
+        scope = ProjectScopeService(self.database)
+
+        arguments = scope.build_research_arguments(
+            project_id=project_a["id"],
+            project_ids=[project_a["id"], project_b["id"], project_a["id"]],
+            requested_paper_ids=[],
+            history=[],
+        )
+
+        self.assertEqual(arguments["project_ids"], [project_a["id"], project_b["id"]])
+        self.assertEqual(arguments["paper_ids"], ["paper-a", "paper-b"])
+        self.assertEqual(arguments["project_paper_ids"], ["paper-a", "paper-b"])
+        self.assertEqual(arguments["graph_project_id"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

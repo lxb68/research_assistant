@@ -26,6 +26,7 @@ from app.services.evidence_groups import (
 from app.services.rag_factory import build_default_rag_retriever
 from app.services.rag_retriever import EvidenceChunk, RAGRetriever
 from app.services.retrieval_contracts import compile_tfidf_query, normalize_section_types
+from app.services.document_capabilities import filter_papers_by_requirements
 
 
 LogCallback = Callable[[str], None]
@@ -156,6 +157,7 @@ class ResearchChatAgent:
                 "graphEvidenceIds": list(item.get("graph_evidence_ids") or []),
                 "graphRelationIds": list(item.get("graph_relation_ids") or []),
                 "graphNavigationClaims": list(item.get("graph_navigation_claims") or []),
+                "graphQuotes": list(item.get("graph_quotes") or []),
                 "excerpt": item["text"][:320],
                 "score": round(float(item["score"]), 4),
             }
@@ -687,6 +689,16 @@ class ResearchChatAgent:
             papers = [self.hunter.get_saved_paper(record_id) for record_id in paper_ids]
             return [paper for paper in papers if isinstance(paper, dict)]
         return self.hunter.list_saved_papers(limit=self.config.max_papers)
+
+    def resolve_document_scope(
+        self,
+        paper_ids: list[str] | None,
+        document_requirements: dict[str, bool] | None,
+    ) -> tuple[list[str], dict[str, Any]]:
+        """在授权候选范围内按真实文献能力解析最终检索范围。"""
+        papers = self._load_papers(paper_ids)
+        matched, diagnostics = filter_papers_by_requirements(papers, document_requirements)
+        return [str(paper.get("id") or "") for paper in matched if str(paper.get("id") or "")], diagnostics
 
     def _expand_retrieval_query(self, query: str) -> str:
         """扩展检索词。"""

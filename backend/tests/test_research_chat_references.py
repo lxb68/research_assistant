@@ -6,6 +6,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -128,6 +129,27 @@ class ResearchChatReferenceTest(unittest.TestCase):
         self.assertEqual(plan["standaloneQuestion"], "比较 RAG 与微调的适用场景")
         self.assertNotIn("你有哪些功能", plan["standaloneQuestion"])
 
+    def test_document_scope_uses_real_parsed_files_in_authorized_candidates(self) -> None:
+        """能力约束必须依据真实文件，并且不能越过调用方给定的候选范围。"""
+        with TemporaryDirectory() as directory:
+            parsed_path = Path(directory) / "parsed.md"
+            parsed_path.write_text("正文", encoding="utf-8")
+            papers = {
+                "parsed": {"id": "parsed", "markdownPath": str(parsed_path)},
+                "missing": {"id": "missing", "markdownPath": str(Path(directory) / "missing.md")},
+                "outside": {"id": "outside", "markdownPath": str(parsed_path)},
+            }
+            self.agent.hunter.get_saved_paper.side_effect = papers.get
+
+            paper_ids, diagnostics = self.agent.resolve_document_scope(
+                ["parsed", "missing"],
+                {"hasParsedFullText": True},
+            )
+
+        self.assertEqual(paper_ids, ["parsed"])
+        self.assertEqual(diagnostics["candidatePaperCount"], 2)
+        self.assertEqual(diagnostics["matchedPaperIds"], ["parsed"])
+
     def test_retrieve_evidence_uses_standalone_query_and_restores_target_chunk(self) -> None:
         """检索器应使用规划后的问题，并优先合并指定片段。"""
         papers = [{"id": "paper-1", "title": "Paper One"}]
@@ -160,6 +182,12 @@ class ResearchChatReferenceTest(unittest.TestCase):
                 "title": "Paper One",
                 "text": "evidence",
                 "score": 1.0,
+                "graph_backed": True,
+                "retrieval_channels": ["graph_navigation", "original_text"],
+                "graph_evidence_ids": ["evidence-1"],
+                "graph_relation_ids": ["relation-1"],
+                "graph_navigation_claims": ["方法 A 改善了视角鲁棒性"],
+                "graph_quotes": ["原文中的图谱证据"],
             }
         ]
         self.agent._complete = Mock(return_value="结论 [1]")
@@ -171,6 +199,8 @@ class ResearchChatReferenceTest(unittest.TestCase):
         self.agent.retriever.retrieve.assert_not_called()
         self.assertEqual(result["answer"], "结论 [1]")
         self.assertEqual(result["sources"][0]["recordId"], "paper-1")
+        self.assertTrue(result["sources"][0]["graphBacked"])
+        self.assertEqual(result["sources"][0]["graphQuotes"], ["原文中的图谱证据"])
 
     @patch("app.agents.research_chat_agent.chat_completion")
     def test_answer_generation_treats_resolved_old_claim_as_question_not_evidence(self, completion: Mock) -> None:

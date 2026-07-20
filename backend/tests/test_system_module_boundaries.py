@@ -9,6 +9,7 @@ from app.services.answer_policy import AnswerPolicy
 from app.services.candidate_retriever import CandidateRetriever
 from app.services.context_resolver import ContextResolver
 from app.services.document_structure_indexer import DocumentStructureIndexer
+from app.services.document_capabilities import normalize_document_requirements
 from app.services.grounding_validator import GroundingValidator
 from app.services.question_contract_builder import QuestionContractBuilder
 from app.services.retrieval_refiner import RetrievalRefiner
@@ -52,6 +53,25 @@ def test_question_contract_builder_rejects_unknown_scope() -> None:
     assert contract.invalidTargetIds == ["invented"]
     assert contract.retrievalFacets[0]["preferredSectionTypes"] == ["method"]
     assert contract.requirementSpecs[0]["evidenceIntent"] == "mechanism"
+
+
+def test_question_contract_builder_preserves_only_typed_document_requirements() -> None:
+    contract = QuestionContractBuilder().build(
+        {
+            "standalone_question": "介绍已解析全文的文献",
+            "document_requirements": {
+                "has_pdf": None,
+                "has_abstract": "yes",
+                "has_parsed_full_text": True,
+                "unknown_capability": True,
+            },
+        },
+        question="介绍已解析全文的文献",
+        candidate_sources=[],
+    )
+
+    assert contract.documentRequirements == {"hasParsedFullText": True}
+    assert normalize_document_requirements(contract.documentRequirements) == {"hasParsedFullText": True}
 
 
 def test_document_structure_indexer_preserves_structure_continuity() -> None:
