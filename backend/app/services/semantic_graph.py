@@ -26,8 +26,9 @@ from app.services.task_control import (
 logger = logging.getLogger(__name__)
 
 _MODEL_OUTPUT_PREVIEW_CHARS = 2000
-_CACHE_SCHEMA_VERSION = "semantic-graph-v2-source-language"
-_TYPE_MAPPING_SCHEMA_VERSION = "entity-type-mapping-v1-dynamic"
+_CACHE_SCHEMA_VERSION = "semantic-graph-v3-entity-type-language"
+_TYPE_MAPPING_SCHEMA_VERSION = "entity-type-mapping-v2-target-language"
+_CHINESE_TEXT_PATTERN = re.compile(r"[\u3400-\u9fff]")
 
 
 def _log_text_preview(value: Any, *, limit: int = _MODEL_OUTPUT_PREVIEW_CHARS) -> str:
@@ -77,6 +78,7 @@ class SemanticGraphExtractor:
         chat_fn: Callable[..., str] = chat_completion,
         chunk_size: int = 6000,
         chunk_overlap: int = 400,
+        entity_type_language: str = "English",
         cache_dir: str | Path | None = None,
         max_workers: int = 4,
         cancel_event: threading.Event | None = None,
@@ -87,6 +89,7 @@ class SemanticGraphExtractor:
         self.chat_fn = chat_fn
         self.chunk_size = max(1200, chunk_size)
         self.chunk_overlap = max(0, min(chunk_overlap, self.chunk_size // 3))
+        self.entity_type_language = self._normalize_entity_type_language(entity_type_language)
         self.cache_dir = Path(cache_dir).resolve() if cache_dir else None
         self.max_workers = max(1, min(int(max_workers), 16))
         self.cancel_event = cancel_event
@@ -194,6 +197,17 @@ class SemanticGraphExtractor:
             raise_if_cancelled(self.cancel_event)
             cache_key = self._chunk_cache_key(document, chunk)
             payload = self._load_cached_payload(cache_key)
+            if payload is not None:
+                invalid_types = self._invalid_entity_types(payload)
+                if invalid_types:
+                    logger.warning(
+                        "[%s] 忽略实体类型语言不合格的语义缓存：chunk=%s expected=%s types=%s",
+                        document.record_id,
+                        chunk.index,
+                        self.entity_type_language,
+                        invalid_types,
+                    )
+                    payload = None
             if payload is None:
                 cache_miss_count += 1
                 uncached_items.append((order, document, chunk, cache_key))
@@ -338,6 +352,7 @@ class SemanticGraphExtractor:
             "protocol": self.runtime.get("protocol", ""),
             "model": self.runtime.get("model", ""),
             "base_url": self.runtime.get("base_url", ""),
+            "entityTypeLanguage": self.entity_type_language,
             "title": document.title,
             "section": chunk.section,
             "text": chunk.text,
@@ -486,17 +501,7 @@ class SemanticGraphExtractor:
             logger.warning("[%s] 未配置模型，跳过第 %s 个语义分块", document.record_id, chunk.index)
             return None
         prompt = self._build_extraction_prompt(document, chunk)
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "你是科研文献语义抽取器。只能依据给定原文抽取，不得补充常识或猜测。"
-                    "必须返回合法 JSON，不要使用 Markdown 代码块。"
-                    "实体名称、实体类型、别名、属性、关系谓词和证据必须保留原文语言，禁止翻译。"
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ]
+        messages = self._build_extraction_messages(prompt)
         started_at = time.perf_counter()
         logger.info(
             "[%s] 语义分块模型请求开始：chunk=%s section=%s chunk_chars=%s prompt_chars=%s "
@@ -509,25 +514,34 @@ class SemanticGraphExtractor:
             settings.request_timeout,
         )
         try:
-            answer = call_with_retry(
-                lambda: self.chat_fn(
-                    self.runtime,
-                    messages,
-                    temperature=0.0,
-                    timeout=settings.request_timeout,
-                ),
-                max_attempts=settings.domain_tree_retry_attempts,
-                base_delay_seconds=settings.domain_tree_retry_base_delay_seconds,
-                cancel_event=self.cancel_event,
-                on_retry=lambda attempt, error, delay: self._on_chunk_retry(
-                    document,
-                    chunk,
-                    attempt,
-                    error,
-                    delay,
-                ),
-            )
+            answer = self._call_chunk_model(messages, document, chunk)
             payload = self._extract_json_object(answer)
+            invalid_types = self._invalid_entity_types(payload)
+            if invalid_types:
+                logger.warning(
+                    "[%s] 实体类型语言不符合要求：chunk=%s expected=%s types=%s，正在纠正",
+                    document.record_id,
+                    chunk.index,
+                    self.entity_type_language,
+                    invalid_types,
+                )
+                correction_messages = [
+                    *messages,
+                    {"role": "assistant", "content": answer},
+                    {"role": "user", "content": self._build_type_language_correction(invalid_types)},
+                ]
+                answer = self._call_chunk_model(correction_messages, document, chunk)
+                payload = self._extract_json_object(answer)
+                remaining_invalid_types = self._invalid_entity_types(payload)
+                if remaining_invalid_types:
+                    logger.warning(
+                        "[%s] 实体类型纠正后仍不符合要求：chunk=%s expected=%s types=%s，使用通用类型",
+                        document.record_id,
+                        chunk.index,
+                        self.entity_type_language,
+                        remaining_invalid_types,
+                    )
+                    self._replace_invalid_entity_types(payload)
             entities = payload.get("entities") if isinstance(payload.get("entities"), list) else []
             relations = payload.get("relations") if isinstance(payload.get("relations"), list) else []
             logger.info(
@@ -553,6 +567,67 @@ class SemanticGraphExtractor:
                 error,
             )
             return None
+
+    def _build_extraction_messages(self, prompt: str) -> list[dict[str, str]]:
+        """构造与实体类型目标语言一致的模型消息。"""
+        if self.entity_type_language == "中文":
+            system_prompt = (
+                "你是科研文献语义抽取器。只能依据给定原文抽取，不得补充常识或猜测。"
+                "必须返回合法 JSON，不要使用 Markdown 代码块。"
+                "实体类型必须使用简洁中文分类标签；其他抽取字段必须保留原文语言。"
+            )
+        else:
+            system_prompt = (
+                "You extract structured semantics only from the supplied research text. "
+                "Do not add background knowledge or guesses. Return valid JSON without Markdown. "
+                "Entity type labels must be concise English category labels and must not contain "
+                "Chinese characters. All other extracted fields must preserve the source language."
+            )
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+    def _call_chunk_model(
+        self,
+        messages: list[dict[str, str]],
+        document: SemanticSourceDocument,
+        chunk: TextChunk,
+    ) -> str:
+        """统一执行分块抽取和语言纠错请求，并复用传输层重试策略。"""
+        return call_with_retry(
+            lambda: self.chat_fn(
+                self.runtime,
+                messages,
+                temperature=0.0,
+                timeout=settings.request_timeout,
+            ),
+            max_attempts=settings.domain_tree_retry_attempts,
+            base_delay_seconds=settings.domain_tree_retry_base_delay_seconds,
+            cancel_event=self.cancel_event,
+            on_retry=lambda attempt, error, delay: self._on_chunk_retry(
+                document,
+                chunk,
+                attempt,
+                error,
+                delay,
+            ),
+        )
+
+    def _build_type_language_correction(self, invalid_types: list[str]) -> str:
+        """要求模型仅纠正类型语言并完整返回原 JSON。"""
+        if self.entity_type_language == "中文":
+            return (
+                f"以下实体类型不是中文分类标签：{json.dumps(invalid_types, ensure_ascii=False)}。"
+                "请只把这些 type 改成语义等价、简洁的中文分类标签；其他字段不得改变。"
+                "完整返回修正后的合法 JSON。"
+            )
+        return (
+            "The following entity types violate the English-only type contract: "
+            f"{json.dumps(invalid_types, ensure_ascii=False)}. "
+            "Change only those type values to concise, semantically equivalent English category "
+            "labels. Do not change any other field. Return the complete corrected JSON."
+        )
 
     def _on_chunk_retry(
         self,
@@ -581,6 +656,68 @@ class SemanticGraphExtractor:
 
     def _build_extraction_prompt(self, document: SemanticSourceDocument, chunk: TextChunk) -> str:
         """构造严格、可被多种模型理解的 JSON 抽取提示词。"""
+        if self.entity_type_language == "English":
+            return f"""Extract entities, entity attributes, and relations from the research text below.
+
+Document ID: {document.record_id}
+Document title: {document.title}
+Section: {chunk.section}
+
+Requirements:
+1. Keep only research-relevant entities, such as methods, models, algorithms, materials, diseases, drugs, genes, datasets, metrics, organizations, people, tasks, and theories.
+2. canonicalName must be the most complete source-language name; aliases may contain only aliases or abbreviations explicitly present in the source.
+3. Attributes must be explicit source parameters, values, units, times, performance measurements, or categories.
+4. relationType must be one of general, causal, comparison, experimental, or property.
+5. Use causal only for an explicit causal claim; never turn correlation into causation.
+6. evidenceQuote must be copied verbatim from this chunk. Omit an item if no direct quote supports it.
+7. confidence must be a number from 0 to 1.
+8. Relation source and target must use entity localId values.
+9. name, canonicalName, aliases, attribute names, and attribute values must preserve the source language and terminology without translation.
+10. predicate must preserve the source language; never translate a relation phrase.
+11. evidenceQuote must preserve the source language verbatim without translation, rewriting, or summarization.
+12. type is an inferred category label. It must use concise English only and must never contain Chinese characters. It does not need to appear verbatim in the source.
+
+Return exactly this JSON shape:
+{{
+  "entities": [
+    {{
+      "localId": "e1",
+      "name": "source name",
+      "canonicalName": "canonical source name",
+      "type": "model",
+      "aliases": ["source alias"],
+      "attributes": [{{"name": "source attribute name", "value": "source attribute value", "unit": "source unit"}}],
+      "evidenceQuote": "verbatim source quote"
+    }}
+  ],
+  "relations": [
+    {{
+      "source": "e1",
+      "target": "e2",
+      "predicate": "source relation phrase",
+      "relationType": "general",
+      "confidence": 0.9,
+      "evidenceQuote": "verbatim source quote"
+    }}
+  ]
+}}
+
+Source text:
+{chunk.text}
+"""
+
+        type_rule = "type 是推断得到的分类标签，必须使用简洁中文，不要求逐字出现在原文中。"
+        example = {
+            "name": "原文名称",
+            "canonical": "规范名称",
+            "type": "模型",
+            "alias": "原文别名",
+            "attribute_name": "原文属性名",
+            "attribute_value": "原文属性值",
+            "unit": "原文单位",
+            "quote": "原文短句",
+            "predicate": "原文关系名称",
+        }
         return f"""请从以下科研文献原文抽取实体、实体属性和实体间关系。
 
 文献ID：{document.record_id}
@@ -596,31 +733,32 @@ class SemanticGraphExtractor:
 6. evidenceQuote 必须逐字复制本段中的短句，禁止改写；无法找到直接证据时不要输出该项。
 7. confidence 使用 0 到 1 之间的数字。
 8. 关系的 source 和 target 使用 entities 中的 localId。
-9. name、canonicalName、type、aliases、属性名称与值必须使用原文语言和原文术语，禁止翻译。
+9. name、canonicalName、aliases、属性名称与值必须使用原文语言和原文术语，禁止翻译。
 10. predicate 必须使用原文语言描述，禁止把英文关系翻译为中文或把中文关系翻译为英文。
 11. evidenceQuote 必须保持原文语言并逐字引用，禁止翻译、改写或概括。
+12. {type_rule}
 
 严格返回以下结构：
 {{
   "entities": [
     {{
       "localId": "e1",
-      "name": "原文名称",
-      "canonicalName": "规范名称",
-      "type": "实体类型",
-      "aliases": ["别名"],
-      "attributes": [{{"name": "属性名", "value": "属性值", "unit": "单位"}}],
-      "evidenceQuote": "原文短句"
+      "name": "{example['name']}",
+      "canonicalName": "{example['canonical']}",
+      "type": "{example['type']}",
+      "aliases": ["{example['alias']}"],
+      "attributes": [{{"name": "{example['attribute_name']}", "value": "{example['attribute_value']}", "unit": "{example['unit']}"}}],
+      "evidenceQuote": "{example['quote']}"
     }}
   ],
   "relations": [
     {{
       "source": "e1",
       "target": "e2",
-      "predicate": "关系名称",
+      "predicate": "{example['predicate']}",
       "relationType": "general",
       "confidence": 0.9,
-      "evidenceQuote": "原文短句"
+      "evidenceQuote": "{example['quote']}"
     }}
   ]
 }}
@@ -679,6 +817,7 @@ class SemanticGraphExtractor:
                 local_entity_ids[normalized] = entity_id
             attributes = self._normalize_attributes(raw_entity.get("attributes"), evidence_id)
             observed_type = str(raw_entity.get("type") or "entity").strip() or "entity"
+            raw_observed_type = str(raw_entity.get("_invalidEntityType") or observed_type).strip()
             existing = state["entities"].get(entity_id)
             if existing:
                 existing["aliases"] = sorted(set(existing["aliases"] + aliases + [mention]) - {existing["name"]})
@@ -686,12 +825,17 @@ class SemanticGraphExtractor:
                 existing["evidenceIds"] = sorted(set(existing["evidenceIds"] + ([evidence_id] if evidence_id else [])))
                 existing["documentIds"] = sorted(set(existing["documentIds"] + [document.record_id]))
                 existing["typeCounts"][observed_type] = existing["typeCounts"].get(observed_type, 0) + 1
+                existing["rawTypeLabels"] = sorted(
+                    set(existing.get("rawTypeLabels", []) + [raw_observed_type]),
+                    key=str.casefold,
+                )
                 continue
             state["entities"][entity_id] = {
                 "id": entity_id,
                 "name": name,
                 "type": observed_type,
                 "typeCounts": {observed_type: 1},
+                "rawTypeLabels": [raw_observed_type],
                 "aliases": sorted(set(aliases + ([mention] if mention != name else []))),
                 "attributes": attributes,
                 "evidenceIds": [evidence_id] if evidence_id else [],
@@ -768,9 +912,16 @@ class SemanticGraphExtractor:
             normalized = deterministic_mapping[raw_type]
             normalized_type_counts[normalized] = normalized_type_counts.get(normalized, 0) + count
 
-        semantic_mapping = {label: label for label in normalized_type_counts}
+        semantic_mapping = {
+            label: label if self._is_valid_entity_type_language(label) else self._default_entity_type()
+            for label in normalized_type_counts
+        }
         mode = "deterministic"
-        if len(normalized_type_counts) > 1 and self.runtime:
+        needs_model_mapping = len(normalized_type_counts) > 1 or any(
+            not self._is_valid_entity_type_language(label)
+            for label in normalized_type_counts
+        )
+        if needs_model_mapping and self.runtime:
             inferred_mapping = self._infer_type_mapping(normalized_type_counts)
             if inferred_mapping is not None:
                 semantic_mapping.update(inferred_mapping)
@@ -778,16 +929,23 @@ class SemanticGraphExtractor:
 
         for entity in entities:
             counts = entity.pop("typeCounts", None)
+            observed_raw_types = entity.pop("rawTypeLabels", None)
             if not isinstance(counts, dict) or not counts:
                 raw_type = str(entity.get("type") or "entity").strip() or "entity"
                 counts = {raw_type: 1}
             canonical_counts: dict[str, int] = {}
-            raw_types: list[str] = []
+            raw_types = (
+                [str(label).strip() for label in observed_raw_types if str(label).strip()]
+                if isinstance(observed_raw_types, list)
+                else []
+            )
+            has_observed_raw_types = bool(raw_types)
             for raw_type, count in counts.items():
                 label = str(raw_type or "").strip()
                 if not label:
                     continue
-                raw_types.append(label)
+                if not has_observed_raw_types:
+                    raw_types.append(label)
                 normalized = deterministic_mapping.get(label, self._normalize_type_label(label))
                 canonical = semantic_mapping.get(normalized, normalized)
                 canonical_counts[canonical] = canonical_counts.get(canonical, 0) + max(1, int(count or 1))
@@ -813,7 +971,7 @@ class SemanticGraphExtractor:
         }
 
     def _infer_type_mapping(self, type_counts: dict[str, int]) -> dict[str, str] | None:
-        """让模型仅对本次出现的类型进行开放式等价归并，并严格校验返回标签。"""
+        """让模型归并本次类型，并把 canonical 约束到目标语言。"""
         labels = sorted(type_counts)
         cache_key = self._type_mapping_cache_key(type_counts)
         cached = self._load_cached_payload(cache_key)
@@ -822,7 +980,12 @@ class SemanticGraphExtractor:
             if mapping is not None:
                 return mapping
 
-        prompt = f"""请归并下面这些科研知识图谱实体类型标签中的语义等价项。
+        if self.entity_type_language == "中文":
+            system_prompt = (
+                "你是知识图谱类型归并器。只归并语义等价标签。"
+                "canonical 必须是简洁中文分类标签，不得改变成员标签的专业含义。"
+            )
+            prompt = f"""请归并下面这些科研知识图谱实体类型标签中的语义等价项。
 
 输入标签及出现次数：
 {json.dumps(type_counts, ensure_ascii=False, sort_keys=True)}
@@ -830,21 +993,41 @@ class SemanticGraphExtractor:
 要求：
 1. 只合并含义相同的类型；上位类、下位类或相关类型不得合并。
 2. 大小写、单复数、缩写和跨语言翻译可在确实等价时合并。
-3. canonical 必须逐字选自输入标签，禁止创造新类型。
-4. 每个输入标签必须且只能出现一次。
-5. 优先选择出现次数较多、表达清晰的标签作为 canonical。
-6. 只返回合法 JSON，不要解释。
+3. canonical 必须是与组内成员语义等价的简洁中文分类标签。
+4. 如果组内已有合适的中文标签，canonical 必须逐字选用该中文标签。
+5. 只有组内完全没有中文标签时，才允许为翻译目的生成新的中文 canonical。
+6. 每个输入标签必须且只能出现一次。
+7. 只返回合法 JSON，不要解释。
 
 返回结构：
-{{"groups":[{{"canonical":"输入中的一个标签","members":["等价标签1","等价标签2"]}}]}}
+{{"groups":[{{"canonical":"中文类型标签","members":["等价标签1","等价标签2"]}}]}}
+"""
+        else:
+            system_prompt = (
+                "You merge only semantically equivalent knowledge-graph entity type labels. "
+                "Every canonical label must be concise English and preserve the members' specificity."
+            )
+            prompt = f"""Merge semantically equivalent research knowledge-graph entity type labels.
+
+Input labels and counts:
+{json.dumps(type_counts, ensure_ascii=False, sort_keys=True)}
+
+Requirements:
+1. Merge only equivalent labels; never merge parent, child, or merely related types.
+2. Case, number, abbreviation, and cross-language variants may be merged only when equivalent.
+3. canonical must be a concise English category label equivalent to every member.
+4. If a suitable English member exists, canonical must exactly use that English member.
+5. A new canonical is allowed only to translate a group that has no English member.
+6. Every input label must appear exactly once.
+7. Return valid JSON only, without explanation.
+
+Return shape:
+{{"groups":[{{"canonical":"English type label","members":["equivalent label 1","equivalent label 2"]}}]}}
 """
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "你是知识图谱类型归并器。根据输入数据动态建立等价组，"
-                    "不得使用预设类型表，不得新增、翻译或改写标签。"
-                ),
+                "content": system_prompt,
             },
             {"role": "user", "content": prompt},
         ]
@@ -882,7 +1065,7 @@ class SemanticGraphExtractor:
         payload: dict[str, Any],
         labels: list[str],
     ) -> dict[str, str] | None:
-        """只接受覆盖全部输入且未引入新标签的类型分组。"""
+        """只接受完整覆盖输入且 canonical 符合目标语言的类型分组。"""
         groups = payload.get("groups") if isinstance(payload.get("groups"), list) else []
         allowed = set(labels)
         mapping: dict[str, str] = {}
@@ -892,7 +1075,13 @@ class SemanticGraphExtractor:
             canonical = self._normalize_type_label(str(group.get("canonical") or ""))
             members = group.get("members") if isinstance(group.get("members"), list) else []
             normalized_members = [self._normalize_type_label(str(member or "")) for member in members]
-            if canonical not in allowed or canonical not in normalized_members:
+            if not self._is_valid_entity_type_language(canonical):
+                return None
+            target_language_members = [
+                member for member in normalized_members
+                if self._is_valid_entity_type_language(member)
+            ]
+            if target_language_members and canonical not in target_language_members:
                 return None
             for member in normalized_members:
                 if member not in allowed or member in mapping:
@@ -909,10 +1098,54 @@ class SemanticGraphExtractor:
             "protocol": self.runtime.get("protocol", ""),
             "model": self.runtime.get("model", ""),
             "base_url": self.runtime.get("base_url", ""),
+            "entityTypeLanguage": self.entity_type_language,
             "types": type_counts,
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    def _normalize_entity_type_language(self, value: str) -> str:
+        """把外部语言配置收敛为语义抽取器支持的两种类型语言。"""
+        normalized = str(value or "English").strip().casefold()
+        if normalized in {"zh", "zh-cn", "cn", "中文", "chinese"}:
+            return "中文"
+        return "English"
+
+    def _default_entity_type(self) -> str:
+        """返回目标语言下的安全通用类型。"""
+        return "实体" if self.entity_type_language == "中文" else "entity"
+
+    def _is_valid_entity_type_language(self, value: str) -> bool:
+        """校验推断类型是否满足当前目标语言契约。"""
+        label = str(value or "").strip()
+        if not label:
+            return False
+        contains_chinese = bool(_CHINESE_TEXT_PATTERN.search(label))
+        if self.entity_type_language == "中文":
+            return contains_chinese
+        return label.isascii() and bool(re.search(r"[A-Za-z]", label))
+
+    def _invalid_entity_types(self, payload: dict[str, Any]) -> list[str]:
+        """返回模型结果中违反目标语言契约的实体类型。"""
+        entities = payload.get("entities") if isinstance(payload.get("entities"), list) else []
+        invalid = {
+            str(entity.get("type") or "").strip()
+            for entity in entities
+            if isinstance(entity, dict)
+            and not self._is_valid_entity_type_language(str(entity.get("type") or ""))
+        }
+        return sorted(invalid, key=str.casefold)
+
+    def _replace_invalid_entity_types(self, payload: dict[str, Any]) -> None:
+        """保留实体与证据，仅把违规类型降级为目标语言下的通用类型。"""
+        entities = payload.get("entities") if isinstance(payload.get("entities"), list) else []
+        fallback = self._default_entity_type()
+        for entity in entities:
+            if not isinstance(entity, dict):
+                continue
+            if not self._is_valid_entity_type_language(str(entity.get("type") or "")):
+                entity["_invalidEntityType"] = str(entity.get("type") or "").strip()
+                entity["type"] = fallback
 
     def _normalize_type_label(self, value: str) -> str:
         """以语言无关的形式统一类型标签表面差异。"""

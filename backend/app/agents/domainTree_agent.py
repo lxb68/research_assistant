@@ -432,6 +432,7 @@ class DomainTreeAgent:
                 catalog_text=catalog_text,
                 project=project or {},
                 model_runtime=self._resolve_model_runtime(model),
+                entity_type_language=language,
                 cancel_event=cancel_event,
                 progress_callback=progress_callback,
             )
@@ -1165,6 +1166,7 @@ class DomainTreeAgent:
         catalog_text: str,
         project: dict[str, Any],
         model_runtime: dict[str, str] | None = None,
+        entity_type_language: str = "English",
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
@@ -1245,6 +1247,7 @@ class DomainTreeAgent:
         # 全文语义抽取独立于领域树规则：即使某个实体无法归入领域，也保留其原文证据。
         semantic_graph = SemanticGraphExtractor(
             model_runtime,
+            entity_type_language=entity_type_language,
             cache_dir=self._analysis_dir(project_id) / "semantic_cache",
             max_workers=settings.semantic_graph_max_workers,
             cancel_event=cancel_event,

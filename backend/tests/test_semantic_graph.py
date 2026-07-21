@@ -45,7 +45,7 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
                     "localId": "e1",
                     "name": "Method A",
                     "canonicalName": "Method A",
-                    "type": "方法",
+                    "type": "method",
                     "aliases": [],
                     "attributes": [],
                     "evidenceQuote": "Method A improves Dataset B accuracy to 95%.",
@@ -54,7 +54,7 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
                     "localId": "e2",
                     "name": "Dataset B",
                     "canonicalName": "Dataset B",
-                    "type": "数据集",
+                    "type": "dataset",
                     "aliases": [],
                     "attributes": [{"name": "accuracy", "value": "95%", "unit": ""}],
                     "evidenceQuote": "Method A improves Dataset B accuracy to 95%.",
@@ -64,7 +64,7 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
                 {
                     "source": "e1",
                     "target": "e2",
-                    "predicate": "提高准确率",
+                    "predicate": "improves accuracy",
                     "relationType": "experimental",
                     "confidence": 0.93,
                     "evidenceQuote": "Method A improves Dataset B accuracy to 95%.",
@@ -101,14 +101,14 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
         """模型虚构的证据无法回定位时，不得进入最终关系图。"""
         payload = {
             "entities": [
-                {"localId": "a", "name": "A", "canonicalName": "A", "type": "方法"},
-                {"localId": "b", "name": "B", "canonicalName": "B", "type": "数据集"},
+                {"localId": "a", "name": "A", "canonicalName": "A", "type": "method"},
+                {"localId": "b", "name": "B", "canonicalName": "B", "type": "dataset"},
             ],
             "relations": [
                 {
                     "source": "a",
                     "target": "b",
-                    "predicate": "导致",
+                    "predicate": "causes",
                     "relationType": "causal",
                     "confidence": 1,
                     "evidenceQuote": "这句话并不存在于原文",
@@ -199,7 +199,7 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
                     "localId": "e1",
                     "name": long_name,
                     "canonicalName": long_name,
-                    "type": "方法",
+                    "type": "method",
                     "evidenceQuote": "Method A is evaluated.",
                 }
             ],
@@ -232,15 +232,142 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
         )
 
         self.assertIn("canonicalName", prompt)
-        self.assertIn("必须使用原文语言", prompt)
-        self.assertIn("predicate 必须使用原文语言", prompt)
-        self.assertIn("evidenceQuote 必须保持原文语言", prompt)
+        self.assertIn("must preserve the source language", prompt)
+        self.assertIn("predicate must preserve the source language", prompt)
+        self.assertIn("type is an inferred category label", prompt)
+        self.assertIn('"type": "model"', prompt)
+        self.assertNotIn('"type": "实体类型"', prompt)
+
+    def test_retries_once_when_english_type_contains_chinese(self) -> None:
+        """英文模式遇到中文类型时应定向纠正一次，并保留其余原文字段。"""
+        calls: list[list[dict[str, str]]] = []
+        invalid_payload = {
+            "entities": [
+                {
+                    "localId": "e1",
+                    "name": "Method A",
+                    "canonicalName": "Method A",
+                    "type": "方法",
+                    "aliases": [],
+                    "attributes": [],
+                    "evidenceQuote": "Method A improves accuracy.",
+                }
+            ],
+            "relations": [],
+        }
+        corrected_payload = json.loads(json.dumps(invalid_payload, ensure_ascii=False))
+        corrected_payload["entities"][0]["type"] = "method"
+
+        def fake_chat(*args: object, **kwargs: object) -> str:
+            calls.append(args[1])
+            payload = invalid_payload if len(calls) == 1 else corrected_payload
+            return json.dumps(payload, ensure_ascii=False)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "paper.md"
+            path.write_text("# Method\n\nMethod A improves accuracy.", encoding="utf-8")
+            result = SemanticGraphExtractor(
+                {"model": "test"},
+                entity_type_language="English",
+                chat_fn=fake_chat,
+            ).extract([SemanticSourceDocument("paper", "English Paper", path)])
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("Change only those type values", calls[1][-1]["content"])
+        self.assertEqual(result["entities"][0]["type"], "method")
+        self.assertEqual(result["entities"][0]["name"], "Method A")
+
+    def test_replaces_repeated_language_violation_with_generic_type(self) -> None:
+        """纠正后仍违规时保留实体，但使用目标语言下的通用类型。"""
+        calls = 0
+        payload = {
+            "entities": [
+                {
+                    "localId": "e1",
+                    "name": "Method A",
+                    "canonicalName": "Method A",
+                    "type": "方法",
+                    "evidenceQuote": "Method A improves accuracy.",
+                }
+            ],
+            "relations": [],
+        }
+
+        def fake_chat(*args: object, **kwargs: object) -> str:
+            nonlocal calls
+            calls += 1
+            return json.dumps(payload, ensure_ascii=False)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "paper.md"
+            path.write_text("# Method\n\nMethod A improves accuracy.", encoding="utf-8")
+            result = SemanticGraphExtractor(
+                {"model": "test"},
+                entity_type_language="English",
+                chat_fn=fake_chat,
+            ).extract([SemanticSourceDocument("paper", "English Paper", path)])
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(result["entities"][0]["type"], "entity")
+        self.assertEqual(result["entities"][0]["rawTypes"], ["方法"])
+
+    def test_entity_type_language_is_part_of_chunk_cache_key(self) -> None:
+        """中文和英文分析不得共享语义分块缓存。"""
+        document = SemanticSourceDocument("paper", "Paper", None)
+        chunk = TextChunk(1, "Method", "Method A improves accuracy.", 1)
+        english = SemanticGraphExtractor({"model": "test"}, entity_type_language="English")
+        chinese = SemanticGraphExtractor({"model": "test"}, entity_type_language="中文")
+
+        self.assertNotEqual(
+            english._chunk_cache_key(document, chunk),
+            chinese._chunk_cache_key(document, chunk),
+        )
+
+    def test_english_type_validator_rejects_non_english_scripts(self) -> None:
+        """英文类型不仅要排除中文，也必须包含 ASCII 英文字母。"""
+        extractor = SemanticGraphExtractor(None, entity_type_language="English")
+
+        self.assertTrue(extractor._is_valid_entity_type_language("data structure"))
+        self.assertFalse(extractor._is_valid_entity_type_language("方法"))
+        self.assertFalse(extractor._is_valid_entity_type_language("модель"))
+
+    def test_ignores_cached_payload_with_wrong_type_language(self) -> None:
+        """即使缓存键匹配，类型语言违规的缓存也必须按未命中处理。"""
+        calls = 0
+        invalid_payload = {
+            "entities": [{"localId": "e1", "name": "A", "type": "方法"}],
+            "relations": [],
+        }
+
+        def fake_chat(*args: object, **kwargs: object) -> str:
+            nonlocal calls
+            calls += 1
+            return json.dumps({"entities": [], "relations": []})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "paper.md"
+            path.write_text("# Method\n\nA cached research method.", encoding="utf-8")
+            document = SemanticSourceDocument("paper", "Paper", path)
+            extractor = SemanticGraphExtractor(
+                {"model": "test"},
+                entity_type_language="English",
+                chat_fn=fake_chat,
+                cache_dir=root / "cache",
+            )
+            chunk = extractor.split_chunks("# Method\n\nA cached research method.")[0]
+            extractor._save_cached_payload(extractor._chunk_cache_key(document, chunk), invalid_payload)
+            result = extractor.extract([document])
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(result["extraction"]["cacheHitCount"], 0)
+        self.assertEqual(result["extraction"]["cacheMissCount"], 1)
 
     def test_dynamically_merges_equivalent_entity_types_without_fixed_taxonomy(self) -> None:
         """类型归并应依据本次模型映射合并大小写与跨语言等价标签。"""
         def fake_chat(*args: object, **kwargs: object) -> str:
             messages = args[1]
-            self.assertIn("知识图谱类型归并器", messages[0]["content"])
+            self.assertIn("semantically equivalent", messages[0]["content"])
             return json.dumps(
                 {
                     "groups": [
@@ -278,9 +405,30 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
 
         stats = extractor._canonicalize_entity_types(entities)
 
-        self.assertEqual([entity["type"] for entity in entities], ["algorithm", "algorithm", "算法"])
+        self.assertEqual([entity["type"] for entity in entities], ["algorithm", "algorithm", "entity"])
         self.assertEqual(stats["entityTypeCountAfter"], 2)
         self.assertEqual(stats["entityTypeNormalizationMode"], "deterministic")
+
+    def test_translates_canonical_when_group_has_no_target_language_member(self) -> None:
+        """全部为中文的等价组允许生成英文 canonical，但成员必须完整覆盖输入。"""
+        def fake_chat(*args: object, **kwargs: object) -> str:
+            return json.dumps(
+                {"groups": [{"canonical": "algorithm", "members": ["算法"]}]},
+                ensure_ascii=False,
+            )
+
+        entities = [{"name": "A", "type": "算法", "typeCounts": {"算法": 1}}]
+        extractor = SemanticGraphExtractor(
+            {"model": "test"},
+            entity_type_language="English",
+            chat_fn=fake_chat,
+        )
+
+        stats = extractor._canonicalize_entity_types(entities)
+
+        self.assertEqual(entities[0]["type"], "algorithm")
+        self.assertEqual(entities[0]["rawTypes"], ["算法"])
+        self.assertEqual(stats["entityTypeNormalizationMode"], "dynamic_model")
 
     def test_reuses_dynamic_type_mapping_cache(self) -> None:
         """相同模型和类型集合不应重复请求类型归并。"""
