@@ -3661,6 +3661,10 @@ select.settings-input {
 }
 
 .domain-tree-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   border: 1px solid rgba(96, 165, 250, 0.18);
   background: rgba(219, 234, 254, 0.92);
   color: #1d4ed8;
@@ -3763,6 +3767,343 @@ select.settings-input {
 .domain-tree-node-label {
   font-weight: 900;
   line-height: 1.5;
+}
+
+.domain-tree-node-heading,
+.domain-tree-secondary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.domain-tree-secondary-row .domain-tree-secondary-button {
+  flex: 1;
+}
+
+.domain-tree-node-actions,
+.knowledge-curation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.domain-tree-node-actions button,
+.knowledge-curation-actions button {
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-strong);
+  color: var(--app-text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+  padding: 5px 8px;
+}
+
+.domain-tree-node-actions button:hover,
+.knowledge-curation-actions button:hover {
+  border-color: var(--app-primary);
+  color: var(--app-primary);
+}
+
+.domain-tree-node-actions button.is-danger,
+.knowledge-curation-actions button.is-danger {
+  border-color: color-mix(in srgb, #ef4444 28%, var(--app-border));
+  color: #dc2626;
+}
+
+.domain-tree-node-actions button.is-danger:hover,
+.knowledge-curation-actions button.is-danger:hover {
+  border-color: #ef4444;
+  background: color-mix(in srgb, #ef4444 9%, var(--app-surface-strong));
+  color: #b91c1c;
+}
+
+.domain-tree-node-actions button:disabled,
+.knowledge-curation-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.knowledge-curation-actions {
+  margin-top: 4px;
+}
+
+.knowledge-curation-badge {
+  border-color: color-mix(in srgb, #8b5cf6 35%, var(--app-border)) !important;
+  background: color-mix(in srgb, #8b5cf6 10%, var(--app-surface-strong)) !important;
+  color: #7c3aed !important;
+  font-weight: 800;
+}
+
+.knowledge-editor-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  display: grid;
+  place-items: center;
+  overflow-y: auto;
+  background: rgba(15, 23, 42, 0.58);
+  backdrop-filter: blur(8px);
+  padding: 24px;
+}
+
+.knowledge-editor-dialog {
+  width: min(680px, 100%);
+  max-height: min(820px, calc(100vh - 48px));
+  overflow: hidden auto;
+  border: 1px solid color-mix(in srgb, var(--app-primary) 24%, var(--app-border));
+  border-radius: 22px;
+  background: var(--app-surface-strong);
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.3);
+  animation: knowledge-editor-enter 180ms ease-out;
+}
+
+.knowledge-editor-dialog.is-destructive {
+  border-color: color-mix(in srgb, #ef4444 35%, var(--app-border));
+}
+
+@keyframes knowledge-editor-enter {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.knowledge-editor-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 14px;
+  border-bottom: 1px solid var(--app-border);
+  background: linear-gradient(135deg, var(--app-primary-soft), transparent 72%);
+  padding: 22px 24px 20px;
+}
+
+.knowledge-editor-dialog.is-destructive .knowledge-editor-header {
+  background: linear-gradient(135deg, color-mix(in srgb, #ef4444 10%, var(--app-surface-strong)), transparent 72%);
+}
+
+.knowledge-editor-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 13px;
+  background: var(--app-primary);
+  color: white;
+  font-size: 0.92rem;
+  font-weight: 900;
+  box-shadow: 0 9px 20px color-mix(in srgb, var(--app-primary) 24%, transparent);
+}
+
+.is-destructive .knowledge-editor-icon {
+  background: #ef4444;
+  box-shadow: 0 9px 20px rgba(239, 68, 68, 0.22);
+}
+
+.knowledge-editor-header span {
+  color: var(--app-primary);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.knowledge-editor-header h2 {
+  margin-top: 3px;
+  color: var(--app-text-strong);
+  font-size: 1.25rem;
+}
+
+.knowledge-editor-header p {
+  margin-top: 5px;
+  color: var(--app-text-muted);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.knowledge-editor-close {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface-strong);
+  color: var(--app-text-muted);
+  cursor: pointer;
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.knowledge-editor-form {
+  display: grid;
+  gap: 18px;
+  padding: 24px;
+}
+
+.knowledge-editor-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.knowledge-editor-field {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.knowledge-editor-field > span {
+  display: flex;
+  justify-content: space-between;
+  color: var(--app-text-strong);
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.knowledge-editor-field input:not([type="range"]),
+.knowledge-editor-field select,
+.knowledge-editor-field textarea {
+  width: 100%;
+  border: 1px solid var(--app-border);
+  border-radius: 11px;
+  outline: 0;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  font: inherit;
+  padding: 11px 12px;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.knowledge-editor-field textarea {
+  resize: vertical;
+}
+
+.knowledge-editor-field input:focus,
+.knowledge-editor-field select:focus,
+.knowledge-editor-field textarea:focus {
+  border-color: var(--app-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-primary) 13%, transparent);
+}
+
+.knowledge-editor-field input[type="range"] {
+  width: 100%;
+  accent-color: var(--app-primary);
+}
+
+.knowledge-editor-field small {
+  color: var(--app-text-muted);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.knowledge-editor-delete-summary {
+  display: grid;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, #ef4444 28%, var(--app-border));
+  border-radius: 14px;
+  background: color-mix(in srgb, #ef4444 7%, var(--app-surface));
+  padding: 18px;
+}
+
+.knowledge-editor-delete-summary span {
+  color: #dc2626;
+  font-size: 0.75rem;
+  font-weight: 900;
+}
+
+.knowledge-editor-delete-summary strong {
+  color: var(--app-text-strong);
+  line-height: 1.55;
+}
+
+.knowledge-editor-delete-summary p {
+  color: var(--app-text-muted);
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+
+.knowledge-editor-error {
+  border: 1px solid rgba(239, 68, 68, 0.28);
+  border-radius: 11px;
+  background: rgba(254, 242, 242, 0.9);
+  color: #b91c1c;
+  font-size: 0.8rem;
+  padding: 10px 12px;
+}
+
+.knowledge-editor-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  border-top: 1px solid var(--app-border);
+  margin: 4px -24px -24px;
+  padding: 18px 24px;
+}
+
+.knowledge-editor-footer button {
+  min-width: 104px;
+  border-radius: 10px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 800;
+  padding: 10px 15px;
+}
+
+.knowledge-editor-cancel {
+  border: 1px solid var(--app-border);
+  background: var(--app-surface-strong);
+  color: var(--app-text-muted);
+}
+
+.knowledge-editor-submit {
+  border: 1px solid var(--app-primary);
+  background: var(--app-primary);
+  color: white;
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--app-primary) 20%, transparent);
+}
+
+.is-destructive .knowledge-editor-submit {
+  border-color: #ef4444;
+  background: #ef4444;
+  box-shadow: 0 8px 18px rgba(239, 68, 68, 0.2);
+}
+
+.knowledge-editor-footer button:disabled,
+.knowledge-editor-close:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+@media (max-width: 640px) {
+  .knowledge-editor-backdrop {
+    align-items: end;
+    padding: 0;
+  }
+
+  .knowledge-editor-dialog {
+    width: 100%;
+    max-height: 92vh;
+    border-radius: 22px 22px 0 0;
+  }
+
+  .knowledge-editor-header,
+  .knowledge-editor-form {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+
+  .knowledge-editor-field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .knowledge-editor-footer {
+    margin-left: -18px;
+    margin-right: -18px;
+    padding-left: 18px;
+    padding-right: 18px;
+  }
 }
 
 .domain-tree-secondary-list,

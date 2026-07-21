@@ -4,10 +4,23 @@ from fastapi import APIRouter, HTTPException
 
 from app.agents import DomainTreeAgent
 from app.core.config import settings
-from app.schemas.api import DomainTreeGenerateOptions, DomainTreeGenerateRequest
+from app.schemas.api import (
+    DomainTreeGenerateOptions,
+    DomainTreeGenerateRequest,
+    DomainTreeNodeUpdateRequest,
+    KnowledgeEntityUpdateRequest,
+    KnowledgeRelationUpdateRequest,
+    KnowledgeRevisionRequest,
+)
 from app.services.background_jobs import BackgroundJobCapacityExceeded, background_job_manager
 from app.services.model_config import ModelConfigStore
 from app.services.project_repository import ProjectNotFoundError, ProjectRepository
+from app.services.project_knowledge import (
+    KnowledgeCurationError,
+    KnowledgeNotFoundError,
+    KnowledgeRevisionConflict,
+    ProjectKnowledgeService,
+)
 
 
 router = APIRouter()
@@ -44,6 +57,26 @@ def _require_project_job(project_id: str, job_id: str) -> dict:
     if not job or job.get("type") != "domain_tree" or str(request.get("project_id") or "") != project_id:
         raise HTTPException(status_code=404, detail="当前项目中不存在该领域树任务")
     return job
+
+
+def _knowledge_service(project_id: str) -> ProjectKnowledgeService:
+    _require_project(project_id)
+    active_job = background_job_manager.find_active("domain_tree", f"domain-tree:{project_id}")
+    if active_job:
+        raise HTTPException(status_code=423, detail="领域树或知识图谱正在生成，完成后才能编辑")
+    agent = DomainTreeAgent()
+    return ProjectKnowledgeService(agent.get_result_path(project_id).parent, project_id)
+
+
+def _run_curation(operation) -> dict:
+    try:
+        return operation()
+    except KnowledgeRevisionConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except KnowledgeNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except KnowledgeCurationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @router.post("/api/domain-tree/generate")
@@ -105,6 +138,101 @@ def get_domain_tree(project_id: str) -> dict:
 @router.get("/api/projects/{project_id}/domain-tree")
 def get_project_domain_tree(project_id: str) -> dict:
     return get_domain_tree(project_id)
+
+
+@router.patch("/api/projects/{project_id}/domain-tree/nodes/{node_id}")
+def update_project_domain_tree_node(
+    project_id: str,
+    node_id: str,
+    payload: DomainTreeNodeUpdateRequest,
+) -> dict:
+    service = _knowledge_service(project_id)
+    return _run_curation(lambda: service.update_tree_node(node_id, {"label": payload.label}, payload.revision))
+
+
+@router.delete("/api/projects/{project_id}/domain-tree/nodes/{node_id}")
+def delete_project_domain_tree_node(
+    project_id: str,
+    node_id: str,
+    payload: KnowledgeRevisionRequest,
+    dry_run: bool = False,
+) -> dict:
+    service = _knowledge_service(project_id)
+    return _run_curation(lambda: service.delete_tree_node(node_id, payload.revision, dry_run=dry_run))
+
+
+@router.post("/api/projects/{project_id}/domain-tree/nodes/{node_id}/restore")
+def restore_project_domain_tree_node(
+    project_id: str,
+    node_id: str,
+    payload: KnowledgeRevisionRequest,
+) -> dict:
+    service = _knowledge_service(project_id)
+    return _run_curation(lambda: service.restore_tree_node(node_id, payload.revision))
+
+
+@router.patch("/api/projects/{project_id}/knowledge-graph/entities/{entity_id}")
+def update_project_knowledge_entity(
+    project_id: str,
+    entity_id: str,
+    payload: KnowledgeEntityUpdateRequest,
+) -> dict:
+    service = _knowledge_service(project_id)
+    patch = payload.model_dump(exclude={"revision"}, exclude_unset=True)
+    return _run_curation(lambda: service.update_entity(entity_id, patch, payload.revision))
+
+
+@router.delete("/api/projects/{project_id}/knowledge-graph/entities/{entity_id}")
+def delete_project_knowledge_entity(
+    project_id: str,
+    entity_id: str,
+    payload: KnowledgeRevisionRequest,
+    dry_run: bool = False,
+) -> dict:
+    service = _knowledge_service(project_id)
+    return _run_curation(lambda: service.delete_entity(entity_id, payload.revision, dry_run=dry_run))
+
+
+@router.post("/api/projects/{project_id}/knowledge-graph/entities/{entity_id}/restore")
+def restore_project_knowledge_entity(
+    project_id: str,
+    entity_id: str,
+    payload: KnowledgeRevisionRequest,
+) -> dict:
+    service = _knowledge_service(project_id)
+    return _run_curation(lambda: service.restore_entity(entity_id, payload.revision))
+
+
+@router.patch("/api/projects/{project_id}/knowledge-graph/relations/{relation_id}")
+def update_project_knowledge_relation(
+    project_id: str,
+    relation_id: str,
+    payload: KnowledgeRelationUpdateRequest,
+) -> dict:
+    service = _knowledge_service(project_id)
+    patch = payload.model_dump(exclude={"revision"}, exclude_unset=True)
+    return _run_curation(lambda: service.update_relation(relation_id, patch, payload.revision))
+
+
+@router.delete("/api/projects/{project_id}/knowledge-graph/relations/{relation_id}")
+def delete_project_knowledge_relation(
+    project_id: str,
+    relation_id: str,
+    payload: KnowledgeRevisionRequest,
+    dry_run: bool = False,
+) -> dict:
+    service = _knowledge_service(project_id)
+    return _run_curation(lambda: service.delete_relation(relation_id, payload.revision, dry_run=dry_run))
+
+
+@router.post("/api/projects/{project_id}/knowledge-graph/relations/{relation_id}/restore")
+def restore_project_knowledge_relation(
+    project_id: str,
+    relation_id: str,
+    payload: KnowledgeRevisionRequest,
+) -> dict:
+    service = _knowledge_service(project_id)
+    return _run_curation(lambda: service.restore_relation(relation_id, payload.revision))
 
 
 __all__ = ["router"]

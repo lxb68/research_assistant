@@ -66,6 +66,29 @@ class DomainTreeGenerateRequest(DomainTreeGenerateOptions):
     project_id: str = Field(..., min_length=1)
 
 
+class KnowledgeRevisionRequest(BaseModel):
+    revision: int = Field(..., ge=0)
+
+
+class DomainTreeNodeUpdateRequest(KnowledgeRevisionRequest):
+    label: str = Field(..., min_length=1, max_length=500)
+
+
+class KnowledgeEntityUpdateRequest(KnowledgeRevisionRequest):
+    name: str | None = Field(None, min_length=1, max_length=1000)
+    type: str | None = Field(None, min_length=1, max_length=200)
+    aliases: list[str] | None = Field(None, max_length=100)
+    attributes: list[dict[str, str]] | None = Field(None, max_length=100)
+
+
+class KnowledgeRelationUpdateRequest(KnowledgeRevisionRequest):
+    source: str | None = Field(None, min_length=1, max_length=500)
+    target: str | None = Field(None, min_length=1, max_length=500)
+    predicate: str | None = Field(None, min_length=1, max_length=500)
+    relationType: str | None = Field(None, min_length=1, max_length=100)
+    confidence: float | None = Field(None, ge=0, le=1)
+
+
 class ProjectCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     description: str = Field("", max_length=2000)
@@ -132,7 +155,9 @@ class OrchestratorRequest(BaseModel):
 
 __all__ = [
     "CleanupMissingPdfsRequest", "DatasetDownloadRequest", "DeduplicatePapersRequest", "DeletePapersRequest",
-    "DomainTreeGenerateOptions", "DomainTreeGenerateRequest", "ImportPaperRequest", "ManualPdfLinkRequest",
+    "DomainTreeGenerateOptions", "DomainTreeGenerateRequest", "DomainTreeNodeUpdateRequest",
+    "KnowledgeEntityUpdateRequest", "KnowledgeRelationUpdateRequest", "KnowledgeRevisionRequest",
+    "ImportPaperRequest", "ManualPdfLinkRequest",
     "EnvConfigUpdateRequest", "ModelConfigRequest", "ModelConnectionTestRequest", "ModelDiscoveryRequest", "OrchestratorRequest",
     "ProjectCreateRequest", "ProjectPapersRequest",
     "ResearchChatRequest",

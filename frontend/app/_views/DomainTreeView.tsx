@@ -10,8 +10,14 @@ import { useProjects } from "@/app/_components/ProjectProvider";
 import { DomainTreePanel } from "@/app/_views/project-knowledge/DomainTreePanel";
 import { KnowledgeGraphPanel } from "@/app/_views/project-knowledge/KnowledgeGraphPanel";
 import { ProjectLiteraturePanel } from "@/app/_views/project-knowledge/ProjectLiteraturePanel";
+import {
+  KnowledgeCurationDialog,
+  KnowledgeCurationEditor,
+  KnowledgeCurationValues,
+} from "@/app/_views/project-knowledge/KnowledgeCurationDialog";
 
 type DomainTreeNode = {
+  id: string;
   label: string;
   child?: DomainTreeNode[];
 };
@@ -140,6 +146,12 @@ type DomainTreeResult = {
     documents?: DomainTreeManifestDocument[];
   };
   catalogText?: string;
+  curation?: {
+    revision: number;
+    updatedAt?: string;
+    hasManualChanges?: boolean;
+    orphanedPatchCount?: number;
+  };
 };
 
 type ModelConfigStatus = {
@@ -227,6 +239,13 @@ type KnowledgeBrowserRelation = {
   confidence?: number;
   evidence: SemanticEvidence[];
   documentIds: string[];
+  editable: boolean;
+};
+
+type CurationUndo = {
+  kind: "tree" | "entity" | "relation";
+  id: string;
+  label: string;
 };
 
 const RELATION_TYPE_LABELS: Record<string, string> = {
@@ -360,6 +379,9 @@ function renderTree(
   options: {
     selectedKey: string;
     onSelectSecondary: (key: string, label: string) => void;
+    onEdit: (node: DomainTreeNode) => void;
+    onDelete: (node: DomainTreeNode) => void;
+    disabled?: boolean;
   },
   parentKey = "root",
 ): React.ReactNode {
@@ -367,25 +389,36 @@ function renderTree(
   return (
     <div className="domain-tree-node-list">
       {nodes.map((node, index) => {
-        const key = `${parentKey}-${index}-${node.label}`;
+        const key = node.id || `${parentKey}-${index}-${node.label}`;
         return (
           <article key={key} className="domain-tree-node-card">
-            <div className="domain-tree-node-label">{node.label}</div>
+            <div className="domain-tree-node-heading">
+              <div className="domain-tree-node-label">{node.label}</div>
+              <div className="domain-tree-node-actions">
+                <button type="button" disabled={options.disabled} onClick={() => options.onEdit(node)}>编辑</button>
+                <button className="is-danger" type="button" disabled={options.disabled} onClick={() => options.onDelete(node)}>删除</button>
+              </div>
+            </div>
             {node.child && node.child.length > 0 ? (
               <div className="domain-tree-secondary-list">
                 {node.child.map((child, childIndex) => {
-                  const childKey = `${key}-child-${childIndex}-${child.label}`;
+                  const childKey = child.id || `${key}-child-${childIndex}-${child.label}`;
                   return (
-                    <button
-                      key={childKey}
-                      type="button"
-                      className={`domain-tree-secondary-button${
-                        options.selectedKey === childKey ? " is-active" : ""
-                      }`}
-                      onClick={() => options.onSelectSecondary(childKey, child.label)}
-                    >
-                      {child.label}
-                    </button>
+                    <div key={childKey} className="domain-tree-secondary-row">
+                      <button
+                        type="button"
+                        className={`domain-tree-secondary-button${
+                          options.selectedKey === childKey ? " is-active" : ""
+                        }`}
+                        onClick={() => options.onSelectSecondary(childKey, child.label)}
+                      >
+                        {child.label}
+                      </button>
+                      <div className="domain-tree-node-actions">
+                        <button type="button" disabled={options.disabled} onClick={() => options.onEdit(child)}>编辑</button>
+                        <button className="is-danger" type="button" disabled={options.disabled} onClick={() => options.onDelete(child)}>删除</button>
+                      </div>
+                    </div>
                   );
                 })}
               </div>
@@ -455,6 +488,9 @@ function DomainTreeProjectPage({
   const [graphDomain, setGraphDomain] = useState("all");
   const [selectedGraphRelationId, setSelectedGraphRelationId] = useState("");
   const [visibleGraphRelationCount, setVisibleGraphRelationCount] = useState(20);
+  const [isSavingCuration, setIsSavingCuration] = useState(false);
+  const [curationUndo, setCurationUndo] = useState<CurationUndo | null>(null);
+  const [curationEditor, setCurationEditor] = useState<KnowledgeCurationEditor | null>(null);
 
   const markdownReadyPapers = useMemo(
     () => papers.filter((paper) => Boolean(paper.id && (paper.markdownPath || paper.markdownOutputDir))),
@@ -695,6 +731,7 @@ function DomainTreeProjectPage({
           ...(relation.documentIds ?? []),
           ...relationEvidence.map((item) => item.documentId),
         ]).map((documentId) => documentId.replace(/^doc:/, "")),
+        editable: true,
       };
     });
 
@@ -724,6 +761,7 @@ function DomainTreeProjectPage({
           ...endpointDocumentIds,
           ...relationEvidence.map((item) => item.documentId.replace(/^doc:/, "")),
         ]),
+        editable: false,
       };
     });
 
@@ -1344,6 +1382,228 @@ function DomainTreeProjectPage({
     }
   }
 
+  /** 提交人工修订并使用后端返回的有效结果刷新页面。 */
+  async function requestCuration(
+    path: string,
+    method: "PATCH" | "DELETE" | "POST",
+    body: Record<string, unknown>,
+  ) {
+    const response = await fetch(buildApiUrl(path), {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 409) {
+        const latestResponse = await fetch(
+          buildApiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}/domain-tree`),
+        );
+        const latestPayload = await latestResponse.json().catch(() => ({}));
+        if (latestResponse.ok) setResult(latestPayload);
+      }
+      throw new Error(payload.detail || "保存人工修订失败");
+    }
+    return payload;
+  }
+
+  function currentRevision() {
+    return result?.curation?.revision ?? 0;
+  }
+
+  function handleEditTreeNode(node: DomainTreeNode) {
+    setError("");
+    setCurationEditor({ action: "edit", kind: "tree", id: node.id, label: node.label });
+  }
+
+  async function handleDeleteTreeNode(node: DomainTreeNode) {
+    setIsSavingCuration(true);
+    setError("");
+    try {
+      const path = `/api/projects/${encodeURIComponent(activeProjectId)}/domain-tree/nodes/${encodeURIComponent(node.id)}`;
+      const preview = await requestCuration(`${path}?dry_run=true`, "DELETE", { revision: currentRevision() });
+      const descendantCount = Number(preview.impact?.descendantCount || 0);
+      setCurationEditor({
+        action: "delete",
+        kind: "tree",
+        id: node.id,
+        label: node.label,
+        impactText: descendantCount > 0
+          ? `该节点包含 ${descendantCount} 个子节点，确认后将一并从有效领域树和结构图中隐藏。`
+          : "该节点会从有效领域树和对应结构图中隐藏。",
+      });
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : "删除领域节点失败");
+    } finally {
+      setIsSavingCuration(false);
+    }
+  }
+
+  function handleEditEntity(entity: SemanticEntity) {
+    setError("");
+    setCurationEditor({
+      action: "edit",
+      kind: "entity",
+      id: entity.id,
+      name: entity.name,
+      entityType: entity.type,
+      aliases: entity.aliases ?? [],
+    });
+  }
+
+  async function handleDeleteEntity(entity: SemanticEntity) {
+    setIsSavingCuration(true);
+    setError("");
+    try {
+      const path = `/api/projects/${encodeURIComponent(activeProjectId)}/knowledge-graph/entities/${encodeURIComponent(entity.id)}`;
+      const preview = await requestCuration(`${path}?dry_run=true`, "DELETE", { revision: currentRevision() });
+      const relationCount = Number(preview.impact?.relationCount || 0);
+      setCurationEditor({
+        action: "delete",
+        kind: "entity",
+        id: entity.id,
+        label: entity.name,
+        impactText: relationCount > 0
+          ? `该实体连接 ${relationCount} 条语义关系，确认后这些关系也会一并隐藏。原文证据仍会保留。`
+          : "该实体当前没有关联关系。原文证据仍会保留。",
+      });
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : "删除实体失败");
+    } finally {
+      setIsSavingCuration(false);
+    }
+  }
+
+  function handleEditRelation(relation: KnowledgeBrowserRelation) {
+    if (!relation.editable) return;
+    setError("");
+    setCurationEditor({
+      action: "edit",
+      kind: "relation",
+      id: relation.id,
+      predicate: relation.predicate,
+      relationType: relation.relationType,
+      confidence: relation.confidence ?? 0.5,
+      source: relation.sourceId,
+      target: relation.targetId,
+    });
+  }
+
+  function handleDeleteRelation(relation: KnowledgeBrowserRelation) {
+    if (!relation.editable) return;
+    setError("");
+    setCurationEditor({
+      action: "delete",
+      kind: "relation",
+      id: relation.id,
+      label: `${relation.sourceName} —${relation.predicate}→ ${relation.targetName}`,
+      impactText: "该关系会从知识浏览和混合图谱检索中隐藏，实体与原文证据不受影响。",
+    });
+  }
+
+  async function handleSubmitCurationEditor(values: KnowledgeCurationValues) {
+    if (!curationEditor) return;
+    setIsSavingCuration(true);
+    setError("");
+    try {
+      const base = `/api/projects/${encodeURIComponent(activeProjectId)}`;
+      let payload: DomainTreeResult;
+      let successMessage = "人工修订已保存。";
+      if (curationEditor.action === "delete") {
+        const pathByKind = {
+          tree: "domain-tree/nodes",
+          entity: "knowledge-graph/entities",
+          relation: "knowledge-graph/relations",
+        };
+        payload = await requestCuration(
+          `${base}/${pathByKind[curationEditor.kind]}/${encodeURIComponent(curationEditor.id)}`,
+          "DELETE",
+          { revision: currentRevision() },
+        );
+        setCurationUndo({
+          kind: curationEditor.kind,
+          id: curationEditor.id,
+          label: curationEditor.label,
+        });
+        successMessage = `已删除“${curationEditor.label}”，可使用撤销恢复。`;
+        if (curationEditor.kind === "tree") {
+          setSelectedSecondaryKey("");
+          setSelectedSecondaryLabel("");
+        } else {
+          setSelectedGraphRelationId("");
+        }
+      } else if (curationEditor.kind === "tree") {
+        payload = await requestCuration(
+          `${base}/domain-tree/nodes/${encodeURIComponent(curationEditor.id)}`,
+          "PATCH",
+          { revision: currentRevision(), label: values.label },
+        );
+        setCurationUndo(null);
+        successMessage = `已将领域节点修改为“${values.label}”。`;
+      } else if (curationEditor.kind === "entity") {
+        payload = await requestCuration(
+          `${base}/knowledge-graph/entities/${encodeURIComponent(curationEditor.id)}`,
+          "PATCH",
+          {
+            revision: currentRevision(),
+            name: values.name,
+            type: values.entityType,
+            aliases: values.aliases,
+          },
+        );
+        setCurationUndo(null);
+        successMessage = `已更新实体“${values.name}”。`;
+      } else {
+        payload = await requestCuration(
+          `${base}/knowledge-graph/relations/${encodeURIComponent(curationEditor.id)}`,
+          "PATCH",
+          {
+            revision: currentRevision(),
+            predicate: values.predicate,
+            relationType: values.relationType,
+            confidence: values.confidence,
+            source: values.source,
+            target: values.target,
+          },
+        );
+        setCurationUndo(null);
+        successMessage = `已更新关系“${values.predicate}”。`;
+      }
+      setResult(payload);
+      setStatus(successMessage);
+      setCurationEditor(null);
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : "保存人工修订失败");
+    } finally {
+      setIsSavingCuration(false);
+    }
+  }
+
+  async function handleUndoCuration() {
+    if (!curationUndo) return;
+    const pathByKind = {
+      tree: "domain-tree/nodes",
+      entity: "knowledge-graph/entities",
+      relation: "knowledge-graph/relations",
+    };
+    setIsSavingCuration(true);
+    setError("");
+    try {
+      const payload = await requestCuration(
+        `/api/projects/${encodeURIComponent(activeProjectId)}/${pathByKind[curationUndo.kind]}/${encodeURIComponent(curationUndo.id)}/restore`,
+        "POST",
+        { revision: currentRevision() },
+      );
+      setResult(payload);
+      setStatus(`已恢复“${curationUndo.label}”。`);
+      setCurationUndo(null);
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : "恢复失败");
+    } finally {
+      setIsSavingCuration(false);
+    }
+  }
+
   const latestAction = (result?.action as DomainTreeAction | undefined) ?? "rebuild";
   const treeCardTitle = latestAction === "revise" ? "修订标签树" : "领域树";
   const isModelConfigurationMissing = modelStatus?.configured === false;
@@ -1383,6 +1643,9 @@ function DomainTreeProjectPage({
             <span>{markdownReadyPapers.length} 篇文献</span>
             <span>{graphStats.nodeCount} 个节点</span>
             <span>{graphStats.edgeCount} 条关系</span>
+            {result?.curation?.hasManualChanges ? (
+              <span className="knowledge-curation-badge">人工修订 v{result.curation.revision}</span>
+            ) : null}
           </div>
         </div>
 
@@ -1556,7 +1819,21 @@ function DomainTreeProjectPage({
           </div>
         </section>
 
-        {status ? <div className="domain-tree-status">{status}</div> : null}
+        {status ? (
+          <div className="domain-tree-status">
+            <span>{status}</span>
+            {curationUndo ? (
+              <button
+                type="button"
+                className="domain-tree-inline-button"
+                disabled={isSavingCuration}
+                onClick={() => void handleUndoCuration()}
+              >
+                撤销删除
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {result?.degraded ? (
           <div className="domain-tree-degraded-warning" role="status">
             <strong>当前展示的是降级结果</strong>
@@ -1597,6 +1874,22 @@ function DomainTreeProjectPage({
 
         {viewMode !== "project" ? (
           <>
+        {status ? (
+          <div className="domain-tree-status">
+            <span>{status}</span>
+            {curationUndo ? (
+              <button
+                type="button"
+                className="domain-tree-inline-button"
+                disabled={isSavingCuration}
+                onClick={() => void handleUndoCuration()}
+              >
+                撤销删除
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {error ? <div className="domain-tree-error"><span>{error}</span></div> : null}
         {isLoadingPapers || isLoadingExisting ? (
           <div className="domain-tree-empty">
             <strong>正在准备数据...</strong>
@@ -1633,6 +1926,9 @@ function DomainTreeProjectPage({
                 onSelectSecondary: (key, label) => {
                   void handleSelectSecondary(key, label);
                 },
+                onEdit: (node) => void handleEditTreeNode(node),
+                onDelete: (node) => void handleDeleteTreeNode(node),
+                disabled: isSavingCuration || isGenerating,
               })}
             </section>
 
@@ -1874,6 +2170,27 @@ function DomainTreeProjectPage({
                           {selectedGraphRelation.confidence !== undefined ? (
                             <small>置信度 {Math.round(selectedGraphRelation.confidence * 100)}%</small>
                           ) : null}
+                          {selectedGraphRelation.editable ? (
+                            <div className="knowledge-curation-actions">
+                              <button
+                                type="button"
+                                disabled={isSavingCuration || isGenerating}
+                                onClick={() => void handleEditRelation(selectedGraphRelation)}
+                              >
+                                修改关系
+                              </button>
+                              <button
+                                type="button"
+                                className="is-danger"
+                                disabled={isSavingCuration || isGenerating}
+                                onClick={() => void handleDeleteRelation(selectedGraphRelation)}
+                              >
+                                删除关系
+                              </button>
+                            </div>
+                          ) : (
+                            <small>结构关系由领域树和文献自动生成，仅支持查看。</small>
+                          )}
                         </section>
 
                         <section>
@@ -1892,6 +2209,25 @@ function DomainTreeProjectPage({
                                     {attribute.name}：{attribute.value}{attribute.unit ? ` ${attribute.unit}` : ""}
                                   </small>
                                 ))}
+                                {item.entity ? (
+                                  <div className="knowledge-curation-actions">
+                                    <button
+                                      type="button"
+                                      disabled={isSavingCuration || isGenerating}
+                                      onClick={() => void handleEditEntity(item.entity!)}
+                                    >
+                                      修改实体
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="is-danger"
+                                      disabled={isSavingCuration || isGenerating}
+                                      onClick={() => void handleDeleteEntity(item.entity!)}
+                                    >
+                                      删除实体
+                                    </button>
+                                  </div>
+                                ) : null}
                               </article>
                             ))}
                           </div>
@@ -1936,6 +2272,42 @@ function DomainTreeProjectPage({
 
                 <div className="knowledge-browser-supporting">
                   <details>
+                    <summary>实体管理 <span>{result.knowledgeGraph?.entities?.length ?? 0} 个实体</span></summary>
+                    <div className="knowledge-browser-supporting-grid">
+                      {(result.knowledgeGraph?.entities ?? [])
+                        .filter((entity) => {
+                          const query = graphQuery.trim().toLocaleLowerCase();
+                          return !query || `${entity.name} ${entity.type} ${(entity.aliases ?? []).join(" ")}`
+                            .toLocaleLowerCase()
+                            .includes(query);
+                        })
+                        .slice(0, 200)
+                        .map((entity) => (
+                        <article key={entity.id}>
+                          <strong>{entity.name}</strong>
+                          <span>{entity.type}</span>
+                          <div className="knowledge-curation-actions">
+                            <button
+                              type="button"
+                              disabled={isSavingCuration || isGenerating}
+                              onClick={() => void handleEditEntity(entity)}
+                            >
+                              修改
+                            </button>
+                            <button
+                              type="button"
+                              className="is-danger"
+                              disabled={isSavingCuration || isGenerating}
+                              onClick={() => void handleDeleteEntity(entity)}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  </details>
+                  <details>
                     <summary>领域结构 <span>{readableGraph.domains.length} 个领域</span></summary>
                     <div className="knowledge-browser-supporting-grid">
                       {readableGraph.domains.map((domain) => (
@@ -1965,6 +2337,24 @@ function DomainTreeProjectPage({
           </>
         ) : null}
       </section>
+      {curationEditor ? (
+        <KnowledgeCurationDialog
+          key={`${curationEditor.action}-${curationEditor.kind}-${curationEditor.id}`}
+          editor={curationEditor}
+          entities={(result?.knowledgeGraph?.entities ?? []).map((entity) => ({
+            id: entity.id,
+            name: entity.name,
+            type: entity.type,
+          }))}
+          busy={isSavingCuration}
+          error={error}
+          onClose={() => {
+            setCurationEditor(null);
+            setError("");
+          }}
+          onSubmit={handleSubmitCurationEditor}
+        />
+      ) : null}
     </main>
   );
 }

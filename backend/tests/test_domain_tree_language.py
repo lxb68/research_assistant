@@ -58,7 +58,10 @@ class DomainTreeLanguageTest(unittest.TestCase):
         self.assertIsNotNone(partial)
         self.assertEqual(partial["graphStatus"], "building")
         self.assertEqual(partial["knowledgeGraph"], {})
-        self.assertEqual(partial["domainTree"], tags)
+        self.assertEqual(partial["domainTree"][0]["label"], tags[0]["label"])
+        self.assertEqual(partial["domainTree"][0]["child"][0]["label"], tags[0]["child"][0]["label"])
+        self.assertTrue(partial["domainTree"][0]["id"].startswith("tree:"))
+        self.assertTrue(partial["domainTree"][0]["child"][0]["id"].startswith("tree:"))
 
         self.agent.batch_save_tags(
             "workspace",
