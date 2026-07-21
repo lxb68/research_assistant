@@ -95,6 +95,8 @@ class LocalPdfIndexingTest(unittest.TestCase):
 
             self.assertEqual(Path(str(indexed["markdownPath"])), markdown_path)
             self.assertEqual(indexed["fullTextIndexedBy"], "mineru")
+            self.assertEqual(indexed["pdfParsedBy"], "mineru")
+            self.assertEqual(indexed["pdfParseWarning"], "")
             self.assertGreaterEqual(int(indexed["splitSectionCount"]), 3)
             self.assertEqual(markdown_path.read_text(encoding="utf-8").count("##"), 2)
 
@@ -124,6 +126,89 @@ class LocalPdfIndexingTest(unittest.TestCase):
             self.assertEqual(extracted["parser"], "mineru")
             self.assertEqual(extracted["markdownPath"], str(markdown_path))
             mineru.assert_called_once_with(pdf_path=str(pdf_path), output_name="paper")
+
+    def test_short_nonempty_mineru_markdown_is_not_downgraded(self) -> None:
+        """短文档只产生质量提示，不能被误判为 MinerU 调用失败。"""
+        with TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            markdown_path = root / "full.md"
+            markdown_path.write_text("# Short paper\n\nValid result.", encoding="utf-8")
+            pdf_path = root / "paper.pdf"
+            pdf_path.write_bytes(b"%PDF-test")
+            agent = HunterAgent(download_dir=root / "papers", metadata_db_path=root / "papers.sqlite3")
+            with patch(
+                "app.agents.hunter_agent.mineru_processing",
+                return_value={"success": True, "markdownPath": str(markdown_path), "outputDir": str(root)},
+            ):
+                extracted = agent._extract_pdf_text(pdf_path)
+
+            self.assertEqual(extracted["parser"], "mineru")
+            self.assertEqual(extracted["warning"], "")
+            self.assertIn("内容较短", extracted["indexWarning"])
+
+    def test_mineru_reindex_clears_stale_fallback_status(self) -> None:
+        """后续 MinerU 成功必须原子清除初次导入留下的降级状态。"""
+        with TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            markdown_root = root / "markdown"
+            output_dir = markdown_root / "paper"
+            output_dir.mkdir(parents=True)
+            markdown_path = output_dir / "full.md"
+            markdown_path.write_text("# Paper\n\n" + "content " * 200, encoding="utf-8")
+            agent = HunterAgent(download_dir=root / "papers", metadata_db_path=root / "papers.sqlite3")
+            agent._save_paper_to_db(
+                {
+                    "id": "paper-stale",
+                    "source": "manual_pdf",
+                    "title": "Paper",
+                    "pdfParsedBy": "pymupdf",
+                    "pdfParseWarning": "MinerU 解析失败，已降级使用 PyMuPDF：旧错误",
+                }
+            )
+            with patch.object(settings, "mineru_output_dir", str(markdown_root)):
+                indexed = agent.index_saved_structured_markdown(
+                    "paper-stale",
+                    markdown_path=markdown_path,
+                    output_dir=output_dir,
+                    parser="mineru",
+                )
+
+            self.assertEqual(indexed["pdfParsedBy"], "mineru")
+            self.assertEqual(indexed["fullTextIndexedBy"], "mineru")
+            self.assertEqual(indexed["pdfParseWarning"], "")
+            self.assertEqual(indexed["fullTextIndexWarning"], "")
+
+    def test_repair_mineru_status_supports_dry_run_and_apply(self) -> None:
+        with TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            markdown_root = root / "markdown"
+            output_dir = markdown_root / "paper"
+            output_dir.mkdir(parents=True)
+            markdown_path = output_dir / "full.md"
+            markdown_path.write_text("# Paper", encoding="utf-8")
+            agent = HunterAgent(download_dir=root / "papers", metadata_db_path=root / "papers.sqlite3")
+            agent._save_paper_to_db(
+                {
+                    "id": "paper-repair",
+                    "source": "manual_pdf",
+                    "title": "Paper",
+                    "markdownPath": str(markdown_path),
+                    "fullTextIndexedBy": "mineru",
+                    "pdfParsedBy": "pymupdf",
+                    "pdfParseWarning": "MinerU 解析失败，已降级使用 PyMuPDF：旧错误",
+                }
+            )
+            with patch.object(settings, "mineru_output_dir", str(markdown_root)):
+                preview = agent.repair_mineru_status_metadata()
+                unchanged = agent.get_saved_paper("paper-repair")
+                repaired = agent.repair_mineru_status_metadata(apply=True)
+                updated = agent.get_saved_paper("paper-repair")
+
+            self.assertEqual(preview["candidateCount"], 1)
+            self.assertEqual(unchanged["pdfParsedBy"], "pymupdf")
+            self.assertEqual(repaired["repairedCount"], 1)
+            self.assertEqual(updated["pdfParsedBy"], "mineru")
+            self.assertEqual(updated["pdfParseWarning"], "")
 
     def test_pdf_extraction_falls_back_to_pymupdf_after_mineru_failure(self) -> None:
         """MinerU 失败后才允许使用 PyMuPDF，并保留明确的降级原因。"""

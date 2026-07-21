@@ -457,6 +457,12 @@ export default function DatasetBrowserView({ refreshToken = 0 }: { refreshToken?
               const labels = uniqueTrimmedValues([paper.source, paper.year, paper.keyword, ...(paper.customTags ?? [])]);
               const viewUrl = paperId ? `/dataset-brower/view/${encodeURIComponent(paperId)}` : null;
               const externalUrl = paper.url?.trim() || "";
+              const currentParser = (paper.fullTextIndexedBy || paper.pdfParsedBy || "").toLowerCase();
+              const indexedWarning = paper.fullTextIndexWarning?.trim() || "";
+              const staleFallbackWarning = currentParser === "mineru" && indexedWarning.includes("降级使用 PyMuPDF");
+              const currentWarning = staleFallbackWarning
+                ? ""
+                : indexedWarning || (currentParser !== "mineru" ? paper.pdfParseWarning : "");
 
               return (
                 <article
@@ -485,14 +491,20 @@ export default function DatasetBrowserView({ refreshToken = 0 }: { refreshToken?
                     <span className={paper.pdfPath ? "dataset-pdf-ready" : "dataset-pdf-missing"}>
                       {paper.pdfPath ? "PDF 可用" : "缺少 PDF"}
                     </span>
-                    {paper.markdownPath && <span className="dataset-markdown-ready">Markdown 已生成</span>}
+                    {currentParser === "mineru" ? (
+                      <span className="dataset-markdown-ready">MinerU 已解析</span>
+                    ) : currentParser === "pymupdf" ? (
+                      <span className="dataset-parser-fallback">PyMuPDF 降级解析</span>
+                    ) : paper.markdownPath ? (
+                      <span className="dataset-markdown-ready">Markdown 已生成</span>
+                    ) : null}
                   </div>
                   <h2>{paper.title || "未命名论文"}</h2>
                   {paper.authors && paper.authors.length > 0 && (
                     <p className="dataset-card-authors">{paper.authors.slice(0, 4).join(", ")}</p>
                   )}
                   {paper.abstract && <p className="dataset-card-abstract">{paper.abstract}</p>}
-                  {paper.pdfParseWarning && <p className="dataset-card-warning">{paper.pdfParseWarning}</p>}
+                  {currentWarning && <p className="dataset-card-warning">{currentWarning}</p>}
                   <div className="dataset-card-actions">
                     {viewUrl && <Link href={viewUrl}>查看原文</Link>}
                     {!viewUrl && externalUrl && (

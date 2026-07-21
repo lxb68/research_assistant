@@ -41,7 +41,10 @@ export type SavedPaper = {
   impactFactor?: number | null;
   metricFiltersIgnored?: boolean;
   customTags?: string[];
+  pdfParsedBy?: string;
   pdfParseWarning?: string;
+  fullTextIndexedBy?: string;
+  fullTextIndexWarning?: string;
   markdownPath?: string;
   markdownOutputDir?: string;
   splitChunkCount?: number;

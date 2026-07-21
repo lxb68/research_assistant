@@ -10,7 +10,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import hashlib
-import hmac
 import json
 import os
 import re
@@ -34,6 +33,7 @@ from app.services.split import (
 )
 from app.services.sjr_metrics import SjrMetrics
 from app.services.task_control import TaskCancelled, raise_if_task_cancelled
+from app.services.tencent_translation import translate_tencent_cloud
 from app.services.venue_metrics import enrich_paper_metrics
 import requests
 
@@ -633,6 +633,48 @@ class HunterAgent:
         """读取已保存的论文元数据，用于前端浏览本地数据集。"""
         return self.repository.list(limit=limit, keyword=keyword)
 
+    def repair_mineru_status_metadata(self, *, apply: bool = False, limit: int = 500) -> dict[str, object]:
+        """修复已由 MinerU 索引、但仍残留 PyMuPDF 降级状态的历史记录。"""
+        candidate_ids: list[str] = []
+        repaired_ids: list[str] = []
+        for paper in self.repository.list(limit=max(1, min(limit, 500))):
+            if str(paper.get("fullTextIndexedBy") or "").strip().lower() != "mineru":
+                continue
+            markdown_path = self._resolve_managed_markdown_path(
+                str(paper.get("markdownPath") or paper.get("markdown_path") or "").strip()
+            )
+            if not markdown_path or not markdown_path.is_file():
+                continue
+            parse_warning = str(paper.get("pdfParseWarning") or "").strip()
+            indexed_warning = str(paper.get("fullTextIndexWarning") or "").strip()
+            stale_index_warning = indexed_warning if "降级使用 PyMuPDF" in indexed_warning else ""
+            if (
+                str(paper.get("pdfParsedBy") or "").strip().lower() == "mineru"
+                and not parse_warning
+                and not stale_index_warning
+            ):
+                continue
+            record_id = str(paper.get("id") or "").strip()
+            if not record_id:
+                continue
+            candidate_ids.append(record_id)
+            if apply:
+                updates: dict[str, object] = {
+                    "pdfParsedBy": "mineru",
+                    "pdfParseWarning": "",
+                }
+                if stale_index_warning:
+                    updates["fullTextIndexWarning"] = ""
+                self.update_saved_paper(record_id, updates)
+                repaired_ids.append(record_id)
+        return {
+            "dryRun": not apply,
+            "candidateCount": len(candidate_ids),
+            "repairedCount": len(repaired_ids),
+            "candidateIds": candidate_ids,
+            "repairedIds": repaired_ids,
+        }
+
     def delete_saved_papers(self, ids: list[str]) -> dict:
         """按论文记录 ID 批量删除已保存的元数据记录，不删除本地 PDF 文件。"""
         normalized_ids = sorted({str(record_id).strip() for record_id in ids if str(record_id).strip()})
@@ -1016,12 +1058,14 @@ class HunterAgent:
                     output_dir=str(extracted.get("outputDir") or ""),
                     parser="mineru",
                     conversion_result=dict(extracted.get("mineruResult") or {}),
+                    warning=str(extracted.get("indexWarning") or ""),
                 )
             else:
                 saved_paper = self.index_saved_pdf_text(
                     str(saved_paper.get("id") or ""),
                     extracted_text=str(extracted.get("text") or ""),
                     parser=str(extracted.get("parser") or "pymupdf"),
+                    warning=str(extracted.get("warning") or ""),
                 )
         except Exception as error:
             warning = f"PDF 已导入，但本地全文索引失败：{error}"
@@ -1041,6 +1085,7 @@ class HunterAgent:
         output_dir: str | Path | None = None,
         parser: str = "mineru",
         conversion_result: dict[str, object] | None = None,
+        warning: str = "",
         min_split_length: int | None = None,
         max_split_length: int | None = None,
     ) -> Paper:
@@ -1058,14 +1103,12 @@ class HunterAgent:
             output_dir or resolved_markdown.parent,
             expect_dir=True,
         )
-        indexed_at = datetime.now(timezone.utc).isoformat()
-        updates: dict[str, object] = {
-            "markdownPath": str(resolved_markdown),
-            "markdownOutputDir": str(resolved_output_dir or resolved_markdown.parent),
-            "fullTextIndexedBy": str(parser or "mineru").strip() or "mineru",
-            "fullTextIndexedAt": indexed_at,
-            "fullTextIndexWarning": "",
-        }
+        updates = self._build_full_text_index_updates(
+            parser=parser,
+            markdown_path=resolved_markdown,
+            output_dir=resolved_output_dir or resolved_markdown.parent,
+            warning=warning,
+        )
         if conversion_result:
             updates["mineruResult"] = conversion_result
         self.update_saved_paper(normalized_id, updates)
@@ -1087,6 +1130,7 @@ class HunterAgent:
         *,
         extracted_text: str | None = None,
         parser: str = "pymupdf",
+        warning: str = "",
         cancel_event=None,
     ) -> Paper:
         """把本地 PDF 文本持久化为受管理的 Markdown，并生成 RAG 分块。"""
@@ -1122,16 +1166,14 @@ class HunterAgent:
         temporary_path.write_text(markdown_text, encoding="utf-8")
         temporary_path.replace(markdown_path)
 
-        indexed_at = datetime.now(timezone.utc).isoformat()
         self.update_saved_paper(
             normalized_id,
-            {
-                "markdownPath": str(markdown_path),
-                "markdownOutputDir": str(output_dir),
-                "fullTextIndexedBy": resolved_parser,
-                "fullTextIndexedAt": indexed_at,
-                "fullTextIndexWarning": "",
-            },
+            self._build_full_text_index_updates(
+                parser=resolved_parser,
+                markdown_path=markdown_path,
+                output_dir=output_dir,
+                warning=warning,
+            ),
         )
         indexed = self.split_saved_paper_from_markdown(
             normalized_id,
@@ -1154,8 +1196,14 @@ class HunterAgent:
             raise_if_task_cancelled(cancel_event)
             markdown_path = Path(str(mineru_result.get("markdownPath") or ""))
             markdown_text = markdown_path.read_text(encoding="utf-8", errors="ignore")
-            if not self._pdf_text_looks_usable(markdown_text):
-                raise RuntimeError("MinerU 生成的 Markdown 文本不足")
+            if not markdown_text.strip():
+                raise RuntimeError("MinerU 生成的 Markdown 为空")
+            compact_length = len(re.sub(r"\s+", "", markdown_text))
+            index_warning = (
+                "MinerU Markdown 内容较短，请确认原文页数和解析完整性"
+                if compact_length < 800
+                else ""
+            )
             self._log(
                 f"MinerU 结构化解析完成：markdown={markdown_path}, 文本长度={len(markdown_text)}"
             )
@@ -1164,6 +1212,7 @@ class HunterAgent:
                 "metadata": {},
                 "parser": "mineru",
                 "warning": "",
+                "indexWarning": index_warning,
                 "markdownPath": str(markdown_path),
                 "outputDir": str(mineru_result.get("outputDir") or markdown_path.parent),
                 "mineruResult": mineru_result,
@@ -1207,6 +1256,27 @@ class HunterAgent:
         """判断 PDF 提取文本是否达到可用质量。"""
         compact = re.sub(r"\s+", "", text)
         return len(compact) >= 800
+
+    @staticmethod
+    def _build_full_text_index_updates(
+        *,
+        parser: str,
+        markdown_path: Path,
+        output_dir: Path,
+        warning: str = "",
+    ) -> dict[str, object]:
+        """原子构建当前全文解析状态，避免解析器和警告字段相互矛盾。"""
+        resolved_parser = str(parser or "pymupdf").strip() or "pymupdf"
+        resolved_warning = str(warning or "").strip()
+        return {
+            "pdfParsedBy": resolved_parser,
+            "pdfParseWarning": "" if resolved_parser == "mineru" else resolved_warning,
+            "markdownPath": str(markdown_path),
+            "markdownOutputDir": str(output_dir),
+            "fullTextIndexedBy": resolved_parser,
+            "fullTextIndexedAt": datetime.now(timezone.utc).isoformat(),
+            "fullTextIndexWarning": resolved_warning,
+        }
 
     def _parse_pdf_metadata(self, text: str, metadata: dict[str, object]) -> Paper:
         """从 PDF 文本和元数据中提取论文常见字段。"""
@@ -1920,98 +1990,17 @@ class HunterAgent:
         if not secret_id or not secret_key:
             self._log("腾讯云翻译跳过：未配置 TENCENTCLOUD_SECRET_ID/TENCENTCLOUD_SECRET_KEY")
             return None
-
-        host = "tmt.tencentcloudapi.com"
-        action = "TextTranslate"
-        version = "2018-03-21"
-        service = "tmt"
-        timestamp = int(time.time())
-        date = datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d")
-        payload = json.dumps(
-            {
-                "SourceText": text,
-                "Source": "zh",
-                "Target": "en",
-                "ProjectId": 0,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-
-        canonical_headers = (
-            "content-type:application/json; charset=utf-8\n"
-            f"host:{host}\n"
-            f"x-tc-action:{action.lower()}\n"
-        )
-        signed_headers = "content-type;host;x-tc-action"
-        canonical_request = "\n".join(
-            [
-                "POST",
-                "/",
-                "",
-                canonical_headers,
-                signed_headers,
-                hashlib.sha256(payload.encode("utf-8")).hexdigest(),
-            ],
-        )
-        credential_scope = f"{date}/{service}/tc3_request"
-        string_to_sign = "\n".join(
-            [
-                "TC3-HMAC-SHA256",
-                str(timestamp),
-                credential_scope,
-                hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
-            ],
-        )
-        secret_date = hmac.new(
-            f"TC3{secret_key}".encode("utf-8"),
-            date.encode("utf-8"),
-            hashlib.sha256,
-        ).digest()
-        secret_service = hmac.new(secret_date, service.encode("utf-8"), hashlib.sha256).digest()
-        secret_signing = hmac.new(secret_service, b"tc3_request", hashlib.sha256).digest()
-        signature = hmac.new(
-            secret_signing,
-            string_to_sign.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        authorization = (
-            "TC3-HMAC-SHA256 "
-            f"Credential={secret_id}/{credential_scope}, "
-            f"SignedHeaders={signed_headers}, Signature={signature}"
-        )
-        request = Request(
-            f"https://{host}",
-            data=payload.encode("utf-8"),
-            headers={
-                "Authorization": authorization,
-                "Content-Type": "application/json; charset=utf-8",
-                "Host": host,
-                "X-TC-Action": action,
-                "X-TC-Version": version,
-                "X-TC-Timestamp": str(timestamp),
-                "X-TC-Region": settings.tencent_translation_region,
-            },
-        )
-
         try:
-            with urlopen(request, timeout=timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
+            translated = translate_tencent_cloud(
+                text,
+                secret_id=secret_id,
+                secret_key=secret_key,
+                region=settings.tencent_translation_region,
+                timeout=timeout,
+            )
         except Exception as error:
             self._log(f"腾讯云翻译失败: {error}")
             return None
-
-        response_data = data.get("Response", {})
-        error_data = response_data.get("Error")
-        if error_data:
-            self._log(f"腾讯云翻译失败: {error_data.get('Code', '')} {error_data.get('Message', '')}")
-            return None
-
-        translated = str(response_data.get("TargetText", "")).strip()
-        if not translated:
-            self._log(f"腾讯云翻译失败：响应格式异常 {data}")
-            return None
-
         self._log(f"腾讯云翻译结果: {text} -> {translated}")
         return translated
 

@@ -4,11 +4,14 @@ from time import perf_counter
 
 from fastapi import APIRouter, HTTPException
 
-from app.schemas.api import EnvConfigUpdateRequest, ModelConfigRequest, ModelConnectionTestRequest, ModelDiscoveryRequest
+from app.core.config import settings
+from app.schemas.api import EnvConfigUpdateRequest, ExternalServiceConnectionTestRequest, ModelConfigRequest, ModelConnectionTestRequest, ModelDiscoveryRequest
 from app.services.env_config import EnvConfigStore
+from app.services.mineru import test_mineru_connection
 from app.services.model_client import chat_completion, discover_models
 from app.services.model_config import ModelConfigStore
 from app.services.runtime_config import get_public_runtime_config
+from app.services.tencent_translation import translate_tencent_cloud
 
 
 router = APIRouter()
@@ -45,6 +48,40 @@ def update_env_config(payload: EnvConfigUpdateRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except OSError as error:
         raise HTTPException(status_code=500, detail=f"写入 .env 失败：{error}") from error
+
+
+@router.post("/api/settings/external-service/test")
+def test_external_service_connection(payload: ExternalServiceConnectionTestRequest) -> dict:
+    """使用表单覆盖值或当前运行配置执行最小连通性测试，不持久化凭据。"""
+    started = perf_counter()
+    try:
+        if payload.service == "tencent_translation":
+            translated = translate_tencent_cloud(
+                "连接测试",
+                secret_id=payload.secret_id.strip() or settings.tencent_translation_secret_id,
+                secret_key=payload.secret_key.strip() or settings.tencent_translation_secret_key,
+                region=payload.region.strip() or settings.tencent_translation_region,
+                timeout=min(settings.request_timeout, 20),
+            )
+            if not translated:
+                raise RuntimeError("腾讯云翻译返回了空响应")
+        else:
+            test_mineru_connection(
+                token=payload.token.strip() or settings.mineru_api_token,
+                api_base=payload.api_base.strip() or settings.mineru_api_base,
+                timeout=min(settings.mineru_request_timeout_seconds, 20),
+            )
+        return {
+            "status": "ok",
+            "available": True,
+            "service": payload.service,
+            "latencyMs": round((perf_counter() - started) * 1000),
+        }
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        service_name = "腾讯云翻译" if payload.service == "tencent_translation" else "MinerU"
+        raise HTTPException(status_code=502, detail=f"{service_name}连接测试失败：{error}") from error
 
 
 @router.post("/api/settings/model-config/discover")

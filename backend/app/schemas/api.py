@@ -123,6 +123,15 @@ class EnvConfigUpdateRequest(BaseModel):
     values: dict[str, str | int | float | bool | None] = Field(default_factory=dict, max_length=100)
 
 
+class ExternalServiceConnectionTestRequest(BaseModel):
+    service: Literal["tencent_translation", "mineru"]
+    secret_id: str = Field("", max_length=256)
+    secret_key: str = Field("", max_length=512)
+    region: str = Field("", max_length=100)
+    token: str = Field("", max_length=4096)
+    api_base: str = Field("", max_length=2000)
+
+
 class ChatSource(BaseModel):
     index: int = Field(..., ge=1, le=1000)
     record_id: str = Field("", max_length=200)
@@ -158,7 +167,7 @@ __all__ = [
     "DomainTreeGenerateOptions", "DomainTreeGenerateRequest", "DomainTreeNodeUpdateRequest",
     "KnowledgeEntityUpdateRequest", "KnowledgeRelationUpdateRequest", "KnowledgeRevisionRequest",
     "ImportPaperRequest", "ManualPdfLinkRequest",
-    "EnvConfigUpdateRequest", "ModelConfigRequest", "ModelConnectionTestRequest", "ModelDiscoveryRequest", "OrchestratorRequest",
+    "EnvConfigUpdateRequest", "ExternalServiceConnectionTestRequest", "ModelConfigRequest", "ModelConnectionTestRequest", "ModelDiscoveryRequest", "OrchestratorRequest",
     "ProjectCreateRequest", "ProjectPapersRequest",
     "ResearchChatRequest",
 ]

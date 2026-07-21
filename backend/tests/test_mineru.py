@@ -17,7 +17,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.services.mineru import _run_mineru_cloud_api, mineru_processing
+from app.services.mineru import _run_mineru_cloud_api, _select_primary_markdown, mineru_processing
 
 
 def response(payload: dict | None = None, *, status_code: int = 200, content: bytes = b"") -> Mock:
@@ -156,6 +156,67 @@ class MinerUCloudTest(unittest.TestCase):
 
         self.assertTrue(result["success"])
         local.assert_called_once()
+
+    @patch("app.services.mineru._run_mineru_cloud_api")
+    def test_processing_replaces_stale_output_after_validation(self, cloud: Mock) -> None:
+        """本次结果必须在隔离目录完成，不能混入最终目录的旧 Markdown。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pdf_path = root / "paper.pdf"
+            pdf_path.write_bytes(b"%PDF-test")
+            output_dir = root / "output" / "paper"
+            output_dir.mkdir(parents=True)
+            (output_dir / "stale.md").write_text("stale", encoding="utf-8")
+
+            def write_result(_pdf_path: Path, processing_dir: Path, _token: str) -> None:
+                (processing_dir / "full.md").write_text("# current", encoding="utf-8")
+
+            cloud.side_effect = write_result
+            with (
+                patch("app.services.mineru.settings.mineru_output_dir", str(root / "output")),
+                patch("app.services.mineru.settings.mineru_api_token", "secret-token"),
+                patch("app.services.mineru.settings.mineru_enable_local_cli_fallback", False),
+            ):
+                result = mineru_processing(pdf_path=str(pdf_path), output_name="paper")
+
+            self.assertEqual(Path(result["markdownPath"]).read_text(encoding="utf-8"), "# current")
+            self.assertFalse((output_dir / "stale.md").exists())
+            self.assertFalse(list((root / "output").glob(".paper.processing-*")))
+
+    @patch("app.services.mineru._run_mineru_cloud_api")
+    def test_failed_processing_preserves_previous_output(self, cloud: Mock) -> None:
+        """新任务失败时必须保留上一份有效结果。"""
+        cloud.side_effect = RuntimeError("cloud failed")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pdf_path = root / "paper.pdf"
+            pdf_path.write_bytes(b"%PDF-test")
+            output_dir = root / "output" / "paper"
+            output_dir.mkdir(parents=True)
+            previous = output_dir / "full.md"
+            previous.write_text("# previous", encoding="utf-8")
+            with (
+                patch("app.services.mineru.settings.mineru_output_dir", str(root / "output")),
+                patch("app.services.mineru.settings.mineru_api_token", "secret-token"),
+                patch("app.services.mineru.settings.mineru_enable_local_cli_fallback", False),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "cloud failed"):
+                    mineru_processing(pdf_path=str(pdf_path), output_name="paper")
+
+            self.assertEqual(previous.read_text(encoding="utf-8"), "# previous")
+
+    def test_primary_markdown_prefers_full_then_largest_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "short.md").write_text("x", encoding="utf-8")
+            nested = root / "nested"
+            nested.mkdir()
+            full = nested / "full.md"
+            full.write_text("full", encoding="utf-8")
+            other_full = root / "full.md"
+            other_full.write_text("larger full content", encoding="utf-8")
+
+            self.assertEqual(_select_primary_markdown(root), other_full)
 
     @patch("app.api.routes.mineru.mineru_processing")
     @patch("app.api.routes.mineru.HunterAgent")

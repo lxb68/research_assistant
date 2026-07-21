@@ -145,3 +145,15 @@ GET  /api/conversations/{conversation_id}
 - `ieee` 需要先申请并配置 `IEEE_API_KEY`。
 - PDF 精细解析默认使用 `MINERU_API_TOKEN` 调用 MinerU 云 API。本地 `mineru`/`magic-pdf`
   CLI 不会自动运行；只有设置 `MINERU_ENABLE_LOCAL_CLI_FALLBACK=true` 才会在云端失败后回退。
+
+历史版本中若出现 MinerU 已成功索引、但论文卡片仍保留 PyMuPDF 降级状态，可先只读检查：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\repair_mineru_status.py
+```
+
+确认候选记录后再写入修复：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\repair_mineru_status.py --apply
+```

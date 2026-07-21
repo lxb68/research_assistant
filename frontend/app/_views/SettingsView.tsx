@@ -13,6 +13,7 @@ import {
 type ModelProtocol = "openai_compatible" | "ollama" | "anthropic" | "gemini";
 type SettingsTab = "model" | "document" | "research" | "environment" | "advanced";
 type ConnectionStatus = "unconfigured" | "unverified" | "testing" | "available" | "error";
+type ExternalServiceId = "tencent_translation" | "mineru";
 
 type DocumentSettings = {
   minimumLength: number;
@@ -236,6 +237,10 @@ export default function SettingsWorkspace() {
   const [modelConfigured, setModelConfigured] = useState(false);
   const [modelDirty, setModelDirty] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("unconfigured");
+  const [externalServiceStatus, setExternalServiceStatus] = useState<Record<ExternalServiceId, ConnectionStatus>>({
+    tencent_translation: "unverified",
+    mineru: "unverified",
+  });
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -533,8 +538,51 @@ export default function SettingsWorkspace() {
 
   function updateEnvField(key: string, value: EnvValue) {
     setEnvChanges((current) => ({ ...current, [key]: value }));
+    if (["TENCENTCLOUD_SECRET_ID", "TENCENTCLOUD_SECRET_KEY", "TENCENT_TRANSLATION_REGION"].includes(key)) {
+      setExternalServiceStatus((current) => ({ ...current, tencent_translation: "unverified" }));
+    }
+    if (["MINERU_API_TOKEN", "MINERU_API_BASE"].includes(key)) {
+      setExternalServiceStatus((current) => ({ ...current, mineru: "unverified" }));
+    }
     setMessage("");
     setError("");
+  }
+
+  async function testExternalService(service: ExternalServiceId, visibleFields: EnvField[]) {
+    const fieldValue = (key: string) => {
+      if (Object.prototype.hasOwnProperty.call(envChanges, key)) return envChanges[key];
+      return visibleFields.find((field) => field.key === key)?.value ?? "";
+    };
+    const payload = service === "tencent_translation"
+      ? {
+          service,
+          secret_id: fieldValue("TENCENTCLOUD_SECRET_ID"),
+          secret_key: fieldValue("TENCENTCLOUD_SECRET_KEY"),
+          region: fieldValue("TENCENT_TRANSLATION_REGION"),
+        }
+      : {
+          service,
+          token: fieldValue("MINERU_API_TOKEN"),
+          api_base: fieldValue("MINERU_API_BASE"),
+        };
+    setExternalServiceStatus((current) => ({ ...current, [service]: "testing" }));
+    setMessage("");
+    setError("");
+    try {
+      const response = await fetch(buildApiUrl("/api/settings/external-service/test"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const serviceName = service === "tencent_translation" ? "腾讯云翻译" : "MinerU";
+      if (!response.ok) throw new Error(await responseError(response, `${serviceName}连接测试失败`));
+      const result = await response.json() as { latencyMs?: number };
+      setExternalServiceStatus((current) => ({ ...current, [service]: "available" }));
+      setMessage(`${serviceName}连接正常${result.latencyMs !== undefined ? `，耗时 ${result.latencyMs} ms` : ""}。`);
+    } catch (testError) {
+      setExternalServiceStatus((current) => ({ ...current, [service]: "error" }));
+      setError(testError instanceof Error ? testError.message : "外部服务连接测试失败");
+    }
   }
 
   async function saveEnvConfig() {
@@ -575,9 +623,15 @@ export default function SettingsWorkspace() {
           const mineruFallback = visibleFields.find((field) => field.key === "MINERU_ENABLE_LOCAL_CLI_FALLBACK");
           const tokenValue = envChanges.MINERU_API_TOKEN;
           const fallbackValue = envChanges.MINERU_ENABLE_LOCAL_CLI_FALLBACK;
+          const mineruTokenConfigured = tokenValue === null
+            ? false
+            : typeof tokenValue === "string" && tokenValue.trim()
+              ? true
+              : Boolean(mineruToken?.configured);
+          const mineruFallbackEnabled = typeof fallbackValue === "boolean" ? fallbackValue : Boolean(mineruFallback?.value);
           const mineruNeedsSetup = section.id === "mineru"
-            && !(tokenValue === null ? false : typeof tokenValue === "string" && tokenValue.trim() ? true : mineruToken?.configured)
-            && !(typeof fallbackValue === "boolean" ? fallbackValue : Boolean(mineruFallback?.value));
+            && !mineruTokenConfigured
+            && !mineruFallbackEnabled;
           const secretConfigured = (key: string) => {
             const field = visibleFields.find((item) => item.key === key);
             const draft = envChanges[key];
@@ -587,6 +641,14 @@ export default function SettingsWorkspace() {
             && (!secretConfigured("TENCENTCLOUD_SECRET_ID") || !secretConfigured("TENCENTCLOUD_SECRET_KEY"));
           const needsRequiredSetup = mineruNeedsSetup || translationNeedsSetup;
           const setupMessage = translationNeedsSetup ? "需要 SecretId 和 SecretKey" : "需要 Token 或本地降级";
+          const externalService = section.id === "translation"
+            ? "tencent_translation"
+            : section.id === "mineru"
+              ? "mineru"
+              : null;
+          const serviceStatus = externalService ? externalServiceStatus[externalService] : null;
+          const serviceName = externalService === "tencent_translation" ? "腾讯云翻译" : "MinerU";
+          const serviceTestDisabled = translationNeedsSetup || (externalService === "mineru" && !mineruTokenConfigured);
           return (
             <details key={section.id} className={`settings-card settings-env-section-card${needsRequiredSetup ? " needs-setup" : ""}`} open={section.id === primarySectionId || needsRequiredSetup}>
               <summary><div><span>{number}</span><strong>{section.label}</strong></div><small>{needsRequiredSetup ? setupMessage : changedCount ? `${changedCount} 项已修改` : `${visibleFields.length} 项配置`}</small></summary>
@@ -613,6 +675,15 @@ export default function SettingsWorkspace() {
                   );
                 })}
               </div>
+              {externalService ? (
+                <div className="settings-test-strip settings-env-test-strip">
+                  <div>
+                    <strong>{serviceStatus === "available" ? `${serviceName}连接可用` : serviceStatus === "testing" ? `正在测试${serviceName}` : serviceStatus === "error" ? `${serviceName}最近测试失败` : `${serviceName}尚未测试`}</strong>
+                    <span>{externalService === "mineru" ? "执行只读任务查询，不上传文件或创建解析任务。" : "翻译一段最短测试文本，以验证签名、地域和接口权限。"}</span>
+                  </div>
+                  <button type="button" className="settings-btn settings-btn-secondary" disabled={serviceStatus === "testing" || serviceTestDisabled} onClick={() => void testExternalService(externalService, visibleFields)}>{serviceStatus === "testing" ? "测试中…" : "测试连接"}</button>
+                </div>
+              ) : null}
             </details>
           );
         })}

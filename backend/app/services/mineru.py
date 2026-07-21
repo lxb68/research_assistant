@@ -12,11 +12,55 @@ import tempfile
 import time
 from typing import Optional
 import zipfile
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 import requests
 
 from app.core.config import settings
+
+
+MINERU_PROBE_BATCH_ID = str(UUID(int=0))
+
+
+def test_mineru_connection(
+    *,
+    token: str,
+    api_base: str,
+    timeout: int,
+) -> None:
+    """通过只读任务查询验证 MinerU 地址和 Token，不创建解析任务。"""
+    if not token.strip():
+        raise ValueError("未配置 MinerU API Token")
+    normalized_base = api_base.strip().rstrip("/")
+    if not normalized_base:
+        raise ValueError("未配置 MinerU API 地址")
+    try:
+        response = requests.get(
+            f"{normalized_base}/extract-results/batch/{MINERU_PROBE_BATCH_ID}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout,
+        )
+    except requests.RequestException as error:
+        raise RuntimeError(f"MinerU 连接失败：{error}") from error
+    if response.status_code in {401, 403}:
+        raise RuntimeError(f"MinerU Token 鉴权失败（HTTP {response.status_code}）")
+    if not 200 <= response.status_code < 300:
+        raise RuntimeError(f"MinerU 服务返回 HTTP {response.status_code}：{_response_excerpt(response)}")
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise RuntimeError("MinerU 服务返回了非 JSON 响应，请检查 API 地址") from error
+    if not isinstance(payload, dict) or "code" not in payload:
+        raise RuntimeError("MinerU 服务响应格式不兼容，请检查 API 地址")
+    if payload.get("code") == 0:
+        return
+    message = str(payload.get("msg") or "未知错误")
+    normalized_message = message.lower()
+    auth_markers = ("token", "auth", "unauthorized", "forbidden", "鉴权", "认证", "未授权", "无权限", "登录")
+    if any(marker in normalized_message for marker in auth_markers):
+        raise RuntimeError(f"MinerU Token 鉴权失败：{message}")
+    # 随机任务不存在属于预期业务错误，说明服务可达且鉴权已通过。
 
 
 class MinerURequest(BaseModel):
@@ -57,46 +101,61 @@ def mineru_processing(
         pdf_path=pdf_path,
         output_name=output_name,
     )
-    paths.output_dir.mkdir(parents=True, exist_ok=True)
+    paths.output_dir.parent.mkdir(parents=True, exist_ok=True)
+    processing_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".{paths.output_dir.name}.processing-",
+            dir=paths.output_dir.parent,
+        )
+    )
 
     token = (mineru_token or settings.mineru_api_token).strip()
     cloud_error: str | None = None
     conversion_succeeded = False
 
-    if token:
-        try:
-            _run_mineru_cloud_api(paths.pdf_path, paths.output_dir, token)
-            conversion_succeeded = True
-        except Exception as error:
-            cloud_error = str(error)
-    else:
-        cloud_error = "MINERU_API_TOKEN is not configured"
+    try:
+        if token:
+            try:
+                _run_mineru_cloud_api(paths.pdf_path, processing_dir, token)
+                conversion_succeeded = True
+            except Exception as error:
+                cloud_error = str(error)
+        else:
+            cloud_error = "MINERU_API_TOKEN is not configured"
 
-    if not conversion_succeeded and settings.mineru_enable_local_cli_fallback:
-        print("[MinerU] 云端转换未生成 Markdown，已启用本地 CLI 回退", flush=True)
-        try:
-            _run_local_mineru_cli(paths.pdf_path, paths.output_dir)
-            conversion_succeeded = True
-        except Exception as error:
-            raise RuntimeError(
-                f"MinerU cloud conversion failed: {cloud_error}; "
-                f"local CLI fallback failed: {error}",
-            ) from error
+        if not conversion_succeeded and settings.mineru_enable_local_cli_fallback:
+            print("[MinerU] 云端转换未生成 Markdown，已启用本地 CLI 回退", flush=True)
+            _reset_processing_directory(processing_dir)
+            try:
+                _run_local_mineru_cli(paths.pdf_path, processing_dir)
+                conversion_succeeded = True
+            except Exception as error:
+                raise RuntimeError(
+                    f"MinerU cloud conversion failed: {cloud_error}; "
+                    f"local CLI fallback failed: {error}",
+                ) from error
 
-    if not conversion_succeeded:
-        fallback_hint = (
-            " Set MINERU_ENABLE_LOCAL_CLI_FALLBACK=true to explicitly enable local CLI fallback."
-        )
-        raise RuntimeError(f"MinerU cloud conversion failed: {cloud_error}.{fallback_hint}")
+        if not conversion_succeeded:
+            fallback_hint = (
+                " Set MINERU_ENABLE_LOCAL_CLI_FALLBACK=true to explicitly enable local CLI fallback."
+            )
+            raise RuntimeError(f"MinerU cloud conversion failed: {cloud_error}.{fallback_hint}")
 
-    markdown_path = _select_primary_markdown(paths.output_dir)
-    if markdown_path is None:
-        raise RuntimeError("MinerU finished but no markdown output was found")
+        processing_markdown = _select_primary_markdown(processing_dir, preferred_stem=paths.pdf_path.stem)
+        if processing_markdown is None:
+            raise RuntimeError("MinerU finished but no markdown output was found")
+        relative_markdown = processing_markdown.relative_to(processing_dir)
+        source_pdf_copy = processing_dir / paths.pdf_path.name
+        if not source_pdf_copy.exists():
+            shutil.copy2(paths.pdf_path, source_pdf_copy)
+        resource_summary = _summarize_output(processing_dir)
+        _promote_processing_output(processing_dir, paths.output_dir)
+    finally:
+        if processing_dir.exists():
+            shutil.rmtree(processing_dir, ignore_errors=True)
 
-    resource_summary = _summarize_output(paths.output_dir)
+    markdown_path = paths.output_dir / relative_markdown
     source_pdf_copy = paths.output_dir / paths.pdf_path.name
-    if not source_pdf_copy.exists():
-        shutil.copy2(paths.pdf_path, source_pdf_copy)
 
     return {
         "success": True,
@@ -420,12 +479,41 @@ def _has_markdown_output(output_dir: Path) -> bool:
     return any(path.is_file() and path.suffix.lower() == ".md" for path in output_dir.rglob("*.md"))
 
 
-def _select_primary_markdown(output_dir: Path) -> Path | None:
-    """选择Markdown。"""
+def _select_primary_markdown(output_dir: Path, *, preferred_stem: str = "") -> Path | None:
+    """优先选择标准 full.md，其次选择同名或正文体积最大的 Markdown。"""
     markdown_files = sorted(path for path in output_dir.rglob("*.md") if path.is_file())
     if not markdown_files:
         return None
-    return min(markdown_files, key=lambda path: (len(path.parts), len(path.name)))
+    full_markdown = [path for path in markdown_files if path.name.lower() == "full.md"]
+    if full_markdown:
+        return max(full_markdown, key=lambda path: path.stat().st_size)
+    normalized_stem = preferred_stem.strip().lower()
+    same_name = [path for path in markdown_files if normalized_stem and path.stem.lower() == normalized_stem]
+    return max(same_name or markdown_files, key=lambda path: path.stat().st_size)
+
+
+def _reset_processing_directory(processing_dir: Path) -> None:
+    """清空本次临时结果，防止云端残留污染本地 CLI 回退。"""
+    shutil.rmtree(processing_dir)
+    processing_dir.mkdir(parents=True)
+
+
+def _promote_processing_output(processing_dir: Path, output_dir: Path) -> None:
+    """校验完成后替换最终目录；切换失败时恢复上一份有效结果。"""
+    backup_dir = output_dir.with_name(f".{output_dir.name}.backup-{uuid4().hex}")
+    previous_moved = False
+    try:
+        if output_dir.exists():
+            os.replace(output_dir, backup_dir)
+            previous_moved = True
+        os.replace(processing_dir, output_dir)
+    except Exception:
+        if previous_moved and backup_dir.exists() and not output_dir.exists():
+            os.replace(backup_dir, output_dir)
+        raise
+    else:
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 def _summarize_output(output_dir: Path) -> dict:
