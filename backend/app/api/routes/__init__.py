@@ -8,6 +8,7 @@ from .projects import router as projects_router
 from .research import router as research_router
 from .settings import router as settings_router
 from .system import router as system_router
+from .zotero import router as zotero_router
 from app.api.streaming import router as streaming_router
 
 ALL_ROUTERS = (
@@ -19,6 +20,7 @@ ALL_ROUTERS = (
     domain_tree_router,
     jobs_router,
     mineru_router,
+    zotero_router,
     streaming_router,
 )
 

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+import filecmp
 from io import BytesIO
 from pathlib import Path
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Optional
 import zipfile
@@ -21,6 +24,33 @@ from app.core.config import settings
 
 
 MINERU_PROBE_BATCH_ID = str(UUID(int=0))
+_RETRYABLE_WINDOWS_FILE_ERRORS = {5, 32, 33}
+_OUTPUT_LOCKS_GUARD = threading.Lock()
+_OUTPUT_LOCKS: dict[Path, tuple[threading.RLock, int]] = {}
+
+
+class MinerUOutputPublishError(RuntimeError):
+    """表示 MinerU 已生成结果，但结果目录未能安全发布。"""
+
+
+@contextmanager
+def _output_directory_lock(output_dir: Path):
+    """按最终输出目录串行发布，并在无人等待后释放锁注册项。"""
+    key = output_dir.resolve()
+    with _OUTPUT_LOCKS_GUARD:
+        lock, users = _OUTPUT_LOCKS.get(key, (threading.RLock(), 0))
+        _OUTPUT_LOCKS[key] = (lock, users + 1)
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+        with _OUTPUT_LOCKS_GUARD:
+            current_lock, users = _OUTPUT_LOCKS.get(key, (lock, 1))
+            if current_lock is lock and users <= 1:
+                _OUTPUT_LOCKS.pop(key, None)
+            elif current_lock is lock:
+                _OUTPUT_LOCKS[key] = (lock, users - 1)
 
 
 def test_mineru_connection(
@@ -149,7 +179,16 @@ def mineru_processing(
         if not source_pdf_copy.exists():
             shutil.copy2(paths.pdf_path, source_pdf_copy)
         resource_summary = _summarize_output(processing_dir)
-        _promote_processing_output(processing_dir, paths.output_dir)
+        promoted = _promote_processing_output(processing_dir, paths.output_dir, paths.pdf_path)
+        if not promoted:
+            processing_markdown = _select_primary_markdown(
+                paths.output_dir,
+                preferred_stem=paths.pdf_path.stem,
+            )
+            if processing_markdown is None:
+                raise MinerUOutputPublishError("复用结果目录时未找到有效 Markdown")
+            relative_markdown = processing_markdown.relative_to(paths.output_dir)
+            resource_summary = _summarize_output(paths.output_dir)
     finally:
         if processing_dir.exists():
             shutil.rmtree(processing_dir, ignore_errors=True)
@@ -163,6 +202,72 @@ def mineru_processing(
         "outputDir": str(paths.output_dir),
         "markdownPath": str(markdown_path),
         "sourcePdfPath": str(source_pdf_copy),
+        "reusedExisting": not promoted,
+        "publishWarning": (
+            "MinerU 新结果发布时遇到 Windows 文件占用，已复用同一 PDF 的有效历史结果"
+            if not promoted else ""
+        ),
+        **resource_summary,
+    }
+
+
+def materialize_mineru_result(
+    *,
+    pdf_path: str | Path,
+    output_name: str,
+    result_url: str,
+) -> dict:
+    """下载并原子发布已完成的 MinerU 结果，供批量协调器复用。"""
+    paths = _resolve_paths(
+        project_id=None,
+        file_name=None,
+        pdf_path=str(pdf_path),
+        output_name=output_name,
+    )
+    paths.output_dir.parent.mkdir(parents=True, exist_ok=True)
+    processing_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".{paths.output_dir.name}.processing-",
+            dir=paths.output_dir.parent,
+        )
+    )
+    try:
+        _download_mineru_result(
+            result_url,
+            processing_dir,
+            max(settings.mineru_request_timeout_seconds, 300),
+        )
+        markdown = _select_primary_markdown(processing_dir, preferred_stem=paths.pdf_path.stem)
+        if markdown is None:
+            raise RuntimeError("MinerU cloud result ZIP did not contain Markdown")
+        relative_markdown = markdown.relative_to(processing_dir)
+        source_pdf_copy = processing_dir / paths.pdf_path.name
+        if not source_pdf_copy.exists():
+            shutil.copy2(paths.pdf_path, source_pdf_copy)
+        resource_summary = _summarize_output(processing_dir)
+        promoted = _promote_processing_output(processing_dir, paths.output_dir, paths.pdf_path)
+        if not promoted:
+            markdown = _select_primary_markdown(paths.output_dir, preferred_stem=paths.pdf_path.stem)
+            if markdown is None:
+                raise MinerUOutputPublishError("复用结果目录时未找到有效 Markdown")
+            relative_markdown = markdown.relative_to(paths.output_dir)
+            resource_summary = _summarize_output(paths.output_dir)
+    finally:
+        if processing_dir.exists():
+            shutil.rmtree(processing_dir, ignore_errors=True)
+
+    markdown_path = paths.output_dir / relative_markdown
+    return {
+        "success": True,
+        "pdfPath": str(paths.pdf_path),
+        "outputDir": str(paths.output_dir),
+        "markdownPath": str(markdown_path),
+        "sourcePdfPath": str(paths.output_dir / paths.pdf_path.name),
+        "reusedExisting": not promoted,
+        "publishWarning": (
+            "MinerU 新结果发布时遇到 Windows 文件占用，已复用同一 PDF 的有效历史结果"
+            if not promoted else ""
+        ),
         **resource_summary,
     }
 
@@ -498,22 +603,70 @@ def _reset_processing_directory(processing_dir: Path) -> None:
     processing_dir.mkdir(parents=True)
 
 
-def _promote_processing_output(processing_dir: Path, output_dir: Path) -> None:
-    """校验完成后替换最终目录；切换失败时恢复上一份有效结果。"""
-    backup_dir = output_dir.with_name(f".{output_dir.name}.backup-{uuid4().hex}")
-    previous_moved = False
+def _is_retryable_file_lock(error: OSError) -> bool:
+    """识别 Windows 文件占用及其在其他平台上的 PermissionError 等价形式。"""
+    return isinstance(error, PermissionError) or getattr(error, "winerror", None) in _RETRYABLE_WINDOWS_FILE_ERRORS
+
+
+def _replace_path_with_retry(source: Path, target: Path, *, attempts: int = 6) -> None:
+    """对短暂文件占用执行有限退避重试，不掩盖路径或权限配置错误。"""
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except OSError as error:
+            if not _is_retryable_file_lock(error) or attempt + 1 >= attempts:
+                raise
+            delay = min(1.6, 0.1 * (2 ** attempt))
+            print(
+                f"[MinerU] 结果目录暂时被占用，{delay:.1f} 秒后重试 "
+                f"({attempt + 1}/{attempts - 1})：{source} -> {target}",
+                flush=True,
+            )
+            time.sleep(delay)
+
+
+def _can_reuse_existing_output(output_dir: Path, pdf_path: Path) -> bool:
+    """仅当历史目录包含有效 Markdown 且 PDF 字节一致时允许复用。"""
+    markdown = _select_primary_markdown(output_dir, preferred_stem=pdf_path.stem)
+    managed_pdf = output_dir / pdf_path.name
+    if markdown is None or not managed_pdf.is_file():
+        return False
     try:
-        if output_dir.exists():
-            os.replace(output_dir, backup_dir)
-            previous_moved = True
-        os.replace(processing_dir, output_dir)
-    except Exception:
-        if previous_moved and backup_dir.exists() and not output_dir.exists():
-            os.replace(backup_dir, output_dir)
-        raise
-    else:
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir, ignore_errors=True)
+        return filecmp.cmp(pdf_path, managed_pdf, shallow=False)
+    except OSError:
+        return False
+
+
+def _promote_processing_output(processing_dir: Path, output_dir: Path, pdf_path: Path) -> bool:
+    """串行发布新结果；失败时恢复旧结果，并仅复用同一 PDF 的有效产物。"""
+    backup_dir = output_dir.with_name(f".{output_dir.name}.backup-{uuid4().hex}")
+    with _output_directory_lock(output_dir):
+        previous_moved = False
+        try:
+            if output_dir.exists():
+                _replace_path_with_retry(output_dir, backup_dir)
+                previous_moved = True
+            _replace_path_with_retry(processing_dir, output_dir)
+        except OSError as error:
+            if previous_moved and backup_dir.exists() and not output_dir.exists():
+                try:
+                    _replace_path_with_retry(backup_dir, output_dir)
+                except OSError as rollback_error:
+                    raise MinerUOutputPublishError(
+                        f"MinerU 结果发布失败，且历史结果恢复失败：{rollback_error}",
+                    ) from error
+            if _can_reuse_existing_output(output_dir, pdf_path):
+                print(
+                    f"[MinerU] 新结果发布失败，已复用同一 PDF 的有效历史结果：{output_dir}",
+                    flush=True,
+                )
+                return False
+            raise MinerUOutputPublishError(f"MinerU 结果发布失败：{error}") from error
+        else:
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
+            return True
 
 
 def _summarize_output(output_dir: Path) -> dict:
@@ -536,4 +689,9 @@ def _summarize_output(output_dir: Path) -> dict:
     }
 
 
-__all__ = ["MinerURequest", "mineru_processing"]
+__all__ = [
+    "MinerUOutputPublishError",
+    "MinerURequest",
+    "materialize_mineru_result",
+    "mineru_processing",
+]

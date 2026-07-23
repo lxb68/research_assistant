@@ -48,7 +48,10 @@ export default function DatasetCenterView({
         />
       </section>
       <section hidden={activeTab !== "library"} aria-label="本地文献库">
-        <DatasetBrowserView refreshToken={libraryRefreshToken} />
+        <DatasetBrowserView
+          refreshToken={libraryRefreshToken}
+          isActive={isActiveView && activeTab === "library"}
+        />
       </section>
     </main>
   );

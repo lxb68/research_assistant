@@ -23,7 +23,7 @@ from app.services.paper_search import SUPPORTED_SOURCES
 from app.services.paper_repository import PaperRepository
 from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore
-from app.services.mineru import mineru_processing
+from app.services.mineru import MinerUOutputPublishError, mineru_processing
 from app.services.providers.arxiv import ARXIV_API_URL
 from app.services.providers.ieee import IEEE_API_URL
 from app.services.split import (
@@ -1077,6 +1077,91 @@ class HunterAgent:
         self._log(f"PDF 导入论文元数据: {saved_paper.get('id')} parser={extracted['parser']}")
         return saved_paper
 
+    def index_linked_pdf_paper(
+        self,
+        *,
+        pdf_path: str | Path,
+        record_id: str,
+        source: str,
+        external_id: str,
+        title: str = "",
+        authors: list[str] | None = None,
+        abstract: str = "",
+        year: str = "",
+        doi: str = "",
+        url: str = "",
+        venue: str = "",
+        custom_tags: list[str] | None = None,
+        source_metadata: dict[str, object] | None = None,
+        preparsed_result: dict[str, object] | None = None,
+        cancel_event=None,
+    ) -> Paper:
+        """索引由外部文献管理器托管的 PDF，不复制或删除原文件。"""
+        normalized_id = str(record_id or "").strip()
+        if not normalized_id:
+            raise ValueError("record_id is required")
+        resolved_pdf = self.resolve_pdf_path(pdf_path)
+        if not resolved_pdf:
+            raise ValueError("外部托管 PDF 不存在或不可读取")
+
+        raise_if_task_cancelled(cancel_event)
+        extracted = dict(preparsed_result or {})
+        if not extracted:
+            extracted = self._extract_pdf_text(
+                resolved_pdf,
+                cancel_event=cancel_event,
+                output_name=normalized_id,
+            )
+        parsed = self._parse_pdf_metadata(str(extracted.get("text") or ""), dict(extracted.get("metadata") or {}))
+        clean_authors = [str(author).strip() for author in (authors or []) if str(author).strip()]
+        clean_tags = [str(tag).strip() for tag in (custom_tags or []) if str(tag).strip()]
+        imported_paper: Paper = {
+            "id": normalized_id,
+            "source": str(source or "external_pdf").strip() or "external_pdf",
+            "externalId": str(external_id or "").strip(),
+            "title": title.strip() or str(parsed.get("title") or resolved_pdf.stem),
+            "authors": clean_authors or list(parsed.get("authors") or []),
+            "abstract": abstract.strip() or str(parsed.get("abstract") or ""),
+            "year": year.strip() or str(parsed.get("year") or ""),
+            "doi": doi.strip() or str(parsed.get("doi") or ""),
+            "venue": venue.strip() or str(parsed.get("venue") or ""),
+            "url": url.strip(),
+            "pdfPath": str(resolved_pdf),
+            "keyword": clean_tags[0] if clean_tags else str(source or "外部文献"),
+            "customTags": clean_tags,
+            "linkedExternalFile": True,
+            "externalSourceMetadata": dict(source_metadata or {}),
+            "pdfParsedBy": str(extracted.get("parser") or ""),
+            "pdfParseWarning": str(extracted.get("warning") or ""),
+            "pdfTextPreview": str(extracted.get("text") or "")[:3000],
+            "relevanceScore": 0,
+            "savedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        saved_paper = self._save_paper_to_db(imported_paper)
+        try:
+            if str(extracted.get("parser") or "") == "mineru" and extracted.get("markdownPath"):
+                saved_paper = self.index_saved_structured_markdown(
+                    normalized_id,
+                    markdown_path=str(extracted.get("markdownPath") or ""),
+                    output_dir=str(extracted.get("outputDir") or ""),
+                    parser="mineru",
+                    conversion_result=dict(extracted.get("mineruResult") or {}),
+                    warning=str(extracted.get("indexWarning") or ""),
+                )
+            else:
+                saved_paper = self.index_saved_pdf_text(
+                    normalized_id,
+                    extracted_text=str(extracted.get("text") or ""),
+                    parser=str(extracted.get("parser") or "pymupdf"),
+                    warning=str(extracted.get("warning") or ""),
+                    cancel_event=cancel_event,
+                )
+        except Exception as error:
+            warning = f"外部 PDF 元数据已保存，但全文索引失败：{error}"
+            self._log(warning)
+            saved_paper = self.update_saved_paper(normalized_id, {"fullTextIndexWarning": warning})
+        return saved_paper
+
     def index_saved_structured_markdown(
         self,
         record_id: str,
@@ -1185,13 +1270,19 @@ class HunterAgent:
         )
         return indexed
 
-    def _extract_pdf_text(self, pdf_path: Path, *, cancel_event=None) -> dict[str, object]:
+    def _extract_pdf_text(
+        self,
+        pdf_path: Path,
+        *,
+        cancel_event=None,
+        output_name: str | None = None,
+    ) -> dict[str, object]:
         """优先用 MinerU 生成结构化 Markdown；失败后降级为 PyMuPDF 纯文本。"""
         raise_if_task_cancelled(cancel_event)
         try:
             mineru_result = mineru_processing(
                 pdf_path=str(pdf_path),
-                output_name=pdf_path.stem,
+                output_name=output_name or pdf_path.stem,
             )
             raise_if_task_cancelled(cancel_event)
             markdown_path = Path(str(mineru_result.get("markdownPath") or ""))
@@ -1211,7 +1302,7 @@ class HunterAgent:
                 "text": markdown_text,
                 "metadata": {},
                 "parser": "mineru",
-                "warning": "",
+                "warning": str(mineru_result.get("publishWarning") or ""),
                 "indexWarning": index_warning,
                 "markdownPath": str(markdown_path),
                 "outputDir": str(mineru_result.get("outputDir") or markdown_path.parent),
@@ -1219,6 +1310,9 @@ class HunterAgent:
             }
         except TaskCancelled:
             raise
+        except MinerUOutputPublishError as error:
+            warning = f"MinerU 已完成解析，但结果发布失败，已降级使用 PyMuPDF：{error}"
+            self._log(warning)
         except Exception as error:
             warning = f"MinerU 解析失败，已降级使用 PyMuPDF：{error}"
             self._log(warning)

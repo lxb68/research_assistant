@@ -60,6 +60,7 @@ class DomainTreeStore:
             "action": domain_payload.get("action", "") if isinstance(domain_payload, dict) else "",
             "language": domain_payload.get("language", "") if isinstance(domain_payload, dict) else "",
             "requestedLanguage": domain_payload.get("requestedLanguage", "") if isinstance(domain_payload, dict) else "",
+            "headingCounts": domain_payload.get("headingCounts", {}) if isinstance(domain_payload, dict) else {},
             "graphStatus": graph_status,
             "documentCount": domain_payload.get("documentCount", 0) if isinstance(domain_payload, dict) else 0,
             "generationMode": domain_payload.get("generationMode", "unknown") if isinstance(domain_payload, dict) else "unknown",

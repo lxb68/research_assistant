@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from io import BytesIO
+import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -17,7 +19,13 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.services.mineru import _run_mineru_cloud_api, _select_primary_markdown, mineru_processing
+from app.services.mineru import (
+    _output_directory_lock,
+    _replace_path_with_retry,
+    _run_mineru_cloud_api,
+    _select_primary_markdown,
+    mineru_processing,
+)
 
 
 def response(payload: dict | None = None, *, status_code: int = 200, content: bytes = b"") -> Mock:
@@ -204,6 +212,97 @@ class MinerUCloudTest(unittest.TestCase):
                     mineru_processing(pdf_path=str(pdf_path), output_name="paper")
 
             self.assertEqual(previous.read_text(encoding="utf-8"), "# previous")
+
+    @patch("app.services.mineru.time.sleep")
+    def test_directory_replace_retries_transient_windows_file_lock(self, sleep: Mock) -> None:
+        """Windows 临时占用不应立即触发 PyMuPDF 降级。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "processing"
+            target = root / "published"
+            source.mkdir()
+            attempts = 0
+            real_replace = os.replace
+
+            def flaky_replace(current: Path, destination: Path) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    raise PermissionError(13, "文件暂时被占用", str(current))
+                real_replace(current, destination)
+
+            with patch("app.services.mineru.os.replace", side_effect=flaky_replace):
+                _replace_path_with_retry(source, target)
+
+            self.assertTrue(target.is_dir())
+            self.assertEqual(attempts, 3)
+            self.assertEqual(sleep.call_count, 2)
+
+    @patch("app.services.mineru.time.sleep")
+    @patch("app.services.mineru._run_mineru_cloud_api")
+    def test_publish_failure_reuses_only_matching_pdf_output(self, cloud: Mock, _sleep: Mock) -> None:
+        """发布持续受阻时，可安全复用字节一致 PDF 的历史 MinerU 结果。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pdf_path = root / "paper.pdf"
+            pdf_path.write_bytes(b"%PDF-same-content")
+            output_dir = root / "output" / "paper"
+            output_dir.mkdir(parents=True)
+            (output_dir / "full.md").write_text("# previous", encoding="utf-8")
+            (output_dir / pdf_path.name).write_bytes(pdf_path.read_bytes())
+
+            def write_result(_pdf_path: Path, processing_dir: Path, _token: str) -> None:
+                (processing_dir / "full.md").write_text("# current", encoding="utf-8")
+
+            cloud.side_effect = write_result
+            real_replace = os.replace
+
+            def block_new_publish(source: Path, target: Path) -> None:
+                if source.name.startswith(".paper.processing-") and target == output_dir:
+                    raise PermissionError(13, "目录被占用", str(source))
+                real_replace(source, target)
+
+            with (
+                patch("app.services.mineru.settings.mineru_output_dir", str(root / "output")),
+                patch("app.services.mineru.settings.mineru_api_token", "secret-token"),
+                patch("app.services.mineru.settings.mineru_enable_local_cli_fallback", False),
+                patch("app.services.mineru.os.replace", side_effect=block_new_publish),
+            ):
+                result = mineru_processing(pdf_path=str(pdf_path), output_name="paper")
+
+            self.assertTrue(result["reusedExisting"])
+            self.assertIn("Windows 文件占用", result["publishWarning"])
+            self.assertEqual(Path(result["markdownPath"]).read_text(encoding="utf-8"), "# previous")
+
+    def test_output_directory_lock_serializes_same_paper(self) -> None:
+        """同一文献目录的发布区必须互斥。"""
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory) / "paper"
+            barrier = threading.Barrier(3)
+            state_guard = threading.Lock()
+            active = 0
+            maximum_active = 0
+
+            def worker() -> None:
+                nonlocal active, maximum_active
+                barrier.wait()
+                with _output_directory_lock(output_dir):
+                    with state_guard:
+                        active += 1
+                        maximum_active = max(maximum_active, active)
+                    time.sleep(0.02)
+                    with state_guard:
+                        active -= 1
+
+            threads = [threading.Thread(target=worker) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join(timeout=2)
+
+            self.assertEqual(maximum_active, 1)
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
 
     def test_primary_markdown_prefers_full_then_largest_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -40,6 +40,7 @@ const TYPE_LABELS: Record<string, string> = {
   research_chat: "研究对话",
   pdf_import: "PDF 导入",
   domain_tree: "领域树与知识图谱",
+  zotero_sync: "Zotero 文献同步",
 };
 
 type SubmitOptions = {

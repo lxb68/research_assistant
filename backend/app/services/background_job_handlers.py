@@ -13,6 +13,7 @@ from app.services.background_jobs import BackgroundJobContext, BackgroundJobMana
 from app.services.conversations import conversation_store
 from app.services.model_config import ModelConfigStore
 from app.services.project_scope import ProjectScopeService
+from app.services.zotero_sync import ZoteroSyncService
 
 
 def _research_arguments(payload: ResearchChatRequest) -> dict[str, Any]:
@@ -122,6 +123,8 @@ def _domain_tree(context: BackgroundJobContext, raw: dict[str, Any]) -> dict[str
         new_toc=payload.new_toc,
         model=payload.model or model_payload,
         language=payload.language,
+        primary_heading_count=payload.primary_heading_count,
+        secondary_heading_count=payload.secondary_heading_count,
         delete_toc=payload.delete_toc,
         cancel_event=context.cancel_event,
         progress_callback=report,
@@ -167,12 +170,28 @@ def _pdf_import(context: BackgroundJobContext, raw: dict[str, Any]) -> dict[str,
         staging_path.unlink(missing_ok=True)
 
 
+def _zotero_sync(context: BackgroundJobContext, raw: dict[str, Any]) -> dict[str, Any]:
+    source_id = str(raw.get("sourceId") or raw.get("source_id") or "").strip()
+    if not source_id:
+        raise ValueError("sourceId is required")
+    context.progress(2, stage="connecting", message="正在连接 Zotero Local API")
+
+    def report(progress: int, stage: str, message: str) -> None:
+        context.progress(progress, stage=stage, message=message)
+
+    return ZoteroSyncService(
+        log_callback=context.log,
+        progress_callback=report,
+    ).sync(source_id, cancel_event=context.cancel_event)
+
+
 def register_background_job_handlers(manager: BackgroundJobManager) -> None:
     """在应用组合根注册业务处理器，避免调度器反向依赖 API 路由。"""
     manager.register("dataset_download", _dataset_download)
     manager.register("research_chat", _research_chat)
     manager.register("domain_tree", _domain_tree)
     manager.register("pdf_import", _pdf_import)
+    manager.register("zotero_sync", _zotero_sync)
 
 
 __all__ = ["register_background_job_handlers"]

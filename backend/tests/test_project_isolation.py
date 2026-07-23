@@ -27,7 +27,7 @@ class ProjectIsolationTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def _save_paper(self, record_id: str, title: str) -> None:
+    def _save_paper(self, record_id: str, title: str, *, source: str = "test") -> None:
         markdown_dir = self.root / "markdown" / record_id
         markdown_dir.mkdir(parents=True)
         markdown_path = markdown_dir / "full.md"
@@ -35,7 +35,7 @@ class ProjectIsolationTest(unittest.TestCase):
         self.papers.save(
             {
                 "id": record_id,
-                "source": "test",
+                "source": source,
                 "title": title,
                 "markdownPath": str(markdown_path),
                 "markdownOutputDir": str(markdown_dir),
@@ -47,6 +47,13 @@ class ProjectIsolationTest(unittest.TestCase):
             set(self.projects.list_paper_ids(DEFAULT_PROJECT_ID)),
             {"paper-a", "paper-b"},
         )
+
+    def test_zotero_paper_only_belongs_to_explicit_project(self) -> None:
+        self._save_paper("zotero-paper", "Zotero 论文", source="zotero")
+        zotero_project = self.projects.create(name="Zotero 分类", paper_ids=["zotero-paper"])
+
+        self.assertNotIn("zotero-paper", self.projects.list_paper_ids(DEFAULT_PROJECT_ID))
+        self.assertEqual(self.projects.list_paper_ids(zotero_project["id"]), ["zotero-paper"])
 
     def test_projects_keep_independent_paper_memberships_and_analysis_paths(self) -> None:
         project_a = self.projects.create(name="项目 A", paper_ids=["paper-a"])

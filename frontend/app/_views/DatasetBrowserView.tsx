@@ -3,7 +3,7 @@
 "use client";
 
 import Link from "next/link";
-import { ChangeEvent, FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { buildApiUrl } from "@/lib/api";
 import {
   DEFAULT_MAXIMUM_SPLIT_LENGTH,
@@ -72,10 +72,14 @@ function getSplitLengthsFromSettings() {
 }
 
 /** 管理本地论文浏览、导入、删除和重新分块。 */
-export default function DatasetBrowserView({ refreshToken = 0 }: { refreshToken?: number } = {}) {
-  const { registerJob } = useBackgroundTasks();
+export default function DatasetBrowserView({
+  refreshToken = 0,
+  isActive = true,
+}: { refreshToken?: number; isActive?: boolean } = {}) {
+  const { jobs, registerJob } = useBackgroundTasks();
   const [papers, setPapers] = useState<SavedPaper[]>([]);
   const [query, setQuery] = useState("");
+  const queryRef = useRef("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [importOpen, setImportOpen] = useState(false);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
@@ -89,11 +93,9 @@ export default function DatasetBrowserView({ refreshToken = 0 }: { refreshToken?
   const [error, setError] = useState("");
 
   /** 按关键词加载本地论文列表。 */
-  async function loadPapers(keyword = "", options: { initial?: boolean } = {}) {
-    if (!options.initial) {
-      setIsLoading(true);
-      setError("");
-    }
+  const loadPapers = useCallback(async (keyword = "") => {
+    setIsLoading(true);
+    setError("");
 
     try {
       const url = buildApiUrl("/api/papers");
@@ -102,7 +104,7 @@ export default function DatasetBrowserView({ refreshToken = 0 }: { refreshToken?
         url.searchParams.set("keyword", keyword.trim());
       }
 
-      const response = await fetch(url);
+      const response = await fetch(url, { cache: "no-store" });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(payload.detail || "加载本地数据集失败");
@@ -119,20 +121,20 @@ export default function DatasetBrowserView({ refreshToken = 0 }: { refreshToken?
     } finally {
       setIsLoading(false);
     }
-  }
+  }, []);
+
+  const latestCompletedZoteroJobId =
+    jobs.find((job) => job.type === "zotero_sync" && job.status === "completed")?.jobId ?? "";
 
   useEffect(() => {
-    /** 首次挂载后异步加载论文，避免在同步 effect 中直接更新状态。 */
-    const run = async () => {
-      await loadPapers("", { initial: true });
-    };
-
-    void run();
-  }, [refreshToken]);
+    if (!isActive) return;
+    void loadPapers(queryRef.current);
+  }, [isActive, latestCompletedZoteroJobId, loadPapers, refreshToken]);
 
   /** 提交论文列表搜索条件。 */
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    queryRef.current = query;
     void loadPapers(query);
   }
 

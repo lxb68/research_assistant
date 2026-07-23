@@ -32,6 +32,7 @@ from app.services.task_control import (
 logger = logging.getLogger(__name__)
 
 _MODEL_OUTPUT_PREVIEW_CHARS = 2000
+_MAX_HEADING_COUNT = 50
 
 
 class DomainTreeModelGenerationError(RuntimeError):
@@ -259,6 +260,8 @@ class DomainTreeAgent:
         new_toc: str | None = None,
         model: Any | None = None,
         language: str = "auto",
+        primary_heading_count: int | None = None,
+        secondary_heading_count: int | None = None,
         delete_toc: str | None = None,
         project: dict[str, Any] | None = None,
         cancel_event: threading.Event | None = None,
@@ -273,6 +276,8 @@ class DomainTreeAgent:
             new_toc=new_toc,
             model=model,
             language=language,
+            primary_heading_count=primary_heading_count,
+            secondary_heading_count=secondary_heading_count,
             delete_toc=delete_toc,
             project=project,
             cancel_event=cancel_event,
@@ -288,6 +293,8 @@ class DomainTreeAgent:
         new_toc: str | None = None,
         model: Any | None = None,
         language: str = "auto",
+        primary_heading_count: int | None = None,
+        secondary_heading_count: int | None = None,
         delete_toc: str | None = None,
         project: dict[str, Any] | None = None,
         cancel_event: threading.Event | None = None,
@@ -378,6 +385,12 @@ class DomainTreeAgent:
             )
         else:
             prompt = self.get_label_prompt(language, {"text": catalog_text[:100000]})
+        prompt = self._append_heading_count_constraint(
+            prompt,
+            primary_heading_count,
+            secondary_heading_count,
+            language,
+        )
 
         # 生成领域树标签
         raise_if_cancelled(cancel_event)
@@ -393,6 +406,12 @@ class DomainTreeAgent:
             progress_callback=progress_callback,
         )
         tags = self._refine_tree_specificity(tags, documents)
+        tags = self._apply_heading_counts(
+            tags,
+            documents,
+            primary_heading_count=primary_heading_count,
+            secondary_heading_count=secondary_heading_count,
+        )
         logger.info(
             "[%s] 领域树标签生成完成：top_level_count=%s elapsed_ms=%.1f output=%s",
             normalized_project_id,
@@ -414,6 +433,8 @@ class DomainTreeAgent:
             action=action,
             language=language,
             requested_language=requested_language,
+            primary_heading_count=primary_heading_count,
+            secondary_heading_count=secondary_heading_count,
         )
         report(
             stage="knowledge_graph",
@@ -467,6 +488,8 @@ class DomainTreeAgent:
             action=action,
             language=language,
             requested_language=requested_language,
+            primary_heading_count=primary_heading_count,
+            secondary_heading_count=secondary_heading_count,
             generated_at=generated_at,
         )
         logger.info(
@@ -512,6 +535,114 @@ class DomainTreeAgent:
         template = self._read_prompt_file("labelRevise", language)
         return self._render_prompt(template, data)
 
+    def _append_heading_count_constraint(
+        self,
+        prompt: str,
+        primary_count: int | None,
+        secondary_count: int | None,
+        language: str,
+    ) -> str:
+        """把前端设置的标题数量作为显式模型约束。"""
+        if primary_count is None and secondary_count is None:
+            return prompt
+        if self._is_chinese_language(language):
+            parts = ["请严格遵守用户设置的领域树数量："]
+            if primary_count is not None:
+                parts.append(f"一级标题必须为 {primary_count} 个")
+            if secondary_count is not None:
+                parts.append(f"每个一级标题下必须为 {secondary_count} 个二级标题")
+        else:
+            parts = ["Strictly follow the user-specified tree size:"]
+            if primary_count is not None:
+                parts.append(f"exactly {primary_count} primary headings")
+            if secondary_count is not None:
+                parts.append(f"exactly {secondary_count} secondary headings under every primary heading")
+        return f"{prompt}\n\n{'；'.join(parts)}。"
+
+    @staticmethod
+    def _strip_heading_number(label: str) -> str:
+        """移除模型生成的层级序号，便于重新编号和去重。"""
+        return re.sub(r"^\s*\d+(?:\.\d+)*[.、]?\s*", "", str(label or "")).strip()
+
+    def _apply_heading_counts(
+        self,
+        tags: list[dict[str, Any]],
+        documents: list[SourceDocument],
+        *,
+        primary_heading_count: int | None,
+        secondary_heading_count: int | None,
+    ) -> list[dict[str, Any]]:
+        """裁剪或补充模型结果，使一二级标题数量尽量精确匹配前端设置。"""
+        if primary_heading_count is None and secondary_heading_count is None:
+            return tags
+        primary_target = (
+            max(1, min(_MAX_HEADING_COUNT, int(primary_heading_count)))
+            if primary_heading_count is not None else None
+        )
+        secondary_target = (
+            max(0, min(_MAX_HEADING_COUNT, int(secondary_heading_count)))
+            if secondary_heading_count is not None else None
+        )
+        nodes = [node for node in tags if isinstance(node, dict) and str(node.get("label") or "").strip()]
+        if primary_target is not None:
+            nodes = nodes[:primary_target]
+            existing_primary = {
+                self._strip_heading_number(str(node.get("label") or "")).casefold()
+                for node in nodes
+            }
+            topic_scores, _topic_documents = self._collect_topic_candidates(documents)
+            candidates = [name for name, _score in topic_scores.most_common()]
+            candidates.extend(self._collect_specific_candidates_from_documents(documents))
+            for candidate in candidates:
+                clean = self._short_label(self._strip_heading_number(candidate))
+                key = clean.casefold()
+                if not clean or key in existing_primary:
+                    continue
+                nodes.append({"label": clean})
+                existing_primary.add(key)
+                if len(nodes) >= primary_target:
+                    break
+
+        global_candidates = self._collect_specific_candidates_from_documents(documents)
+        normalized: list[dict[str, Any]] = []
+        for primary_index, raw_node in enumerate(nodes, start=1):
+            primary_label = self._short_label(self._strip_heading_number(str(raw_node.get("label") or "")))
+            if not primary_label:
+                continue
+            raw_children = raw_node.get("child") if isinstance(raw_node.get("child"), list) else []
+            child_labels: list[str] = []
+            seen_children: set[str] = {primary_label.casefold()}
+            for child in raw_children:
+                if not isinstance(child, dict):
+                    continue
+                clean = self._short_label(self._strip_heading_number(str(child.get("label") or "")))
+                key = clean.casefold()
+                if clean and key not in seen_children:
+                    child_labels.append(clean)
+                    seen_children.add(key)
+            if secondary_target is not None:
+                child_labels = child_labels[:secondary_target]
+                related_ids = self._related_document_ids_for_topic(primary_label, documents)
+                scoped_documents = [document for document in documents if document.record_id in related_ids] or documents
+                candidates = self._collect_specific_candidates_from_documents(scoped_documents) + global_candidates
+                for candidate in candidates:
+                    clean = self._short_label(self._strip_heading_number(candidate))
+                    key = clean.casefold()
+                    if not clean or key in seen_children:
+                        continue
+                    child_labels.append(clean)
+                    seen_children.add(key)
+                    if len(child_labels) >= secondary_target:
+                        break
+            node: dict[str, Any] = {"label": f"{primary_index} {primary_label}"}
+            if child_labels:
+                node["child"] = [
+                    {"label": f"{primary_index}.{child_index} {label}"}
+                    for child_index, label in enumerate(child_labels, start=1)
+                ]
+            normalized.append(node)
+        return normalized
+
     def filter_domain_tree(self, tags: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """清理领域树中的空节点、泛化节点和重复节点。"""
         filtered: list[dict[str, Any]] = []
@@ -546,6 +677,8 @@ class DomainTreeAgent:
         action: str,
         language: str,
         requested_language: str | None = None,
+        primary_heading_count: int | None = None,
+        secondary_heading_count: int | None = None,
     ) -> str:
         """先保存可展示的领域树快照，并将知识图谱标记为后台构建中。"""
         output_dir = self._analysis_dir(project_id)
@@ -557,6 +690,10 @@ class DomainTreeAgent:
             "action": action,
             "language": language,
             "requestedLanguage": requested_language or language,
+            "headingCounts": {
+                "primary": primary_heading_count,
+                "secondary": secondary_heading_count,
+            },
             "graphStatus": "building",
             "documentCount": len(documents),
             "domainTree": tags,
@@ -568,6 +705,10 @@ class DomainTreeAgent:
             "action": action,
             "language": language,
             "requestedLanguage": requested_language or language,
+            "headingCounts": {
+                "primary": primary_heading_count,
+                "secondary": secondary_heading_count,
+            },
             "graphStatus": "building",
             **self._generation_metadata,
             "documents": [
@@ -614,6 +755,8 @@ class DomainTreeAgent:
         action: str,
         language: str,
         requested_language: str | None = None,
+        primary_heading_count: int | None = None,
+        secondary_heading_count: int | None = None,
         generated_at: str | None = None,
     ) -> None:
         """批量保存领域树标签及相关分析产物。"""
@@ -627,6 +770,10 @@ class DomainTreeAgent:
             "action": action,
             "language": language,
             "requestedLanguage": requested_language or language,
+            "headingCounts": {
+                "primary": primary_heading_count,
+                "secondary": secondary_heading_count,
+            },
             "graphStatus": "ready",
             "documentCount": len(documents),
             "domainTree": tags,
@@ -645,6 +792,10 @@ class DomainTreeAgent:
             "action": action,
             "language": language,
             "requestedLanguage": requested_language or language,
+            "headingCounts": {
+                "primary": primary_heading_count,
+                "secondary": secondary_heading_count,
+            },
             "graphStatus": "ready",
             **self._generation_metadata,
             "documents": [

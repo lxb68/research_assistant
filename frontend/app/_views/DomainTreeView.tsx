@@ -5,10 +5,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { buildApiUrl } from "@/lib/api";
 import { SplitChunk, SavedPaper } from "@/lib/papers";
-import { WORKSPACE_DOMAIN_TREE_PROJECT_ID } from "@/lib/constants";
+import {
+  DOMAIN_TREE_HEADING_COUNT_MAX,
+  WORKSPACE_DOMAIN_TREE_PROJECT_ID,
+} from "@/lib/constants";
 import { useProjects } from "@/app/_components/ProjectProvider";
 import { DomainTreePanel } from "@/app/_views/project-knowledge/DomainTreePanel";
 import { KnowledgeGraphPanel } from "@/app/_views/project-knowledge/KnowledgeGraphPanel";
+import { HeadingCountControl } from "@/app/_views/project-knowledge/HeadingCountControl";
 import { ProjectLiteraturePanel } from "@/app/_views/project-knowledge/ProjectLiteraturePanel";
 import {
   KnowledgeCurationDialog,
@@ -126,6 +130,10 @@ type DomainTreeResult = {
   action?: string;
   language?: string;
   requestedLanguage?: string;
+  headingCounts?: {
+    primary?: number | null;
+    secondary?: number | null;
+  };
   graphStatus?: "building" | "ready" | "failed" | "cancelled" | string;
   documentCount?: number;
   generationMode?: "llm" | "heuristic" | "unknown";
@@ -477,6 +485,8 @@ function DomainTreeProjectPage({
   const [isLoadingModelStatus, setIsLoadingModelStatus] = useState(true);
   const [manualGenerationMode, setManualGenerationMode] = useState<DomainTreeAction | null>(null);
   const [generationLanguage, setGenerationLanguage] = useState<DomainTreeLanguage>("auto");
+  const [primaryHeadingCountInput, setPrimaryHeadingCountInput] = useState<string | null>(null);
+  const [secondaryHeadingCountInput, setSecondaryHeadingCountInput] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<DomainTreeViewMode>("project");
   const [selectedSecondaryKey, setSelectedSecondaryKey] = useState("");
   const [selectedSecondaryLabel, setSelectedSecondaryLabel] = useState("");
@@ -498,6 +508,21 @@ function DomainTreeProjectPage({
   );
 
   const existingDocuments = useMemo(() => result?.manifest?.documents ?? [], [result]);
+  const primaryHeadingCountText = primaryHeadingCountInput
+    ?? String(result?.headingCounts?.primary ?? 5);
+  const secondaryHeadingCountText = secondaryHeadingCountInput
+    ?? String(result?.headingCounts?.secondary ?? 5);
+  const primaryHeadingCount = Number(primaryHeadingCountText);
+  const secondaryHeadingCount = Number(secondaryHeadingCountText);
+  const headingCountError = !Number.isInteger(primaryHeadingCount)
+    || primaryHeadingCount < 1
+    || primaryHeadingCount > DOMAIN_TREE_HEADING_COUNT_MAX
+    ? `一级标题数量必须是 1–${DOMAIN_TREE_HEADING_COUNT_MAX} 的整数`
+    : !Number.isInteger(secondaryHeadingCount)
+      || secondaryHeadingCount < 0
+      || secondaryHeadingCount > DOMAIN_TREE_HEADING_COUNT_MAX
+      ? `二级标题数量必须是 0–${DOMAIN_TREE_HEADING_COUNT_MAX} 的整数`
+      : "";
 
   const currentDocumentMap = useMemo(() => {
     // flatMap 显式保留二元组类型，同时过滤没有记录 ID 的论文。
@@ -1149,6 +1174,12 @@ function DomainTreeProjectPage({
       return;
     }
 
+    if (headingCountError) {
+      setError(headingCountError);
+      setStatus("");
+      return;
+    }
+
     setIsGenerating(true);
     setError("");
     setStatus(
@@ -1170,6 +1201,8 @@ function DomainTreeProjectPage({
         body: JSON.stringify({
           action: generationMode,
           language: generationLanguage,
+          primary_heading_count: primaryHeadingCount,
+          secondary_heading_count: secondaryHeadingCount,
         }),
         },
       );
@@ -1791,6 +1824,24 @@ function DomainTreeProjectPage({
                 {result?.language ? ` 最近一次实际使用：${result.language}。` : ""}
               </small>
             </label>
+            <HeadingCountControl
+              primaryValue={primaryHeadingCountText}
+              secondaryValue={secondaryHeadingCountText}
+              primaryCount={primaryHeadingCount}
+              secondaryCount={secondaryHeadingCount}
+              error={headingCountError}
+              disabled={isGenerating}
+              onPrimaryChange={(value) => {
+                setPrimaryHeadingCountInput(value);
+                setManualGenerationMode("rebuild");
+                setError("");
+              }}
+              onSecondaryChange={(value) => {
+                setSecondaryHeadingCountInput(value);
+                setManualGenerationMode("rebuild");
+                setError("");
+              }}
+            />
           </div>
 
           <div className="domain-tree-action-buttons">

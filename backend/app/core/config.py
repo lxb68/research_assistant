@@ -183,6 +183,11 @@ class Settings:
     mineru_poll_interval_seconds = float(os.getenv("MINERU_POLL_INTERVAL_SECONDS", "3"))
     mineru_cloud_timeout_seconds = int(os.getenv("MINERU_CLOUD_TIMEOUT_SECONDS", "1800"))
     mineru_request_timeout_seconds = int(os.getenv("MINERU_REQUEST_TIMEOUT_SECONDS", "120"))
+    mineru_batch_size = min(200, max(1, int(os.getenv("MINERU_BATCH_SIZE", "50"))))
+    mineru_upload_concurrency = max(1, int(os.getenv("MINERU_UPLOAD_CONCURRENCY", "6")))
+    mineru_download_concurrency = max(1, int(os.getenv("MINERU_DOWNLOAD_CONCURRENCY", "4")))
+    mineru_index_concurrency = max(1, int(os.getenv("MINERU_INDEX_CONCURRENCY", "2")))
+    mineru_max_retries = max(0, int(os.getenv("MINERU_MAX_RETRIES", "4")))
     mineru_enable_local_cli_fallback = os.getenv(
         "MINERU_ENABLE_LOCAL_CLI_FALLBACK",
         "false",

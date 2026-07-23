@@ -3,6 +3,7 @@
 import type { ResearchProject } from "@/app/_components/ProjectProvider";
 import { WORKSPACE_DOMAIN_TREE_PROJECT_ID } from "@/lib/constants";
 import type { SavedPaper } from "@/lib/papers";
+import { ZoteroSourcePanel } from "@/app/_views/project-knowledge/ZoteroSourcePanel";
 
 type ProjectLiteraturePanelProps = {
   projects: ResearchProject[];
@@ -127,6 +128,8 @@ export function ProjectLiteraturePanel({
       {activeProjectId === WORKSPACE_DOMAIN_TREE_PROJECT_ID ? (
         <div className="domain-tree-status">默认项目自动包含全局论文，用于兼容升级前的工作区。</div>
       ) : null}
+
+      <ZoteroSourcePanel projectId={activeProjectId} disabled={isGenerating} />
 
       {isEditingMembers ? (
         <section className="domain-tree-member-editor">

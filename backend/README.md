@@ -87,6 +87,13 @@ NCBI_API_KEY=
 IEEE_API_KEY=
 SEMANTIC_SCHOLAR_API_KEY=
 MINERU_API_TOKEN=
+# Zotero 同步时每次向 MinerU 申请的文件数，MinerU v4 上限为 200。
+MINERU_BATCH_SIZE=50
+# 上传、结果下载和本地 Markdown 索引分别限流，避免占满全局后台任务线程池。
+MINERU_UPLOAD_CONCURRENCY=6
+MINERU_DOWNLOAD_CONCURRENCY=4
+MINERU_INDEX_CONCURRENCY=2
+MINERU_MAX_RETRIES=4
 # 默认直接调用 MinerU 云 API；仅在明确需要本地引擎回退时设为 true。
 MINERU_ENABLE_LOCAL_CLI_FALLBACK=false
 REQUEST_TIMEOUT=15
@@ -145,6 +152,8 @@ GET  /api/conversations/{conversation_id}
 - `ieee` 需要先申请并配置 `IEEE_API_KEY`。
 - PDF 精细解析默认使用 `MINERU_API_TOKEN` 调用 MinerU 云 API。本地 `mineru`/`magic-pdf`
   CLI 不会自动运行；只有设置 `MINERU_ENABLE_LOCAL_CLI_FALLBACK=true` 才会在云端失败后回退。
+- Zotero 批量同步在配置 Token 后使用 MinerU v4 批量上传接口；任务状态保存在
+  `document_parse_tasks` 表中，重复同步会复用相同文件和解析配置的结果，服务重启后会继续轮询已有批次。
 
 历史版本中若出现 MinerU 已成功索引、但论文卡片仍保留 PyMuPDF 降级状态，可先只读检查：
 

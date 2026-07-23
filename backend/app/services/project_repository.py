@@ -191,6 +191,28 @@ class ProjectRepository:
             connection.commit()
         return self.require(project_id)
 
+    def add_papers(self, project_id: str, paper_ids: list[str]) -> dict[str, Any]:
+        """增量加入论文，避免同步任务用全量替换覆盖用户正在编辑的成员关系。"""
+        self.require(project_id)
+        normalized = list(dict.fromkeys(str(value).strip() for value in paper_ids if str(value).strip()))
+        if not normalized:
+            return self.require(project_id)
+        now = _timestamp()
+        with closing(self.connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            available = self._existing_paper_ids(connection, normalized)
+            missing = [paper_id for paper_id in normalized if paper_id not in available]
+            if missing:
+                connection.rollback()
+                raise ProjectPaperNotFoundError(f"以下论文不存在：{', '.join(missing[:10])}")
+            connection.executemany(
+                "INSERT OR IGNORE INTO project_papers (project_id, paper_id, added_at) VALUES (?, ?, ?)",
+                [(project_id, paper_id, now) for paper_id in normalized],
+            )
+            connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
+            connection.commit()
+        return self.require(project_id)
+
     def remove_paper_references(self, paper_ids: list[str]) -> int:
         """移除已删除论文的全部项目成员关系，并刷新受影响项目的更新时间。"""
         normalized = list(dict.fromkeys(str(value).strip() for value in paper_ids if str(value).strip()))
@@ -221,7 +243,7 @@ class ProjectRepository:
         return removed_count
 
     def _sync_default_project_members(self) -> None:
-        """默认项目持续承接全局论文，保证升级前后的行为一致。"""
+        """默认项目承接普通全局论文，但排除已由独立项目管理的 Zotero 文献。"""
         now = _timestamp()
         with closing(self.connect()) as connection:
             has_papers = connection.execute(
@@ -231,8 +253,17 @@ class ProjectRepository:
                 return
             connection.execute(
                 """
+                DELETE FROM project_papers
+                WHERE project_id = ? AND paper_id IN (
+                    SELECT id FROM papers WHERE LOWER(source) = 'zotero'
+                )
+                """,
+                (DEFAULT_PROJECT_ID,),
+            )
+            connection.execute(
+                """
                 INSERT OR IGNORE INTO project_papers (project_id, paper_id, added_at)
-                SELECT ?, id, ? FROM papers
+                SELECT ?, id, ? FROM papers WHERE LOWER(source) != 'zotero'
                 """,
                 (DEFAULT_PROJECT_ID, now),
             )

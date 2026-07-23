@@ -5,6 +5,9 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 
+DOMAIN_TREE_HEADING_COUNT_MAX = 50
+
+
 class DatasetDownloadRequest(BaseModel):
     keyword: str = Field(..., min_length=1)
     sources: list[str] = Field(default_factory=lambda: ["arxiv", "crossref"])
@@ -56,6 +59,8 @@ class ImportPaperRequest(BaseModel):
 class DomainTreeGenerateOptions(BaseModel):
     action: Literal["rebuild", "revise", "keep"] = "rebuild"
     language: Literal["auto", "中文", "English"] = "auto"
+    primary_heading_count: int | None = Field(None, ge=1, le=DOMAIN_TREE_HEADING_COUNT_MAX)
+    secondary_heading_count: int | None = Field(None, ge=0, le=DOMAIN_TREE_HEADING_COUNT_MAX)
     all_toc: str | None = None
     new_toc: str | None = None
     delete_toc: str | None = None
