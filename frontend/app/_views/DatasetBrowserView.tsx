@@ -123,13 +123,16 @@ export default function DatasetBrowserView({
     }
   }, []);
 
-  const latestCompletedZoteroJobId =
-    jobs.find((job) => job.type === "zotero_sync" && job.status === "completed")?.jobId ?? "";
+  const latestTerminalZoteroJobId =
+    jobs.find((job) =>
+      job.type === "zotero_sync"
+      && ["completed", "cancelled", "failed", "interrupted"].includes(job.status)
+    )?.jobId ?? "";
 
   useEffect(() => {
     if (!isActive) return;
     void loadPapers(queryRef.current);
-  }, [isActive, latestCompletedZoteroJobId, loadPapers, refreshToken]);
+  }, [isActive, latestTerminalZoteroJobId, loadPapers, refreshToken]);
 
   /** 提交论文列表搜索条件。 */
   function handleSubmit(event: FormEvent<HTMLFormElement>) {

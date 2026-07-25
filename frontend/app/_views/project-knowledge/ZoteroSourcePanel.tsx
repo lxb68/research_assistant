@@ -105,7 +105,15 @@ function StatusIcon({ status }: { status: string }) {
   return <CheckCircleRounded />;
 }
 
-export function ZoteroSourcePanel({ projectId, disabled = false }: { projectId: string; disabled?: boolean }) {
+export function ZoteroSourcePanel({
+  projectId,
+  disabled = false,
+  onCollectionsChanged,
+}: {
+  projectId: string;
+  disabled?: boolean;
+  onCollectionsChanged?: () => void;
+}) {
   const { submitJob, openCenter } = useBackgroundTasks();
   const { refreshProjects, selectProject } = useProjects();
   const activeProjectIdRef = useRef(projectId);
@@ -231,6 +239,7 @@ export function ZoteroSourcePanel({ projectId, disabled = false }: { projectId: 
         await loadSources(source.projectId);
       }
       if (job.status === "completed") {
+        onCollectionsChanged?.();
         const indexed = Number(job.result?.indexed ?? 0);
         const unchanged = Number(job.result?.unchanged ?? 0);
         const unavailable = Number(job.result?.unavailable ?? 0);
@@ -267,22 +276,21 @@ export function ZoteroSourcePanel({ projectId, disabled = false }: { projectId: 
           collection_keys: scopeMode === "library" ? [] : selectedKeys,
           include_subcollections: includeSubcollections,
           include_standalone_attachments: false,
-          create_collection_projects: true,
+          create_collection_projects: false,
         }),
       });
       const payload = await responsePayload(response, "创建 Zotero 数据源失败");
       const createdSources = ((payload.sources ?? [payload.source]) as ZoteroSource[]).filter(Boolean);
-      if (!createdSources.length) throw new Error("Zotero 数据源创建成功，但没有返回目标项目");
+      if (!createdSources.length) throw new Error("Zotero 数据源创建成功，但没有返回当前项目数据源");
       await refreshProjects();
-      selectProject(createdSources[0].projectId);
       setIsSetupOpen(false);
       for (const source of createdSources) {
         await submitSync(source, false);
       }
       setMessage(
         createdSources.length === 1
-          ? "已创建或复用 Zotero 同名项目，并开始同步；文献不会进入默认研究项目。"
-          : `已为 ${createdSources.length} 个 Zotero 分类创建或复用同名项目，并开始同步。`,
+          ? "已添加到当前项目并开始同步，Zotero 多级分类会原样保留。"
+          : `已将 ${createdSources.length} 个 Zotero 数据源添加到当前项目并开始同步。`,
       );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "创建 Zotero 数据源失败");
@@ -312,6 +320,7 @@ export function ZoteroSourcePanel({ projectId, disabled = false }: { projectId: 
       });
       await responsePayload(response, "移除 Zotero 数据源失败");
       await loadSources();
+      onCollectionsChanged?.();
       setConfirmRemoveId("");
       setMessage("已移除数据源配置；已导入论文和 Zotero 原文件均未删除。");
     } catch (reason) {
@@ -332,7 +341,7 @@ export function ZoteroSourcePanel({ projectId, disabled = false }: { projectId: 
   ).length;
 
   return (
-    <section className="zotero-source-panel" aria-label="Zotero 数据源">
+    <section id="zotero-data-sources" className="zotero-source-panel" aria-label="Zotero 数据源">
       <header className="zotero-panel-header">
         <div className="zotero-brand-mark" aria-hidden="true"><span>Z</span></div>
         <div className="zotero-panel-title">
@@ -473,7 +482,7 @@ export function ZoteroSourcePanel({ projectId, disabled = false }: { projectId: 
               ) : null}
 
               <footer className="zotero-setup-footer">
-                <p>{scopeMode === "library" ? "将创建“Zotero 个人文库”项目" : `将按 ${selectedKeys.length} 个分类创建同名项目`}；文献不会进入默认研究项目。</p>
+                <p>{scopeMode === "library" ? "整个 Zotero 文库" : `${selectedKeys.length} 个分类及其层级`}将加入当前项目，不会额外创建项目。</p>
                 <button className="zotero-primary-button" type="button" onClick={() => void createSource()} disabled={disabled || Boolean(busy) || (scopeMode === "collections" && selectedKeys.length === 0)}>
                   {busy === "create" ? <><SyncRounded className="zotero-spin" />正在创建…</> : <><AddRounded />添加并开始同步</>}
                 </button>

@@ -231,6 +231,18 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             task,
             list(args.get("history") or []),
         )
+        response_context = str(args.get("response_context") or "").strip()
+        if response_context:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "以下是用户已确认的全局偏好与当前项目研究记忆。"
+                        "偏好只影响称呼和表达方式；研究记忆只用于组织回答，不得替代本轮文献证据：\n"
+                        + response_context
+                    ),
+                }
+            )
         if conversation_context.normalized_history:
             messages.append(
                 {
@@ -915,6 +927,18 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             task,
             list(args.get("history") or []),
         )
+        response_context = str(args.get("response_context") or "").strip()
+        if response_context:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "以下是用户主动确认的全局偏好与当前项目研究记忆。"
+                        "请遵守称呼和表达偏好；项目记忆不具备本轮证据效力：\n"
+                        + response_context
+                    ),
+                }
+            )
         if conversation_context.normalized_history:
             messages.append(
                 {
@@ -1539,6 +1563,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                     evidence=evidence,
                     answer_requirements=list(plan.get("coreRequirements") or plan.get("answerRequirements") or []),
                     retrieval_state=retrieval_state,
+                    response_context=str(args.get("response_context") or ""),
                 ),
                 cancel_event=cancel_event,
             )

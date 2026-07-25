@@ -90,6 +90,7 @@ class ResearchChatAgent:
         evidence: list[dict[str, Any]] | None = None,
         answer_requirements: list[str] | None = None,
         retrieval_state: dict[str, Any] | None = None,
+        response_context: str = "",
     ) -> dict[str, Any]:
         """执行当前代理的主要业务流程并返回结构化结果。"""
         normalized_question = str(question).strip()
@@ -132,6 +133,7 @@ class ResearchChatAgent:
             evidence=evidence,
             answer_requirements=answer_requirements or [],
             retrieval_state=retrieval_state or {},
+            response_context=response_context,
         )
         retrieved_sources = [
             {
@@ -179,6 +181,7 @@ class ResearchChatAgent:
                 evidence=evidence,
                 answer_requirements=answer_requirements or [],
                 retrieval_state=retrieval_state or {},
+                response_context=response_context,
                 revision_instruction=(
                     "上一次草稿未通过一致性校验。请重新回答，并修正以下问题："
                     + "；".join(retry_reasons)
@@ -716,6 +719,7 @@ class ResearchChatAgent:
         evidence: list[dict[str, Any]],
         answer_requirements: list[str],
         retrieval_state: dict[str, Any],
+        response_context: str = "",
         revision_instruction: str = "",
     ) -> str:
         """兼容门面：把回答生成委托给独立 AnswerComposer。"""
@@ -728,6 +732,7 @@ class ResearchChatAgent:
             answer_requirements=answer_requirements,
             retrieval_state={**retrieval_state, "evidenceCount": int(retrieval_state.get("evidenceCount") or len(evidence))},
             timeout=self.config.request_timeout,
+            response_context=response_context,
             revision_instruction=revision_instruction,
         )
 

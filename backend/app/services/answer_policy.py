@@ -18,6 +18,7 @@ class AnswerPolicy:
         evidence_context: str,
         answer_requirements: list[str],
         retrieval_state: dict[str, Any],
+        response_context: str = "",
         revision_instruction: str = "",
     ) -> str:
         prompt = base_prompt.replace("{{evidence}}", evidence_context)
@@ -37,6 +38,12 @@ class AnswerPolicy:
         }
         prompt += "\n\n# 当前检索状态\n" + json.dumps(normalized_state, ensure_ascii=False)
         prompt += "\n该状态优先于历史判断。证据片段未覆盖某项细节，不代表全文不存在。"
+        if response_context.strip():
+            prompt += (
+                "\n\n# 用户确认的偏好与项目记忆\n"
+                "偏好只影响称呼和表达；项目记忆可帮助组织回答，但不能替代检索证据或生成无引用事实。\n"
+                + response_context[:6000]
+            )
         if revision_instruction:
             prompt += f"\n\n# 修订要求\n{revision_instruction}"
         return f"{prompt}\n\n{SYSTEM_SECURITY_CONSTRAINT}"

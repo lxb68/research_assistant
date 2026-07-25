@@ -26,6 +26,7 @@ class AnswerComposer:
         answer_requirements: list[str],
         retrieval_state: dict[str, Any],
         timeout: int,
+        response_context: str = "",
         revision_instruction: str = "",
     ) -> str:
         prompt = self._policy.build_prompt(
@@ -33,6 +34,7 @@ class AnswerComposer:
             evidence_context=evidence_context,
             answer_requirements=answer_requirements,
             retrieval_state=retrieval_state,
+            response_context=response_context,
             revision_instruction=revision_instruction,
         )
         return self._completion(

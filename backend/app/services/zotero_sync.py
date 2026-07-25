@@ -21,6 +21,11 @@ from app.services.mineru_batch import (
 )
 from app.services.task_control import TaskCancelled, raise_if_task_cancelled
 from app.services.zotero_connector import ZoteroConnector
+from app.services.zotero_collection_tree import (
+    UNFILED_KEY,
+    ZoteroCollectionRepository,
+    ZoteroCollectionTreeService,
+)
 from app.services.zotero_project_router import ZoteroProjectRouter
 from app.services.zotero_source_repository import ZoteroSourceRepository
 
@@ -44,6 +49,15 @@ class ZoteroParseCandidate:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ZoteroScopeSnapshot:
+    """一次 Zotero 读取产生的树、唯一文献和多分类成员关系快照。"""
+
+    items: list[dict[str, Any]]
+    nodes: list[dict[str, Any]]
+    memberships: dict[str, set[str]]
+
+
 class ZoteroSyncService:
     """协调 Zotero 读取、内容变更判断、全文索引和项目成员更新。"""
 
@@ -56,6 +70,8 @@ class ZoteroSyncService:
     ) -> None:
         self.metadata_db_path = Path(metadata_db_path or settings.hunter_metadata_db)
         self.sources = ZoteroSourceRepository(self.metadata_db_path)
+        self.collections = ZoteroCollectionRepository(self.metadata_db_path)
+        self.collection_tree = ZoteroCollectionTreeService()
         self.projects = ProjectRepository(self.metadata_db_path)
         self.agent = HunterAgent(metadata_db_path=self.metadata_db_path, log_callback=log_callback)
         self.log_callback = log_callback
@@ -77,7 +93,18 @@ class ZoteroSyncService:
             ).ensure_routed(connector, source)
             if migrated:
                 self._log(f"Zotero 数据源已迁移到同名项目：project_id={source['projectId']}")
-            items = self._load_source_items(connector, source)
+            snapshot = self._load_source_snapshot(connector, source)
+            items = snapshot.items
+            self.collections.replace_snapshot(
+                source["id"],
+                nodes=snapshot.nodes,
+                memberships=snapshot.memberships,
+                paper_ids={
+                    self._item_key(item): self._paper_id(source, self._item_key(item))
+                    for item in items
+                    if self._item_key(item)
+                },
+            )
             total = len(items)
             stats = {
                 "discovered": total,
@@ -140,7 +167,12 @@ class ZoteroSyncService:
             stats["missing"] = self.sources.mark_missing_except(source_id, seen_keys)
             self.sources.set_source_status(source_id, status="ready", synced=True)
             self._progress(96, "saving", "Zotero 同步完成，正在保存结果")
-            return {"sourceId": source_id, "projectId": source["projectId"], **stats}
+            return {
+                "sourceId": source_id,
+                "projectId": source["projectId"],
+                "collectionCount": len(snapshot.nodes),
+                **stats,
+            }
         except TaskCancelled:
             self.sources.set_source_status(source_id, status="ready", error="同步已取消")
             raise
@@ -148,33 +180,47 @@ class ZoteroSyncService:
             self.sources.set_source_status(source_id, status="failed", error=str(error))
             raise
 
-    def _load_source_items(self, connector: ZoteroConnector, source: dict[str, Any]) -> list[dict[str, Any]]:
-        selected = [str(key).upper() for key in source.get("collectionKeys") or []]
-        if source.get("includeSubcollections") and selected:
-            collections = connector.list_collections()
-            pending = list(selected)
-            while pending:
-                parent = pending.pop()
-                for collection in collections:
-                    key = str(collection.get("key") or "")
-                    if collection.get("parentCollection") == parent and key not in selected:
-                        selected.append(key)
-                        pending.append(key)
-        raw_items = (
-            [item for key in selected for item in connector.list_top_items(key)]
-            if selected
-            else connector.list_top_items()
+    def _load_source_snapshot(
+        self,
+        connector: ZoteroConnector,
+        source: dict[str, Any],
+    ) -> ZoteroScopeSnapshot:
+        """读取完整作用域并保留每篇文献的全部 Collection 成员关系。"""
+        collection_values = connector.list_collections()
+        nodes, collection_keys, whole_library = self.collection_tree.build_scope(
+            collection_values,
+            root_keys=[str(key) for key in source.get("collectionKeys") or []],
+            include_subcollections=bool(source.get("includeSubcollections")),
         )
         deduplicated: dict[str, dict[str, Any]] = {}
-        for item in raw_items:
+        memberships: dict[str, set[str]] = {}
+
+        def accept(item: dict[str, Any], collection_key: str | None = None) -> None:
             data = self._item_data(item)
             item_type = str(data.get("itemType") or "")
             if item_type == "attachment" and not source.get("includeStandaloneAttachments"):
-                continue
+                return
             key = self._item_key(item)
             if key:
                 deduplicated[key] = item
-        return list(deduplicated.values())
+                if collection_key:
+                    memberships.setdefault(key, set()).add(collection_key)
+
+        if whole_library:
+            for item in connector.list_top_items():
+                accept(item)
+        for collection_key in collection_keys:
+            for item in connector.list_top_items(collection_key):
+                accept(item, collection_key)
+        if whole_library:
+            for item_key in deduplicated:
+                if not memberships.get(item_key):
+                    memberships.setdefault(item_key, set()).add(UNFILED_KEY)
+        return ZoteroScopeSnapshot(
+            items=list(deduplicated.values()),
+            nodes=nodes,
+            memberships=memberships,
+        )
 
     def _sync_item(
         self,

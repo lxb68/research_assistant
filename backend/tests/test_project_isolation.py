@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from app.agents.domainTree_agent import DomainTreeAgent
@@ -48,6 +50,16 @@ class ProjectIsolationTest(unittest.TestCase):
             {"paper-a", "paper-b"},
         )
 
+    def test_default_project_membership_can_be_managed(self) -> None:
+        self.projects.replace_papers(DEFAULT_PROJECT_ID, ["paper-a"])
+
+        self.assertEqual(self.projects.list_paper_ids(DEFAULT_PROJECT_ID), ["paper-a"])
+        reloaded = ProjectRepository(self.database)
+        self.assertEqual(reloaded.list_paper_ids(DEFAULT_PROJECT_ID), ["paper-a"])
+
+        reloaded.add_papers(DEFAULT_PROJECT_ID, ["paper-b"])
+        self.assertEqual(set(reloaded.list_paper_ids(DEFAULT_PROJECT_ID)), {"paper-a", "paper-b"})
+
     def test_zotero_paper_only_belongs_to_explicit_project(self) -> None:
         self._save_paper("zotero-paper", "Zotero 论文", source="zotero")
         zotero_project = self.projects.create(name="Zotero 分类", paper_ids=["zotero-paper"])
@@ -80,6 +92,16 @@ class ProjectIsolationTest(unittest.TestCase):
 
         self.assertEqual(set(self.projects.list_paper_ids(project_a["id"])), {"paper-a", "paper-b"})
         self.assertEqual(self.projects.list_paper_ids(project_b["id"]), ["paper-b"])
+
+    def test_project_count_ignores_dangling_paper_membership(self) -> None:
+        project = self.projects.create(name="项目 A", paper_ids=["paper-a"])
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DELETE FROM papers WHERE id = ?", ("paper-a",))
+            connection.commit()
+
+        self.assertEqual(self.projects.get(project["id"])["paperCount"], 0)
+        listed = next(value for value in self.projects.list() if value["id"] == project["id"])
+        self.assertEqual(listed["paperCount"], 0)
 
     def test_store_rejects_artifacts_claiming_another_project(self) -> None:
         output_dir = self.root / "domain_tree" / "project-a"

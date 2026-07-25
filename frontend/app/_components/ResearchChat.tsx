@@ -25,6 +25,19 @@ import { useBackgroundTasks } from "@/app/_components/BackgroundTaskProvider";
 import { fetchJob } from "@/lib/background-jobs";
 import MessageContent from "@/app/_components/MessageContent";
 import { useProjects } from "@/app/_components/ProjectProvider";
+import {
+  createResearchMemory,
+  deleteResearchMemory as deleteResearchMemoryApi,
+  detectExplicitPreferredName,
+  extractResearchMemory,
+  getUserPreferences,
+  listResearchMemories,
+  saveUserPreferences,
+  updateResearchMemory,
+  type ResearchMemory as ResearchRecord,
+  type ResearchMemoryDraft,
+  type UserPreferences,
+} from "@/lib/research-memory";
 
 type Props = { onOpenBrowse: () => void; onOpenDomainTree: () => void };
 type Source = {
@@ -76,23 +89,10 @@ type OrchestratorResult = {
 };
 
 type Conversation = { id: string; title: string; date: string; messages: Message[]; projectId?: string; projectIds?: string[] };
-type ResearchRecord = {
-  id: string;
-  conversationId: string;
-  messageId: number;
-  title: string;
-  question: string;
-  content: string;
-  sources: Source[];
-  createdAt: string;
-  projectId?: string;
-  projectName?: string;
-};
-
 const CONVERSATIONS_KEY = "research-agent.conversations";
-// 三组键分别保存会话列表、当前会话和归档研究记录。
+const LEGACY_RESEARCH_RECORDS_KEY = "research-agent.research-records";
+// 对话仍保留本地缓存；旧版整条归档键仅用于一次性迁移到后端研究记忆。
 const ACTIVE_CONVERSATION_KEY = "research-agent.active-conversation";
-const RESEARCH_RECORDS_KEY = "research-agent.research-records";
 const RESEARCH_STAGE_ORDER = ["planning", "retrieving", "validating", "composing", "persisting", "completed"];
 const RESEARCH_STAGE_ITEMS = [
   { stage: "planning", label: "理解问题与规划" },
@@ -139,6 +139,18 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
   const [activeConversationId, setActiveConversationId] = useState("");
   const [conversationTitle, setConversationTitle] = useState("新建研究对话");
   const [researchRecords, setResearchRecords] = useState<ResearchRecord[]>([]);
+  const [memoryDraft, setMemoryDraft] = useState<ResearchMemoryDraft | null>(null);
+  const [editingMemoryId, setEditingMemoryId] = useState("");
+  const [memoryBusy, setMemoryBusy] = useState(false);
+  const [memoryError, setMemoryError] = useState("");
+  const [preferences, setPreferences] = useState<UserPreferences>({
+    preferredName: "",
+    language: "zh-CN",
+    answerStyle: "",
+    updatedAt: "",
+  });
+  const [preferenceDraft, setPreferenceDraft] = useState({ preferredName: "", answerStyle: "" });
+  const [isPreferenceOpen, setIsPreferenceOpen] = useState(false);
   const [workspaceView, setWorkspaceView] = useState<"chat" | "records">("chat");
   const [hasHydrated, setHasHydrated] = useState(false);
   const [input, setInput] = useState("");
@@ -179,11 +191,9 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
     const timer = window.setTimeout(() => {
       try {
         const storedConversations = JSON.parse(window.localStorage.getItem(CONVERSATIONS_KEY) || "[]") as Conversation[];
-        const storedRecords = JSON.parse(window.localStorage.getItem(RESEARCH_RECORDS_KEY) || "[]") as ResearchRecord[];
         const storedActiveId = window.localStorage.getItem(ACTIVE_CONVERSATION_KEY) || "";
         const activeConversation = storedConversations.find((conversation) => conversation.id === storedActiveId);
         setConversations(storedConversations);
-        setResearchRecords(storedRecords);
         if (activeConversation) {
           setActiveConversationId(activeConversation.id);
           setConversationTitle(activeConversation.title);
@@ -201,7 +211,6 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
       } catch {
         window.localStorage.removeItem(CONVERSATIONS_KEY);
         window.localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
-        window.localStorage.removeItem(RESEARCH_RECORDS_KEY);
       } finally {
         setHasHydrated(true);
       }
@@ -225,8 +234,59 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
 
   useEffect(() => {
     if (!hasHydrated) return;
-    window.localStorage.setItem(RESEARCH_RECORDS_KEY, JSON.stringify(researchRecords));
-  }, [hasHydrated, researchRecords]);
+    let cancelled = false;
+    void Promise.all([listResearchMemories(), getUserPreferences()])
+      .then(async ([loadedMemories, loadedPreferences]) => {
+        if (cancelled) return;
+        let memories = loadedMemories;
+        try {
+          const legacyRecords = JSON.parse(window.localStorage.getItem(LEGACY_RESEARCH_RECORDS_KEY) || "[]") as Array<{
+            conversationId?: string;
+            messageId?: number;
+            title?: string;
+            question?: string;
+            content?: string;
+            sources?: Source[];
+            projectId?: string;
+            projectName?: string;
+          }>;
+          const existingKeys = new Set(memories.map((item) => `${item.sourceConversationId}:${item.sourceMessageId}`));
+          const pendingLegacy = legacyRecords.filter((item) =>
+            !existingKeys.has(`${item.conversationId ?? ""}:${String(item.messageId ?? "")}`),
+          );
+          if (pendingLegacy.length) {
+            const migrated = await Promise.all(pendingLegacy.map((item) => createResearchMemory({
+              projectId: item.projectId || activeProjectId,
+              projectName: item.projectName || "",
+              type: "conclusion",
+              title: item.title || item.question || "历史研究记忆",
+              summary: String(item.content || "").replace(/\s+/g, " ").trim().slice(0, 1200),
+              tags: ["历史迁移"],
+              confidence: item.sources?.length ? 0.6 : 0.4,
+              evidence: item.sources ?? [],
+              sourceConversationId: item.conversationId || "",
+              sourceMessageId: String(item.messageId ?? ""),
+              sourceQuestion: item.question || "",
+            })));
+            memories = [...migrated, ...memories];
+          }
+          if (legacyRecords.length) window.localStorage.removeItem(LEGACY_RESEARCH_RECORDS_KEY);
+        } catch {
+          // 旧数据迁移失败时保留 localStorage，避免不可恢复的数据丢失。
+        }
+        if (cancelled) return;
+        setResearchRecords(memories);
+        setPreferences(loadedPreferences);
+        setPreferenceDraft({
+          preferredName: loadedPreferences.preferredName,
+          answerStyle: loadedPreferences.answerStyle,
+        });
+      })
+      .catch((error) => {
+        if (!cancelled) setMemoryError(error instanceof Error ? error.message : "加载研究记忆失败");
+      });
+    return () => { cancelled = true; };
+  }, [activeProjectId, hasHydrated]);
 
   useEffect(() => {
     if (!hasHydrated) return;
@@ -374,6 +434,19 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
   async function send(value = input) {
     const prompt = value.trim();
     if (!prompt || thinking) return;
+    const explicitPreferredName = detectExplicitPreferredName(prompt);
+    if (explicitPreferredName) {
+      try {
+        const updatedPreferences = await saveUserPreferences({ preferredName: explicitPreferredName });
+        setPreferences(updatedPreferences);
+        setPreferenceDraft({
+          preferredName: updatedPreferences.preferredName,
+          answerStyle: updatedPreferences.answerStyle,
+        });
+      } catch (error) {
+        setMemoryError(error instanceof Error ? error.message : "保存称呼偏好失败");
+      }
+    }
     const id = nextMessageId.current;
     nextMessageId.current += 2;
     const userMessage: Message = { id, role: "user", content: prompt };
@@ -653,41 +726,109 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
   }
 
   /** 把回答保存为研究归档记录。 */
-  function saveResearchRecord(message: Message) {
+  async function saveResearchRecord(message: Message) {
     if (message.role !== "agent") return;
     const messageIndex = messages.findIndex((item) => item.id === message.id);
     const question = [...messages.slice(0, messageIndex)].reverse().find((item) => item.role === "user")?.content || conversationTitle;
     const existingRecord = researchRecords.find(
-      (record) => record.conversationId === activeConversationId && record.messageId === message.id,
+      (record) => record.sourceConversationId === activeConversationId && record.sourceMessageId === String(message.id),
     );
     if (existingRecord) {
-      setWorkspaceView("records");
+      editResearchRecord(existingRecord);
       return;
     }
-    setResearchRecords((items) => [{
-      id: `record-${Date.now()}-${message.id}`,
-      conversationId: activeConversationId,
-      messageId: message.id,
-      title: conversationTitle,
-      question,
-      content: message.content,
-      sources: message.sources ?? [],
-      createdAt: new Date().toLocaleString("zh-CN"),
-      projectId: activeProjectId,
-      projectName: activeProject?.name,
-    }, ...items]);
+    setMemoryBusy(true);
+    setMemoryError("");
+    try {
+      const candidate = await extractResearchMemory({
+        question,
+        answer: message.content,
+        sources: message.sources ?? [],
+        projectId: activeProjectId,
+        projectName: activeProject?.name ?? "",
+        sourceConversationId: activeConversationId,
+        sourceMessageId: String(message.id),
+      });
+      setEditingMemoryId("");
+      setMemoryDraft(candidate);
+    } catch (error) {
+      setMemoryError(error instanceof Error ? error.message : "提炼研究记忆失败");
+    } finally {
+      setMemoryBusy(false);
+    }
   }
 
   /** 打开研究归档关联的原始会话。 */
   function openRecordConversation(record: ResearchRecord) {
-    if (record.conversationId && conversations.some((conversation) => conversation.id === record.conversationId)) {
-      openConversation(record.conversationId);
+    if (record.sourceConversationId && conversations.some((conversation) => conversation.id === record.sourceConversationId)) {
+      openConversation(record.sourceConversationId);
     }
   }
 
   /** 删除指定研究归档记录。 */
-  function deleteResearchRecord(id: string) {
-    setResearchRecords((items) => items.filter((record) => record.id !== id));
+  function editResearchRecord(record: ResearchRecord) {
+    setEditingMemoryId(record.id);
+    setMemoryDraft({
+      projectId: record.projectId,
+      projectName: record.projectName,
+      type: record.type,
+      title: record.title,
+      summary: record.summary,
+      tags: record.tags,
+      confidence: record.confidence,
+      evidence: record.evidence,
+      sourceConversationId: record.sourceConversationId,
+      sourceMessageId: record.sourceMessageId,
+      sourceQuestion: record.sourceQuestion,
+    });
+    setMemoryError("");
+  }
+
+  async function confirmResearchMemory() {
+    if (!memoryDraft || memoryBusy) return;
+    setMemoryBusy(true);
+    setMemoryError("");
+    try {
+      if (editingMemoryId) {
+        const updated = await updateResearchMemory(editingMemoryId, memoryDraft);
+        setResearchRecords((items) => items.map((item) => item.id === updated.id ? updated : item));
+      } else {
+        const created = await createResearchMemory(memoryDraft);
+        setResearchRecords((items) => [created, ...items]);
+      }
+      setMemoryDraft(null);
+      setEditingMemoryId("");
+      setWorkspaceView("records");
+    } catch (error) {
+      setMemoryError(error instanceof Error ? error.message : "保存研究记忆失败");
+    } finally {
+      setMemoryBusy(false);
+    }
+  }
+
+  async function deleteResearchRecord(id: string) {
+    setMemoryError("");
+    try {
+      await deleteResearchMemoryApi(id);
+      setResearchRecords((items) => items.filter((record) => record.id !== id));
+    } catch (error) {
+      setMemoryError(error instanceof Error ? error.message : "删除研究记忆失败");
+    }
+  }
+
+  async function persistPreferences(patch = preferenceDraft) {
+    setMemoryBusy(true);
+    setMemoryError("");
+    try {
+      const updated = await saveUserPreferences(patch);
+      setPreferences(updated);
+      setPreferenceDraft({ preferredName: updated.preferredName, answerStyle: updated.answerStyle });
+      setIsPreferenceOpen(false);
+    } catch (error) {
+      setMemoryError(error instanceof Error ? error.message : "保存全局偏好失败");
+    } finally {
+      setMemoryBusy(false);
+    }
   }
 
   return (
@@ -698,7 +839,7 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
         <label>工作区</label>
         <nav className="research-nav">
           <button className={workspaceView === "chat" ? "active" : ""} onClick={() => setWorkspaceView("chat")}><AutoAwesomeRounded />研究对话{conversations.length > 0 ? <em>{conversations.length}</em> : null}</button>
-          <button className={workspaceView === "records" ? "active" : ""} onClick={() => setWorkspaceView("records")}><HistoryRounded />研究记录{researchRecords.length > 0 ? <em>{researchRecords.length}</em> : null}</button>
+          <button className={workspaceView === "records" ? "active" : ""} onClick={() => setWorkspaceView("records")}><HistoryRounded />研究记忆{researchRecords.length > 0 ? <em>{researchRecords.length}</em> : null}</button>
         </nav>
         <label>最近对话</label>
         <div className="research-recents">
@@ -717,24 +858,35 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
         <header className="research-topbar">
           {!sidebar && <button className="research-icon" onClick={() => setSidebar(true)}><MenuRounded /></button>}
           <div className="research-topbar-title"><h1>{workspaceView === "records" ? "成果档案" : conversationTitle}</h1><span><i />{workspaceView === "records" ? `${researchRecords.length} 条已保存成果` : "已自动保存"}</span></div>
-          {workspaceView === "chat" ? <button className="research-export"><DownloadRounded />导出报告</button> : null}
+          <div className="research-topbar-actions">
+            <button className="research-export" onClick={() => setIsPreferenceOpen(true)}><EditRounded />{preferences.preferredName ? `称呼：${preferences.preferredName}` : "全局偏好"}</button>
+            {workspaceView === "chat" ? <button className="research-export"><DownloadRounded />导出报告</button> : null}
+          </div>
         </header>
         {workspaceView === "records" ? (
           <section className="research-records-page">
-            <header><div><small>Research Archive</small><h2>研究记录</h2><p>沉淀值得长期保留的研究结论、原始问题与引用证据，形成可回溯的成果档案。</p></div></header>
+            <header><div><small>Research Memory</small><h2>研究记忆</h2><p>从对话中提炼可复用的结论、事实、决策、限制和待办；完整回答继续保留在原对话中。</p></div></header>
+            {memoryError ? <p className="research-memory-error" role="alert">{memoryError}</p> : null}
             {researchRecords.length > 0 ? (
               <div className="research-record-grid">
                 {researchRecords.map((record) => (
                   <article className="research-record-card" key={record.id}>
                     <header><div><small>{record.createdAt}</small><h3>{record.title}</h3></div><button onClick={() => deleteResearchRecord(record.id)} aria-label={`删除研究记录：${record.title}`} title="删除研究记录"><DeleteOutlineRounded /></button></header>
-                    <strong>{record.question}</strong>
-                    <p>{record.content}</p>
-                    <footer><span>{[record.projectName, `${record.sources.length} 个引用来源`].filter(Boolean).join(" · ")}</span><button onClick={() => openRecordConversation(record)} disabled={!record.conversationId || !conversations.some((conversation) => conversation.id === record.conversationId)}>打开原对话</button></footer>
+                    <strong>{record.sourceQuestion}</strong>
+                    <p>{record.summary}</p>
+                    {record.tags.length ? <div className="research-memory-tags">{record.tags.map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
+                    <footer>
+                      <span>{[record.projectName, record.type, `${record.evidence.length} 个证据`, `置信度 ${Math.round(record.confidence * 100)}%`].filter(Boolean).join(" · ")}</span>
+                      <div className="research-memory-actions">
+                        <button onClick={() => editResearchRecord(record)}>编辑</button>
+                        <button onClick={() => openRecordConversation(record)} disabled={!record.sourceConversationId || !conversations.some((conversation) => conversation.id === record.sourceConversationId)}>打开原对话</button>
+                      </div>
+                    </footer>
                   </article>
                 ))}
               </div>
             ) : (
-              <div className="research-record-empty"><HistoryRounded /><h3>暂无研究记录</h3><p>在研究回答下方点击“保存到研究记录”，成果会出现在这里。</p><button onClick={() => setWorkspaceView("chat")}>返回研究对话</button></div>
+              <div className="research-record-empty"><HistoryRounded /><h3>暂无研究记忆</h3><p>在研究回答下方点击“提炼研究记忆”，确认摘要后会出现在这里。</p><button onClick={() => setWorkspaceView("chat")}>返回研究对话</button></div>
             )}
           </section>
         ) : <div className="research-body">
@@ -743,7 +895,7 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
             {messages.map((message) => <article className={`research-message ${message.role}`} key={message.id}>
               <div className="research-avatar">{message.role === "agent" ? <AutoAwesomeRounded /> : "LX"}</div>
               <div><header><strong>{message.role === "agent" ? "Research Agent" : "你"}</strong><span>{message.id <= 2 ? "10:24" : "刚刚"}</span></header><MessageContent content={message.content} />
-                {message.role === "agent" && <>{message.sources?.length ? <div className="research-citations">{message.sources.map((source) => <button type="button" disabled={!source.recordId} onClick={() => openSource(source)} title={source.recordId ? `查看文献：${source.title}` : "该来源没有本地文献记录"} key={`${message.id}-${source.index}`}>{source.index} · {source.title}</button>)}</div> : null}{message.maintenanceAction?.status === "pending" || message.maintenanceAction?.status === "running" ? <div className="research-maintenance-action"><button type="button" className="is-danger" disabled={message.maintenanceAction.status === "running"} onClick={() => void confirmMissingPdfCleanup(message)}>{message.maintenanceAction.status === "running" ? "正在清理…" : `确认删除 ${message.maintenanceAction.candidateIds.length} 条`}</button><button type="button" disabled={message.maintenanceAction.status === "running"} onClick={() => cancelMissingPdfCleanup(message)}>取消</button></div> : null}<footer><button onClick={() => { navigator.clipboard?.writeText(message.content); setCopied(message.id); }}><ContentCopyRounded />{copied === message.id ? "已复制" : "复制"}</button><button><ThumbUpAltOutlined />有帮助</button><button onClick={() => saveResearchRecord(message)}><BookmarkAddOutlined />{researchRecords.some((record) => record.conversationId === activeConversationId && record.messageId === message.id) ? "已保存" : "保存到研究记录"}</button></footer></>}
+                {message.role === "agent" && <>{message.sources?.length ? <div className="research-citations">{message.sources.map((source) => <button type="button" disabled={!source.recordId} onClick={() => openSource(source)} title={source.recordId ? `查看文献：${source.title}` : "该来源没有本地文献记录"} key={`${message.id}-${source.index}`}>{source.index} · {source.title}</button>)}</div> : null}{message.maintenanceAction?.status === "pending" || message.maintenanceAction?.status === "running" ? <div className="research-maintenance-action"><button type="button" className="is-danger" disabled={message.maintenanceAction.status === "running"} onClick={() => void confirmMissingPdfCleanup(message)}>{message.maintenanceAction.status === "running" ? "正在清理…" : `确认删除 ${message.maintenanceAction.candidateIds.length} 条`}</button><button type="button" disabled={message.maintenanceAction.status === "running"} onClick={() => cancelMissingPdfCleanup(message)}>取消</button></div> : null}<footer><button onClick={() => { navigator.clipboard?.writeText(message.content); setCopied(message.id); }}><ContentCopyRounded />{copied === message.id ? "已复制" : "复制"}</button><button><ThumbUpAltOutlined />有帮助</button><button disabled={memoryBusy} onClick={() => void saveResearchRecord(message)}><BookmarkAddOutlined />{researchRecords.some((record) => record.sourceConversationId === activeConversationId && record.sourceMessageId === String(message.id)) ? "编辑研究记忆" : memoryBusy ? "正在提炼…" : "提炼研究记忆"}</button></footer></>}
               </div>
             </article>)}
             {thinking && <div className="research-thinking"><i /><i /><i />{thinkingText}</div>}
@@ -823,6 +975,69 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
           <button className="research-add-source" onClick={() => setIsProjectScopeOpen(true)}><AddRounded />添加检索项目</button>
         </>}
       </aside> : null}
+
+      {memoryDraft ? <div className="research-memory-overlay" role="presentation" onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !memoryBusy) setMemoryDraft(null);
+      }}>
+        <section className="research-memory-dialog" role="dialog" aria-modal="true" aria-labelledby="research-memory-dialog-title">
+          <header>
+            <div><small>Research Memory</small><h2 id="research-memory-dialog-title">{editingMemoryId ? "编辑研究记忆" : "确认本轮提炼"}</h2></div>
+            <button type="button" disabled={memoryBusy} onClick={() => setMemoryDraft(null)}><CloseRounded /></button>
+          </header>
+          <p className="research-memory-hint">这里只保存可复用的结论摘要；完整回答仍保留在原对话中。</p>
+          <label>类型
+            <select value={memoryDraft.type} onChange={(event) => setMemoryDraft({ ...memoryDraft, type: event.target.value as ResearchMemoryDraft["type"] })}>
+              <option value="conclusion">研究结论</option>
+              <option value="fact">关键事实</option>
+              <option value="decision">决策记录</option>
+              <option value="limitation">争议与限制</option>
+              <option value="hypothesis">待验证假设</option>
+              <option value="task">后续任务</option>
+            </select>
+          </label>
+          <label>标题
+            <input value={memoryDraft.title} maxLength={200} onChange={(event) => setMemoryDraft({ ...memoryDraft, title: event.target.value })} />
+          </label>
+          <label>提炼摘要
+            <textarea value={memoryDraft.summary} maxLength={1200} rows={7} onChange={(event) => setMemoryDraft({ ...memoryDraft, summary: event.target.value })} />
+          </label>
+          <label>标签（使用逗号分隔）
+            <input value={memoryDraft.tags.join(", ")} onChange={(event) => setMemoryDraft({
+              ...memoryDraft,
+              tags: event.target.value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean).slice(0, 8),
+            })} />
+          </label>
+          <div className="research-memory-meta">保留 {memoryDraft.evidence.length} 条证据链接 · 置信度 {Math.round(memoryDraft.confidence * 100)}%</div>
+          {memoryError ? <p className="research-memory-error" role="alert">{memoryError}</p> : null}
+          <footer>
+            <button type="button" disabled={memoryBusy} onClick={() => setMemoryDraft(null)}>不保存</button>
+            <button type="button" className="is-primary" disabled={memoryBusy || !memoryDraft.title.trim() || !memoryDraft.summary.trim()} onClick={() => void confirmResearchMemory()}>{memoryBusy ? "正在保存…" : "确认保存"}</button>
+          </footer>
+        </section>
+      </div> : null}
+
+      {isPreferenceOpen ? <div className="research-memory-overlay" role="presentation" onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !memoryBusy) setIsPreferenceOpen(false);
+      }}>
+        <section className="research-memory-dialog is-preferences" role="dialog" aria-modal="true" aria-labelledby="user-preference-dialog-title">
+          <header>
+            <div><small>Global Preferences</small><h2 id="user-preference-dialog-title">全局用户偏好</h2></div>
+            <button type="button" disabled={memoryBusy} onClick={() => setIsPreferenceOpen(false)}><CloseRounded /></button>
+          </header>
+          <p className="research-memory-hint">这些设置跨对话生效，但不会混入项目研究结论。系统只保存你明确提供的偏好。</p>
+          <label>希望如何称呼你
+            <input value={preferenceDraft.preferredName} maxLength={80} placeholder="例如：林老师" onChange={(event) => setPreferenceDraft({ ...preferenceDraft, preferredName: event.target.value })} />
+          </label>
+          <label>回答风格
+            <textarea value={preferenceDraft.answerStyle} maxLength={200} rows={4} placeholder="例如：先给结论，使用简洁中文" onChange={(event) => setPreferenceDraft({ ...preferenceDraft, answerStyle: event.target.value })} />
+          </label>
+          {memoryError ? <p className="research-memory-error" role="alert">{memoryError}</p> : null}
+          <footer>
+            <button type="button" disabled={memoryBusy} onClick={() => setIsPreferenceOpen(false)}>取消</button>
+            <button type="button" className="is-primary" disabled={memoryBusy} onClick={() => void persistPreferences()}>{memoryBusy ? "正在保存…" : "保存全局偏好"}</button>
+          </footer>
+        </section>
+      </div> : null}
     </div>
   );
 }

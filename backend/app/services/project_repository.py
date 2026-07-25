@@ -62,6 +62,10 @@ class ProjectRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_project_papers_paper
                     ON project_papers(paper_id);
+                CREATE TABLE IF NOT EXISTS default_project_exclusions (
+                    paper_id TEXT PRIMARY KEY,
+                    excluded_at TEXT NOT NULL
+                );
                 """,
             )
             connection.execute(
@@ -85,11 +89,19 @@ class ProjectRepository:
         self._sync_default_project_members()
         condition = "" if include_archived else "WHERE p.status = 'active'"
         with closing(self.connect()) as connection:
+            has_papers = self._has_papers_table(connection)
+            paper_join = (
+                "LEFT JOIN papers stored_paper ON stored_paper.id = pp.paper_id"
+                if has_papers
+                else ""
+            )
+            paper_count = "COUNT(stored_paper.id)" if has_papers else "COUNT(pp.paper_id)"
             rows = connection.execute(
                 f"""
-                SELECT p.*, COUNT(pp.paper_id) AS paper_count
+                SELECT p.*, {paper_count} AS paper_count
                 FROM projects p
                 LEFT JOIN project_papers pp ON pp.project_id = p.id
+                {paper_join}
                 {condition}
                 GROUP BY p.id
                 ORDER BY CASE WHEN p.id = ? THEN 0 ELSE 1 END, p.created_at
@@ -105,11 +117,19 @@ class ProjectRepository:
         if normalized == DEFAULT_PROJECT_ID:
             self._sync_default_project_members()
         with closing(self.connect()) as connection:
+            has_papers = self._has_papers_table(connection)
+            paper_join = (
+                "LEFT JOIN papers stored_paper ON stored_paper.id = pp.paper_id"
+                if has_papers
+                else ""
+            )
+            paper_count = "COUNT(stored_paper.id)" if has_papers else "COUNT(pp.paper_id)"
             row = connection.execute(
-                """
-                SELECT p.*, COUNT(pp.paper_id) AS paper_count
+                f"""
+                SELECT p.*, {paper_count} AS paper_count
                 FROM projects p
                 LEFT JOIN project_papers pp ON pp.project_id = p.id
+                {paper_join}
                 WHERE p.id = ?
                 GROUP BY p.id
                 """,
@@ -182,6 +202,21 @@ class ProjectRepository:
             if missing:
                 connection.rollback()
                 raise ProjectPaperNotFoundError(f"以下论文不存在：{', '.join(missing[:10])}")
+            if project_id == DEFAULT_PROJECT_ID and self._has_papers_table(connection):
+                eligible_rows = connection.execute(
+                    "SELECT id FROM papers WHERE LOWER(source) != 'zotero'",
+                ).fetchall()
+                selected = set(normalized)
+                excluded_ids = [
+                    str(row["id"])
+                    for row in eligible_rows
+                    if str(row["id"]) not in selected
+                ]
+                connection.execute("DELETE FROM default_project_exclusions")
+                connection.executemany(
+                    "INSERT INTO default_project_exclusions (paper_id, excluded_at) VALUES (?, ?)",
+                    [(paper_id, now) for paper_id in excluded_ids],
+                )
             connection.execute("DELETE FROM project_papers WHERE project_id = ?", (project_id,))
             connection.executemany(
                 "INSERT INTO project_papers (project_id, paper_id, added_at) VALUES (?, ?, ?)",
@@ -205,6 +240,12 @@ class ProjectRepository:
             if missing:
                 connection.rollback()
                 raise ProjectPaperNotFoundError(f"以下论文不存在：{', '.join(missing[:10])}")
+            if project_id == DEFAULT_PROJECT_ID:
+                placeholders = ", ".join("?" for _ in normalized)
+                connection.execute(
+                    f"DELETE FROM default_project_exclusions WHERE paper_id IN ({placeholders})",
+                    normalized,
+                )
             connection.executemany(
                 "INSERT OR IGNORE INTO project_papers (project_id, paper_id, added_at) VALUES (?, ?, ?)",
                 [(project_id, paper_id, now) for paper_id in normalized],
@@ -230,6 +271,10 @@ class ProjectRepository:
                 f"DELETE FROM project_papers WHERE paper_id IN ({placeholders})",
                 normalized,
             )
+            connection.execute(
+                f"DELETE FROM default_project_exclusions WHERE paper_id IN ({placeholders})",
+                normalized,
+            )
             removed_count = max(0, int(cursor.rowcount))
             cursor.close()
             project_ids = [str(row["project_id"]) for row in project_rows]
@@ -243,7 +288,7 @@ class ProjectRepository:
         return removed_count
 
     def _sync_default_project_members(self) -> None:
-        """默认项目承接普通全局论文，但排除已由独立项目管理的 Zotero 文献。"""
+        """默认项目自动承接新全局论文，同时尊重用户手动移除的成员。"""
         now = _timestamp()
         with closing(self.connect()) as connection:
             has_papers = connection.execute(
@@ -253,30 +298,32 @@ class ProjectRepository:
                 return
             connection.execute(
                 """
-                DELETE FROM project_papers
-                WHERE project_id = ? AND paper_id IN (
-                    SELECT id FROM papers WHERE LOWER(source) = 'zotero'
-                )
-                """,
-                (DEFAULT_PROJECT_ID,),
-            )
-            connection.execute(
-                """
                 INSERT OR IGNORE INTO project_papers (project_id, paper_id, added_at)
-                SELECT ?, id, ? FROM papers WHERE LOWER(source) != 'zotero'
+                SELECT ?, p.id, ?
+                FROM papers p
+                WHERE LOWER(p.source) != 'zotero'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM default_project_exclusions exclusion
+                      WHERE exclusion.paper_id = p.id
+                  )
                 """,
                 (DEFAULT_PROJECT_ID, now),
             )
             connection.commit()
 
     @staticmethod
+    def _has_papers_table(connection: sqlite3.Connection) -> bool:
+        """项目计数兼容尚未创建论文表的空数据库。"""
+        return connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'papers'",
+        ).fetchone() is not None
+
+    @staticmethod
     def _existing_paper_ids(connection: sqlite3.Connection, paper_ids: list[str]) -> set[str]:
         if not paper_ids:
             return set()
-        has_papers = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'papers'",
-        ).fetchone()
-        if not has_papers:
+        if not ProjectRepository._has_papers_table(connection):
             return set()
         placeholders = ", ".join("?" for _ in paper_ids)
         rows = connection.execute(

@@ -3,6 +3,7 @@
 from .domain_tree import router as domain_tree_router
 from .jobs import router as jobs_router
 from .mineru import router as mineru_router
+from .memory import router as memory_router
 from .papers import router as papers_router
 from .projects import router as projects_router
 from .research import router as research_router
@@ -15,6 +16,7 @@ ALL_ROUTERS = (
     system_router,
     research_router,
     settings_router,
+    memory_router,
     papers_router,
     projects_router,
     domain_tree_router,

@@ -7,7 +7,9 @@ from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.services.document_parse_repository import DocumentParseRepository
+from app.services.paper_repository import PaperRepository
 from app.services.project_repository import ProjectNotFoundError, ProjectRepository
+from app.services.zotero_collection_tree import ZoteroCollectionRepository
 from app.services.zotero_connector import ZoteroConnectionError, ZoteroConnector
 from app.services.zotero_source_repository import ZoteroSourceRepository
 
@@ -58,6 +60,36 @@ def list_zotero_collections(payload: ZoteroConnectionRequest) -> dict:
 def list_zotero_sources(project_id: str | None = Query(None, alias="projectId")) -> dict:
     values = ZoteroSourceRepository(settings.hunter_metadata_db).list(project_id=project_id)
     return {"count": len(values), "sources": values}
+
+
+@router.get("/api/projects/{project_id}/zotero-collections/tree")
+def list_project_zotero_collection_trees(project_id: str) -> dict:
+    try:
+        ProjectRepository(settings.hunter_metadata_db).require(project_id)
+    except ProjectNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    trees = ZoteroCollectionRepository(settings.hunter_metadata_db).list_project_trees(project_id)
+    return {"count": len(trees), "trees": trees}
+
+
+@router.get("/api/projects/{project_id}/zotero-collections/{source_id}/{collection_key}/papers")
+def list_zotero_collection_papers(
+    project_id: str,
+    source_id: str,
+    collection_key: str,
+    include_descendants: bool = Query(True, alias="includeDescendants"),
+) -> dict:
+    source = ZoteroSourceRepository(settings.hunter_metadata_db).get(source_id)
+    if not source or source["projectId"] != project_id:
+        raise HTTPException(status_code=404, detail="当前项目中不存在该 Zotero 数据源")
+    collections = ZoteroCollectionRepository(settings.hunter_metadata_db)
+    paper_ids = collections.list_paper_ids(
+        source_id,
+        collection_key,
+        include_descendants=include_descendants,
+    )
+    papers = PaperRepository(settings.hunter_metadata_db).list_by_ids(paper_ids)
+    return {"count": len(papers), "papers": papers}
 
 
 @router.post("/api/projects/{project_id}/zotero-sources", status_code=201)
@@ -150,6 +182,7 @@ def create_zotero_source(project_id: str, payload: ZoteroSourceCreateRequest) ->
 
 @router.delete("/api/zotero/sources/{source_id}")
 def delete_zotero_source(source_id: str) -> dict:
+    ZoteroCollectionRepository(settings.hunter_metadata_db).delete_source(source_id)
     deleted = ZoteroSourceRepository(settings.hunter_metadata_db).delete(source_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Zotero 数据源不存在")

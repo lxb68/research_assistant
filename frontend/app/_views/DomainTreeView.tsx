@@ -7,7 +7,6 @@ import { buildApiUrl } from "@/lib/api";
 import { SplitChunk, SavedPaper } from "@/lib/papers";
 import {
   DOMAIN_TREE_HEADING_COUNT_MAX,
-  WORKSPACE_DOMAIN_TREE_PROJECT_ID,
 } from "@/lib/constants";
 import { useProjects } from "@/app/_components/ProjectProvider";
 import { DomainTreePanel } from "@/app/_views/project-knowledge/DomainTreePanel";
@@ -464,7 +463,7 @@ function DomainTreeProjectPage({
   const [memberDraftIds, setMemberDraftIds] = useState<string[]>([]);
   const [isEditingMembers, setIsEditingMembers] = useState(false);
   const [isSavingMembers, setIsSavingMembers] = useState(false);
-  const [sourceProjectId, setSourceProjectId] = useState(WORKSPACE_DOMAIN_TREE_PROJECT_ID);
+  const [sourceProjectId, setSourceProjectId] = useState("");
   const [isLoadingSourcePapers, setIsLoadingSourcePapers] = useState(false);
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
@@ -1266,18 +1265,16 @@ function DomainTreeProjectPage({
 
   /** 从指定来源项目加载可复用的论文成员。 */
   async function loadSourceProjectPapers(projectId: string) {
-    if (!projectId) {
-      setAvailablePapers([]);
-      return;
-    }
     setIsLoadingSourcePapers(true);
     setError("");
     try {
-      const response = await fetch(
-        buildApiUrl(`/api/projects/${encodeURIComponent(projectId)}/papers`),
-      );
+      const url = projectId
+        ? buildApiUrl(`/api/projects/${encodeURIComponent(projectId)}/papers`)
+        : buildApiUrl("/api/papers");
+      if (!projectId) url.searchParams.set("limit", "500");
+      const response = await fetch(url);
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.detail || "加载来源项目论文失败");
+      if (!response.ok) throw new Error(payload.detail || "加载可选文献失败");
       setAvailablePapers(payload.papers ?? []);
     } catch (loadError) {
       setAvailablePapers([]);
@@ -1287,17 +1284,17 @@ function DomainTreeProjectPage({
     }
   }
 
-  /** 打开成员管理时默认展示默认项目，也允许切换到其他项目。 */
+  /** 打开成员管理时默认展示全部文献，也允许按来源项目缩小范围。 */
   async function handleToggleMemberEditor() {
     if (isEditingMembers) {
       setIsEditingMembers(false);
       return;
     }
-    const sourceId = projects.some(
+    const sourceId = sourceProjectId === "" || projects.some(
       (project) => project.id === sourceProjectId && project.id !== activeProjectId,
     )
       ? sourceProjectId
-      : projects.find((project) => project.id !== activeProjectId)?.id || "";
+      : "";
     setSourceProjectId(sourceId);
     setIsEditingMembers(true);
     await loadSourceProjectPapers(sourceId);
@@ -1305,7 +1302,6 @@ function DomainTreeProjectPage({
 
   /** 保存当前项目的完整论文成员集合。 */
   async function handleSaveProjectMembers() {
-    if (activeProjectId === WORKSPACE_DOMAIN_TREE_PROJECT_ID) return;
     setIsSavingMembers(true);
     setError("");
     try {

@@ -13,16 +13,21 @@ from app.services.background_jobs import BackgroundJobContext, BackgroundJobMana
 from app.services.conversations import conversation_store
 from app.services.model_config import ModelConfigStore
 from app.services.project_scope import ProjectScopeService
+from app.services.research_memory import research_memory_store
 from app.services.zotero_sync import ZoteroSyncService
 
 
 def _research_arguments(payload: ResearchChatRequest) -> dict[str, Any]:
-    return ProjectScopeService(settings.hunter_metadata_db).build_research_arguments(
+    arguments = ProjectScopeService(settings.hunter_metadata_db).build_research_arguments(
         project_id=payload.project_id,
         project_ids=payload.project_ids,
         requested_paper_ids=payload.paper_ids,
         history=[message.model_dump() for message in payload.history],
     )
+    arguments["response_context"] = research_memory_store.build_response_context(
+        project_ids=arguments["project_ids"],
+    )
+    return arguments
 
 
 def _dataset_download(context: BackgroundJobContext, raw: dict[str, Any]) -> dict[str, Any]:
