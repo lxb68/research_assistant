@@ -296,10 +296,10 @@ main {
   justify-content: space-between;
   gap: 18px;
   margin-bottom: 16px;
-  border: 1px solid rgba(96, 165, 250, 0.2);
+  border: 1px solid var(--app-border);
   border-radius: 8px;
   padding: 14px 16px;
-  background: rgba(37, 99, 235, 0.08);
+  background: var(--app-primary-soft);
 }
 
 .dataset-library-scope label,
@@ -314,24 +314,37 @@ main {
 
 .dataset-library-scope label > span,
 .dataset-library-scope > div > span {
-  color: rgba(203, 213, 225, 0.72);
+  color: var(--app-text-muted);
   font-size: 0.82rem;
 }
 
 .dataset-library-scope select {
   min-height: 44px;
-  border: 1px solid rgba(148, 163, 184, 0.24);
+  border: 1px solid var(--app-border-strong);
   border-radius: 8px;
-  background: rgba(15, 23, 42, 0.82);
-  color: #f8fafc;
+  background: var(--app-surface-strong);
+  color: var(--app-text-strong);
   font: inherit;
   outline: none;
   padding: 0 14px;
 }
 
+.dataset-library-scope select:disabled {
+  opacity: 1;
+  background: var(--app-surface-soft);
+  color: var(--app-text-muted);
+  -webkit-text-fill-color: var(--app-text-muted);
+  cursor: wait;
+}
+
+.dataset-library-scope select option {
+  background: var(--app-surface-strong);
+  color: var(--app-text-strong);
+}
+
 .dataset-library-scope select:focus {
-  border-color: #60a5fa;
-  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.16);
+  border-color: var(--app-primary);
+  box-shadow: 0 0 0 3px var(--app-focus-ring);
 }
 
 .dataset-library-scope > div {
@@ -340,7 +353,7 @@ main {
 }
 
 .dataset-library-scope > div > strong {
-  color: #dbeafe;
+  color: var(--app-primary);
 }
 
 .dataset-browser-toolbar {
