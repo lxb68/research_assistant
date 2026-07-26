@@ -3,6 +3,8 @@
 from pathlib import Path
 import os
 
+from app.services.runtime_settings import RuntimeConfigManager, RuntimeSettingsProxy
+
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
@@ -106,6 +108,23 @@ class Settings:
         0.0,
         float(os.getenv("DOMAIN_TREE_RETRY_BASE_DELAY_SECONDS", "2")),
     )
+    domain_tree_json_output = os.getenv(
+        "DOMAIN_TREE_JSON_OUTPUT",
+        "true",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    model_max_output_tokens = max(1, int(os.getenv("MODEL_MAX_OUTPUT_TOKENS", "4096")))
+    model_output_tokens_upper_bound = max(
+        model_max_output_tokens,
+        int(os.getenv("MODEL_OUTPUT_TOKENS_UPPER_BOUND", "65536")),
+    )
+    domain_tree_max_output_tokens = max(
+        1,
+        int(os.getenv("DOMAIN_TREE_MAX_OUTPUT_TOKENS", "16384")),
+    )
+    domain_tree_max_heading_count = max(
+        1,
+        int(os.getenv("DOMAIN_TREE_MAX_HEADING_COUNT", "50")),
+    )
     domain_tree_job_max_workers = max(1, int(os.getenv("DOMAIN_TREE_JOB_MAX_WORKERS", "2")))
     domain_tree_job_ttl_hours = max(1, int(os.getenv("DOMAIN_TREE_JOB_TTL_HOURS", "168")))
     domain_tree_job_stale_seconds = max(1, int(os.getenv("DOMAIN_TREE_JOB_STALE_SECONDS", "300")))
@@ -118,6 +137,74 @@ class Settings:
         BACKEND_DIR / "storage" / "metadata" / "domain_tree_jobs.sqlite3",
     )
     semantic_graph_max_workers = max(1, min(int(os.getenv("SEMANTIC_GRAPH_MAX_WORKERS", "4")), 16))
+    semantic_graph_chunk_size = max(1200, int(os.getenv("SEMANTIC_GRAPH_CHUNK_SIZE", "6000")))
+    semantic_graph_chunk_overlap = max(
+        0,
+        min(
+            int(os.getenv("SEMANTIC_GRAPH_CHUNK_OVERLAP", "400")),
+            semantic_graph_chunk_size // 3,
+        ),
+    )
+    semantic_graph_json_output = os.getenv(
+        "SEMANTIC_GRAPH_JSON_OUTPUT",
+        "true",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    semantic_graph_max_output_tokens = max(
+        1,
+        int(os.getenv("SEMANTIC_GRAPH_MAX_OUTPUT_TOKENS", "4096")),
+    )
+    semantic_graph_type_language_model_correction = os.getenv(
+        "SEMANTIC_GRAPH_TYPE_LANGUAGE_MODEL_CORRECTION",
+        "false",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    semantic_graph_progress_interval = max(
+        1,
+        int(os.getenv("SEMANTIC_GRAPH_PROGRESS_INTERVAL", "10")),
+    )
+    semantic_graph_failure_window = max(
+        1,
+        int(os.getenv("SEMANTIC_GRAPH_FAILURE_WINDOW", "20")),
+    )
+    semantic_graph_failure_window_minimum = max(
+        1,
+        min(
+            int(os.getenv("SEMANTIC_GRAPH_FAILURE_WINDOW_MINIMUM", "10")),
+            semantic_graph_failure_window,
+        ),
+    )
+    semantic_graph_failure_rate_limit = min(
+        1.0,
+        max(0.0, float(os.getenv("SEMANTIC_GRAPH_FAILURE_RATE_LIMIT", "0.5"))),
+    )
+    semantic_graph_consecutive_fatal_limit = max(
+        1,
+        int(os.getenv("SEMANTIC_GRAPH_CONSECUTIVE_FATAL_LIMIT", "8")),
+    )
+    semantic_graph_max_requests = max(0, int(os.getenv("SEMANTIC_GRAPH_MAX_REQUESTS", "0")))
+    semantic_graph_max_input_tokens = max(
+        0,
+        int(os.getenv("SEMANTIC_GRAPH_MAX_INPUT_TOKENS", "0")),
+    )
+    semantic_graph_estimated_chars_per_token = max(
+        1.0,
+        float(os.getenv("SEMANTIC_GRAPH_ESTIMATED_CHARS_PER_TOKEN", "4")),
+    )
+    semantic_graph_ready_ratio = min(
+        1.0,
+        max(0.0, float(os.getenv("SEMANTIC_GRAPH_READY_RATIO", "0.95"))),
+    )
+    semantic_graph_degraded_ratio = min(
+        semantic_graph_ready_ratio,
+        max(0.0, float(os.getenv("SEMANTIC_GRAPH_DEGRADED_RATIO", "0.5"))),
+    )
+    semantic_graph_auto_resume_attempts = max(
+        0,
+        min(int(os.getenv("SEMANTIC_GRAPH_AUTO_RESUME_ATTEMPTS", "2")), 2),
+    )
+    semantic_graph_auto_resume_delay_seconds = max(
+        0.0,
+        float(os.getenv("SEMANTIC_GRAPH_AUTO_RESUME_DELAY_SECONDS", "2")),
+    )
     research_agent_max_papers = int(os.getenv("RESEARCH_AGENT_MAX_PAPERS", "100"))
     research_agent_max_sources = int(os.getenv("RESEARCH_AGENT_MAX_SOURCES", "6"))
     rag_chunk_target_tokens = int(os.getenv("RAG_CHUNK_TARGET_TOKENS", "500"))
@@ -205,4 +292,6 @@ class Settings:
     )
 
 
-settings = Settings()
+_initial_settings = Settings()
+runtime_config_manager = RuntimeConfigManager.from_object(_initial_settings)
+settings = RuntimeSettingsProxy(runtime_config_manager)

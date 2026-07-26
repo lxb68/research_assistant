@@ -13,7 +13,11 @@ import {
 import { SavedPaper } from "@/lib/papers";
 import { splitDelimitedText, uniqueTrimmedValues } from "@/lib/text";
 import { useBackgroundTasks } from "@/app/_components/BackgroundTaskProvider";
+import { useProjects } from "@/app/_components/ProjectProvider";
 import { fetchJob } from "@/lib/background-jobs";
+
+const ACTIVE_PROJECT_SCOPE = "__active_project__";
+const ALL_PAPERS_SCOPE = "__all_papers__";
 
 type PdfImportForm = {
   title: string;
@@ -77,9 +81,16 @@ export default function DatasetBrowserView({
   isActive = true,
 }: { refreshToken?: number; isActive?: boolean } = {}) {
   const { jobs, registerJob } = useBackgroundTasks();
+  const {
+    projects,
+    activeProjectId,
+    activeProject,
+    isLoadingProjects,
+  } = useProjects();
   const [papers, setPapers] = useState<SavedPaper[]>([]);
   const [query, setQuery] = useState("");
   const queryRef = useRef("");
+  const [projectScope, setProjectScope] = useState(ACTIVE_PROJECT_SCOPE);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [importOpen, setImportOpen] = useState(false);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
@@ -91,17 +102,36 @@ export default function DatasetBrowserView({
   const [importLogs, setImportLogs] = useState<string[]>([]);
   const [splitLogs, setSplitLogs] = useState<string[]>([]);
   const [error, setError] = useState("");
+  const effectiveProjectScope = projectScope === ACTIVE_PROJECT_SCOPE
+    || projectScope === ALL_PAPERS_SCOPE
+    || projects.some((project) => project.id === projectScope)
+    ? projectScope
+    : ACTIVE_PROJECT_SCOPE;
+  const resolvedProjectId = effectiveProjectScope === ALL_PAPERS_SCOPE
+    ? ""
+    : effectiveProjectScope === ACTIVE_PROJECT_SCOPE
+      ? activeProjectId
+      : effectiveProjectScope;
+  const scopedProject = projects.find((project) => project.id === resolvedProjectId);
+  const scopeLabel = resolvedProjectId
+    ? scopedProject?.name || activeProject?.name || "当前项目"
+    : "全部文献";
 
-  /** 按关键词加载本地论文列表。 */
+  /** 按项目范围和关键词加载本地论文列表。 */
   const loadPapers = useCallback(async (keyword = "") => {
     setIsLoading(true);
     setError("");
 
     try {
-      const url = buildApiUrl("/api/papers");
-      url.searchParams.set("limit", "120");
-      if (keyword.trim()) {
-        url.searchParams.set("keyword", keyword.trim());
+      const normalizedKeyword = keyword.trim().toLocaleLowerCase();
+      const url = resolvedProjectId
+        ? buildApiUrl(`/api/projects/${encodeURIComponent(resolvedProjectId)}/papers`)
+        : buildApiUrl("/api/papers");
+      if (!resolvedProjectId) {
+        url.searchParams.set("limit", "120");
+        if (keyword.trim()) {
+          url.searchParams.set("keyword", keyword.trim());
+        }
       }
 
       const response = await fetch(url, { cache: "no-store" });
@@ -110,7 +140,23 @@ export default function DatasetBrowserView({
         throw new Error(payload.detail || "加载本地数据集失败");
       }
 
-      const nextPapers: SavedPaper[] = payload.papers ?? [];
+      const loadedPapers = (payload.papers ?? []) as SavedPaper[];
+      const nextPapers = resolvedProjectId && normalizedKeyword
+        ? loadedPapers.filter((paper) => (
+          [
+            paper.title,
+            paper.abstract,
+            paper.doi,
+            paper.keyword,
+            ...(paper.authors ?? []),
+            ...(paper.customTags ?? []),
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLocaleLowerCase()
+            .includes(normalizedKeyword)
+        ))
+        : loadedPapers;
       setPapers(nextPapers);
       setSelectedIds((currentIds) => {
         const availableIds = new Set(nextPapers.map((paper) => paper.id).filter(Boolean));
@@ -121,7 +167,7 @@ export default function DatasetBrowserView({
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [resolvedProjectId]);
 
   const latestTerminalZoteroJobId =
     jobs.find((job) =>
@@ -207,8 +253,8 @@ export default function DatasetBrowserView({
       if (current.status !== "completed" || !current.result?.paper) {
         throw new Error(current.error || current.message || "导入结束，但没有收到论文结果");
       }
-      const importedPaper = current.result.paper as SavedPaper;
-      setPapers((currentPapers) => [importedPaper, ...currentPapers.filter((paper) => paper.id !== importedPaper.id)]);
+      // 自定义项目不会自动接收全局导入文献，重新按当前范围查询，避免误显示未关联记录。
+      await loadPapers(queryRef.current);
 
       setPdfFile(null);
       setPdfImportForm(emptyPdfImportForm);
@@ -227,7 +273,7 @@ export default function DatasetBrowserView({
       return;
     }
 
-    if (!window.confirm(`确定删除选中的 ${ids.length} 条记录吗？`)) {
+    if (!window.confirm(`确定永久删除选中的 ${ids.length} 条记录吗？删除会影响包含这些文献的所有项目。`)) {
       return;
     }
 
@@ -332,6 +378,37 @@ export default function DatasetBrowserView({
   return (
     <main className="dataset-browser-page">
       <section className="dataset-browser-panel">
+        <div className="dataset-library-scope">
+          <label>
+            <span>文献范围</span>
+            <select
+              value={effectiveProjectScope}
+              disabled={isLoadingProjects || isLoading}
+              onChange={(event) => setProjectScope(event.target.value)}
+            >
+              <option value={ACTIVE_PROJECT_SCOPE}>
+                当前项目：{activeProject?.name || "正在加载"}
+              </option>
+              <option value={ALL_PAPERS_SCOPE}>全部文献</option>
+              {projects
+                .filter((project) => project.id !== activeProjectId)
+                .map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}（{project.paperCount} 篇）
+                  </option>
+                ))}
+            </select>
+          </label>
+          <div>
+            <strong>{scopeLabel}</strong>
+            <span>
+              {resolvedProjectId
+                ? `仅展示该项目关联的文献 PDF，当前可见 ${papers.length} 篇。`
+                : `展示本地文献库中的全部记录，当前可见 ${papers.length} 篇。`}
+            </span>
+          </div>
+        </div>
+
         <form className="dataset-browser-toolbar" onSubmit={handleSubmit}>
           <input
             value={query}
@@ -451,8 +528,12 @@ export default function DatasetBrowserView({
           </div>
         ) : !error && papers.length === 0 ? (
           <div className="dataset-browser-empty">
-            <strong>暂无已保存论文</strong>
-            <span>可以先下载数据集，或者在这里导入 PDF 文献。</span>
+            <strong>{resolvedProjectId ? "该项目暂无匹配文献" : "暂无已保存论文"}</strong>
+            <span>
+              {resolvedProjectId
+                ? "可在“项目知识空间”中把已有文献加入该项目；新导入文献不会自动加入自定义项目。"
+                : "可以先下载数据集，或者在这里导入 PDF 文献。"}
+            </span>
           </div>
         ) : (
           <div className="dataset-card-grid">

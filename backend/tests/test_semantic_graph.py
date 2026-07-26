@@ -19,6 +19,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.services.semantic_graph import SemanticGraphExtractor, SemanticSourceDocument, TextChunk
+from app.services.model_client import ModelCallError, ModelCallResult, ModelUsage
 from app.agents.domainTree_agent import DomainTreeAgent, SourceDocument
 
 
@@ -72,8 +73,11 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
             ],
         }
 
+        call_options: list[dict[str, object]] = []
+
         def fake_chat(*args: object, **kwargs: object) -> str:
             """返回固定 JSON，避免测试访问外部模型。"""
+            call_options.append(dict(kwargs))
             return json.dumps(model_payload)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -96,6 +100,8 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
         self.assertEqual(relation["relationType"], "experimental")
         self.assertTrue(relation["evidenceIds"])
         self.assertIn(relation["evidenceIds"][0], {item["id"] for item in result["evidence"]})
+        self.assertTrue(call_options)
+        self.assertTrue(all(options.get("thinking") is False for options in call_options))
 
     def test_discards_relation_when_quote_is_not_in_source(self) -> None:
         """模型虚构的证据无法回定位时，不得进入最终关系图。"""
@@ -178,6 +184,56 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
         self.assertEqual(calls, 2)
         self.assertEqual(result["extraction"]["processedChunkCount"], 1)
         self.assertEqual(updates[-1]["completedChunks"], 1)
+        self.assertEqual(updates[-1]["pendingChunks"], 0)
+
+    def test_retries_structured_empty_response_and_preserves_failed_usage(self) -> None:
+        """供应商偶发空回答应按配置重试，失败尝试的 Token 用量不能丢失。"""
+        calls = 0
+        metrics: list[dict] = []
+
+        def flaky_chat(*args: object, **kwargs: object) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ModelCallError(
+                    "模型返回了空回答",
+                    category="empty_response",
+                    retryable=True,
+                    request_accepted=True,
+                    request_id="empty-request",
+                    finish_reason="stop",
+                    usage=ModelUsage(
+                        prompt_tokens=100,
+                        completion_tokens=200,
+                        total_tokens=300,
+                        reasoning_tokens=200,
+                    ),
+                )
+            return json.dumps({"entities": [], "relations": []})
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "paper.md"
+            path.write_text("# Method\n\nA short research method description.", encoding="utf-8")
+            extractor = SemanticGraphExtractor(
+                {"model": "test"},
+                chat_fn=flaky_chat,
+                metric_callback=metrics.append,
+            )
+            with (
+                patch("app.services.semantic_graph.settings.domain_tree_retry_attempts", 2),
+                patch("app.services.semantic_graph.settings.domain_tree_retry_base_delay_seconds", 0),
+            ):
+                result = extractor.extract([SemanticSourceDocument("p", "Paper", path)])
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(result["extraction"]["processedChunkCount"], 1)
+        self.assertEqual(metrics[0]["status"], "failed")
+        self.assertEqual(metrics[0]["errorCategory"], "empty_response")
+        self.assertEqual(metrics[0]["requestId"], "empty-request")
+        self.assertEqual(metrics[0]["finishReason"], "stop")
+        self.assertEqual(metrics[0]["completionTokens"], 200)
+        self.assertEqual(metrics[0]["totalTokens"], 300)
+        self.assertEqual(metrics[0]["reasoningTokens"], 200)
 
     def test_cancelled_extraction_stops_before_model_call(self) -> None:
         """已取消任务不得继续启动新的模型请求。"""
@@ -238,7 +294,7 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
         self.assertIn('"type": "model"', prompt)
         self.assertNotIn('"type": "实体类型"', prompt)
 
-    def test_retries_once_when_english_type_contains_chinese(self) -> None:
+    def test_normalizes_invalid_type_without_second_model_call(self) -> None:
         """英文模式遇到中文类型时应定向纠正一次，并保留其余原文字段。"""
         calls: list[list[dict[str, str]]] = []
         invalid_payload = {
@@ -255,13 +311,9 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
             ],
             "relations": [],
         }
-        corrected_payload = json.loads(json.dumps(invalid_payload, ensure_ascii=False))
-        corrected_payload["entities"][0]["type"] = "method"
-
         def fake_chat(*args: object, **kwargs: object) -> str:
             calls.append(args[1])
-            payload = invalid_payload if len(calls) == 1 else corrected_payload
-            return json.dumps(payload, ensure_ascii=False)
+            return json.dumps(invalid_payload, ensure_ascii=False)
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "paper.md"
@@ -272,9 +324,8 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
                 chat_fn=fake_chat,
             ).extract([SemanticSourceDocument("paper", "English Paper", path)])
 
-        self.assertEqual(len(calls), 2)
-        self.assertIn("Change only those type values", calls[1][-1]["content"])
-        self.assertEqual(result["entities"][0]["type"], "method")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result["entities"][0]["type"], "entity")
         self.assertEqual(result["entities"][0]["name"], "Method A")
 
     def test_replaces_repeated_language_violation_with_generic_type(self) -> None:
@@ -307,7 +358,7 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
                 chat_fn=fake_chat,
             ).extract([SemanticSourceDocument("paper", "English Paper", path)])
 
-        self.assertEqual(calls, 2)
+        self.assertEqual(calls, 1)
         self.assertEqual(result["entities"][0]["type"], "entity")
         self.assertEqual(result["entities"][0]["rawTypes"], ["方法"])
 
@@ -534,6 +585,94 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
         self.assertEqual(result["extraction"]["maxWorkers"], 4)
         self.assertGreater(maximum_active_calls, 1)
         self.assertLessEqual(maximum_active_calls, 4)
+
+    def test_reports_usage_quality_and_failure_reasons(self) -> None:
+        """抽取摘要必须暴露真实用量、覆盖率和结构化失败原因。"""
+        calls = 0
+        metrics: list[dict] = []
+
+        def fake_chat(*args: object, **kwargs: object) -> ModelCallResult:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return ModelCallResult(
+                    json.dumps({"entities": [], "relations": []}),
+                    ModelUsage(100, 20, 120, 10),
+                    "request-1",
+                )
+            raise ModelCallError(
+                "模型服务返回 HTTP 402",
+                category="quota_exhausted",
+                http_status=402,
+                request_accepted=False,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            documents = []
+            for index in range(2):
+                path = root / f"paper-{index}.md"
+                path.write_text(f"# Method\n\nResearch method {index}.", encoding="utf-8")
+                documents.append(SemanticSourceDocument(f"p-{index}", f"Paper {index}", path))
+            with patch("app.services.semantic_graph.settings.semantic_graph_ready_ratio", 1.0), patch(
+                "app.services.semantic_graph.settings.semantic_graph_degraded_ratio",
+                0.75,
+            ):
+                result = SemanticGraphExtractor(
+                    {"model": "test"},
+                    chat_fn=fake_chat,
+                    max_workers=1,
+                    metric_callback=metrics.append,
+                ).extract(documents)
+
+        extraction = result["extraction"]
+        self.assertEqual(extraction["processedChunkCount"], 1)
+        self.assertEqual(extraction["failedChunkCount"], 1)
+        self.assertEqual(extraction["qualityStatus"], "failed")
+        self.assertEqual(extraction["failureReasons"]["quota_exhausted"], 1)
+        self.assertEqual(extraction["usage"]["totalTokens"], 120)
+        self.assertEqual(len(metrics), 2)
+
+    def test_circuit_breaker_stops_repeated_fatal_errors(self) -> None:
+        """连续不可恢复错误达到配置阈值后，不得继续访问模型。"""
+        calls = 0
+
+        def rejected(*args: object, **kwargs: object) -> str:
+            nonlocal calls
+            calls += 1
+            raise ModelCallError(
+                "模型服务返回 HTTP 401",
+                category="authentication",
+                http_status=401,
+                request_accepted=False,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            documents = []
+            for index in range(4):
+                path = root / f"paper-{index}.md"
+                path.write_text(f"# Method\n\nResearch method {index}.", encoding="utf-8")
+                documents.append(SemanticSourceDocument(f"p-{index}", f"Paper {index}", path))
+            with patch(
+                "app.services.semantic_graph.settings.semantic_graph_consecutive_fatal_limit",
+                2,
+            ), patch(
+                "app.services.semantic_graph.settings.semantic_graph_failure_window_minimum",
+                4,
+            ):
+                result = SemanticGraphExtractor(
+                    {"model": "test"},
+                    chat_fn=rejected,
+                    max_workers=1,
+                ).extract(documents)
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(result["extraction"]["failedChunkCount"], 4)
+        self.assertEqual(
+            result["extraction"]["circuitOpenReason"],
+            "consecutive_authentication",
+        )
 
 
 class DomainTreeSemanticIntegrationTest(unittest.TestCase):

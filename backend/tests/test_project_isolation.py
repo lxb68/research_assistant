@@ -93,6 +93,32 @@ class ProjectIsolationTest(unittest.TestCase):
         self.assertEqual(set(self.projects.list_paper_ids(project_a["id"])), {"paper-a", "paper-b"})
         self.assertEqual(self.projects.list_paper_ids(project_b["id"]), ["paper-b"])
 
+    def test_renaming_project_preserves_membership(self) -> None:
+        project = self.projects.create(name="旧名称", paper_ids=["paper-a"])
+
+        renamed = self.projects.rename(project["id"], "新名称")
+
+        self.assertEqual(renamed["name"], "新名称")
+        self.assertEqual(self.projects.list_paper_ids(project["id"]), ["paper-a"])
+
+    def test_archiving_project_hides_it_without_deleting_membership(self) -> None:
+        project = self.projects.create(name="待归档", paper_ids=["paper-a"])
+
+        archived = self.projects.archive(project["id"])
+
+        self.assertEqual(archived["status"], "archived")
+        self.assertNotIn(project["id"], {item["id"] for item in self.projects.list()})
+        with closing(self.projects.connect()) as connection:
+            membership = connection.execute(
+                "SELECT paper_id FROM project_papers WHERE project_id = ?",
+                (project["id"],),
+            ).fetchall()
+        self.assertEqual([str(row["paper_id"]) for row in membership], ["paper-a"])
+
+    def test_default_project_cannot_be_archived(self) -> None:
+        with self.assertRaisesRegex(ValueError, "默认研究项目不能删除"):
+            self.projects.archive(DEFAULT_PROJECT_ID)
+
     def test_project_count_ignores_dangling_paper_membership(self) -> None:
         project = self.projects.create(name="项目 A", paper_ids=["paper-a"])
         with closing(sqlite3.connect(self.database)) as connection:

@@ -15,7 +15,13 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.services.model_client import chat_completion, discover_models
+from app.services.model_client import (
+    ModelCallError,
+    ModelUsage,
+    chat_completion,
+    chat_completion_result,
+    discover_models,
+)
 from app.services.model_config import ModelConfigStore
 
 
@@ -54,6 +60,148 @@ class ModelClientTest(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Bearer test-key")
 
     @patch("app.services.model_client.requests.post")
+    def test_openai_detailed_result_preserves_usage(self, post: Mock) -> None:
+        """详细接口必须保留上游 usage，纯文本兼容接口不受影响。"""
+        result_response = response(
+            {
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "length"}],
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 30,
+                    "total_tokens": 150,
+                    "prompt_tokens_details": {"cached_tokens": 20},
+                },
+            }
+        )
+        result_response.headers = {"x-request-id": "request-1"}
+        post.return_value = result_response
+
+        result = chat_completion_result(
+            {
+                "provider": "deepseek",
+                "protocol": "openai_compatible",
+                "base_url": "https://api.deepseek.com",
+                "api_key": "test-key",
+                "model": "deepseek-chat",
+            },
+            self.messages,
+        )
+
+        self.assertEqual(result.content, "ok")
+        self.assertEqual(result.usage.total_tokens, 150)
+        self.assertEqual(result.usage.cached_tokens, 20)
+        self.assertEqual(result.request_id, "request-1")
+        self.assertEqual(result.finish_reason, "length")
+
+    @patch("app.services.model_client.requests.post")
+    def test_empty_openai_answer_preserves_diagnostics_and_is_retryable(self, post: Mock) -> None:
+        """偶发空回答必须保留停止原因和用量，并交给配置化重试器处理。"""
+        empty = response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "reasoning_content": "internal reasoning",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1000,
+                    "completion_tokens": 4096,
+                    "total_tokens": 5096,
+                    "completion_tokens_details": {"reasoning_tokens": 4096},
+                },
+            }
+        )
+        empty.headers = {"x-request-id": "empty-request"}
+        post.return_value = empty
+
+        with self.assertRaises(ModelCallError) as raised:
+            chat_completion_result(
+                {
+                    "provider": "deepseek",
+                    "protocol": "openai_compatible",
+                    "base_url": "https://api.deepseek.com",
+                    "api_key": "test-key",
+                    "model": "test-model",
+                },
+                self.messages,
+                response_format={"type": "json_object"},
+                max_output_tokens=4096,
+            )
+
+        error = raised.exception
+        self.assertEqual(error.category, "empty_response")
+        self.assertTrue(error.retryable)
+        self.assertTrue(error.request_accepted)
+        self.assertEqual(error.request_id, "empty-request")
+        self.assertEqual(error.finish_reason, "stop")
+        self.assertEqual(error.usage, ModelUsage(1000, 4096, 5096, None, 4096))
+        self.assertIn("reasoning_tokens=4096", str(error))
+        self.assertIn("max_output_tokens=4096", str(error))
+
+    @patch("app.services.model_client.requests.post")
+    def test_empty_answer_at_token_limit_is_not_retried_blindly(self, post: Mock) -> None:
+        """输出预算耗尽属于配置问题，应明确提示而不是用相同预算重复请求。"""
+        post.return_value = response(
+            {
+                "choices": [
+                    {
+                        "message": {"content": ""},
+                        "finish_reason": "length",
+                    }
+                ],
+                "usage": {
+                    "completion_tokens": 2048,
+                    "completion_tokens_details": {"reasoning_tokens": 2048},
+                },
+            }
+        )
+
+        with self.assertRaises(ModelCallError) as raised:
+            chat_completion_result(
+                {
+                    "provider": "deepseek",
+                    "protocol": "openai_compatible",
+                    "base_url": "https://api.deepseek.com",
+                    "api_key": "test-key",
+                    "model": "test-model",
+                },
+                self.messages,
+                max_output_tokens=2048,
+            )
+
+        error = raised.exception
+        self.assertEqual(error.category, "output_truncated")
+        self.assertFalse(error.retryable)
+        self.assertIn("关闭该调用场景的思考模式", str(error))
+        self.assertIn("提高输出 Token 配置", str(error))
+
+    @patch("app.services.model_client.requests.post")
+    def test_http_error_is_structured(self, post: Mock) -> None:
+        rejected = response({"error": {"message": "quota exhausted"}}, status_code=402)
+        rejected.headers = {}
+        post.return_value = rejected
+
+        with self.assertRaises(ModelCallError) as raised:
+            chat_completion_result(
+                {
+                    "provider": "custom",
+                    "protocol": "openai_compatible",
+                    "base_url": "https://model.test/v1",
+                    "api_key": "test-key",
+                    "model": "test-model",
+                },
+                self.messages,
+            )
+
+        self.assertEqual(raised.exception.category, "quota_exhausted")
+        self.assertEqual(raised.exception.http_status, 402)
+        self.assertFalse(raised.exception.retryable)
+
+    @patch("app.services.model_client.requests.post")
     def test_openai_compatible_json_output(self, post: Mock) -> None:
         """OpenAI 兼容协议应把 JSON Output 参数传给上游。"""
         post.return_value = response({"choices": [{"message": {"content": '{"action":"chat"}'}}]})
@@ -68,11 +216,32 @@ class ModelClientTest(unittest.TestCase):
             },
             self.messages,
             response_format={"type": "json_object"},
+            max_output_tokens=8192,
         )
 
         self.assertEqual(answer, '{"action":"chat"}')
         self.assertEqual(post.call_args.kwargs["json"]["response_format"], {"type": "json_object"})
-        self.assertEqual(post.call_args.kwargs["json"]["max_tokens"], 4096)
+        self.assertEqual(post.call_args.kwargs["json"]["max_tokens"], 8192)
+
+    @patch("app.services.model_client.requests.post")
+    def test_deepseek_can_disable_thinking_for_structured_extraction(self, post: Mock) -> None:
+        """DeepSeek 场景级开关应映射到官方 thinking 请求字段。"""
+        post.return_value = response({"choices": [{"message": {"content": '{"entities":[]}'}}]})
+
+        chat_completion_result(
+            {
+                "provider": "deepseek",
+                "protocol": "openai_compatible",
+                "base_url": "https://api.deepseek.com",
+                "api_key": "test-key",
+                "model": "deepseek-v4-pro",
+            },
+            self.messages,
+            response_format={"type": "json_object"},
+            thinking=False,
+        )
+
+        self.assertEqual(post.call_args.kwargs["json"]["thinking"], {"type": "disabled"})
 
     @patch("app.services.model_client.requests.post")
     def test_openai_compatible_retries_without_unsupported_response_format(self, post: Mock) -> None:
@@ -97,12 +266,14 @@ class ModelClientTest(unittest.TestCase):
             },
             self.messages,
             response_format={"type": "json_object"},
+            max_output_tokens=8192,
         )
 
         self.assertEqual(answer, '{"action":"chat"}')
         self.assertEqual(post.call_count, 2)
         self.assertIn("response_format", post.call_args_list[0].kwargs["json"])
         self.assertNotIn("response_format", post.call_args_list[1].kwargs["json"])
+        self.assertEqual(post.call_args_list[1].kwargs["json"]["max_tokens"], 8192)
 
     @patch("app.services.model_client.requests.post")
     def test_ollama_chat_without_api_key(self, post: Mock) -> None:
@@ -137,9 +308,11 @@ class ModelClientTest(unittest.TestCase):
             },
             self.messages,
             response_format={"type": "json_object"},
+            max_output_tokens=8192,
         )
 
         self.assertEqual(post.call_args.kwargs["json"]["format"], "json")
+        self.assertEqual(post.call_args.kwargs["json"]["options"]["num_predict"], 8192)
 
     @patch("app.services.model_client.requests.post")
     def test_anthropic_message_conversion(self, post: Mock) -> None:
@@ -152,6 +325,7 @@ class ModelClientTest(unittest.TestCase):
                 "base_url": "https://api.anthropic.com/v1",
                 "api_key": "test-key",
                 "model": "claude-test",
+                "max_output_tokens": 8192,
             },
             self.messages,
         )
@@ -159,6 +333,7 @@ class ModelClientTest(unittest.TestCase):
         self.assertEqual(answer, "Claude 回答")
         self.assertEqual(body["system"], "请简洁回答。")
         self.assertEqual(body["messages"], [{"role": "user", "content": "你好"}])
+        self.assertEqual(body["max_tokens"], 8192)
 
     @patch("app.services.model_client.requests.post")
     def test_gemini_content_conversion(self, post: Mock) -> None:
@@ -196,10 +371,12 @@ class ModelClientTest(unittest.TestCase):
             },
             self.messages,
             response_format={"type": "json_object"},
+            max_output_tokens=8192,
         )
 
         generation_config = post.call_args.kwargs["json"]["generationConfig"]
         self.assertEqual(generation_config["responseMimeType"], "application/json")
+        self.assertEqual(generation_config["maxOutputTokens"], 8192)
 
     @patch("app.services.model_client.requests.get")
     def test_discover_ollama_models(self, get: Mock) -> None:

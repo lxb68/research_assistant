@@ -13,8 +13,15 @@ def _configured(value: object) -> bool:
 
 def get_public_runtime_config() -> dict[str, Any]:
     """返回非敏感参数与凭据配置状态，绝不返回凭据原文。"""
+    from app.services.env_config import EnvConfigStore
+
+    env_status = EnvConfigStore().get_public_config()
     return {
-        "restartRequired": True,
+        "revision": settings.revision,
+        "restartRequired": bool(env_status["restartRequiredKeys"]),
+        "restartRequiredKeys": env_status["restartRequiredKeys"],
+        "reindexRequiredKeys": env_status["reindexRequiredKeys"],
+        "hotReloadAvailable": env_status["hotReloadAvailable"],
         "server": {
             "host": settings.host,
             "port": settings.port,

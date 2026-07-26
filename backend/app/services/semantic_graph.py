@@ -9,13 +9,19 @@ import re
 import threading
 import time
 import unicodedata
+from collections import Counter, deque
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from app.core.config import settings
-from app.services.model_client import chat_completion
+from app.services.model_client import (
+    ModelCallError,
+    ModelCallResult,
+    ModelUsage,
+    chat_completion_result,
+)
 from app.services.task_control import (
     DomainTreeGenerationCancelled,
     call_with_retry,
@@ -68,6 +74,72 @@ class TextChunk:
     start_line: int
 
 
+@dataclass(slots=True)
+class ChunkOutcome:
+    """保留单个语义分块的结果、失败类别和尝试次数。"""
+
+    status: str
+    payload: dict[str, Any] | None
+    error_category: str = ""
+    error_message: str = ""
+    attempts: int = 0
+
+
+class SemanticExtractionCircuitOpen(RuntimeError):
+    """表示共享熔断器或预算已经阻止后续模型调用。"""
+
+
+class _ExtractionGuard:
+    """在线程间共享请求预算和失败窗口，避免各分块独立失控。"""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.request_count = 0
+        self.estimated_input_tokens = 0
+        self.recent: deque[bool] = deque(maxlen=settings.semantic_graph_failure_window)
+        self.consecutive_fatal = 0
+        self.open_reason = ""
+
+    def before_call(self, estimated_input_tokens: int) -> int:
+        with self.lock:
+            if self.open_reason:
+                raise SemanticExtractionCircuitOpen(self.open_reason)
+            next_request = self.request_count + 1
+            next_tokens = self.estimated_input_tokens + max(0, estimated_input_tokens)
+            if settings.semantic_graph_max_requests and next_request > settings.semantic_graph_max_requests:
+                self.open_reason = "request_budget_exceeded"
+                raise SemanticExtractionCircuitOpen(self.open_reason)
+            if (
+                settings.semantic_graph_max_input_tokens
+                and next_tokens > settings.semantic_graph_max_input_tokens
+            ):
+                self.open_reason = "input_token_budget_exceeded"
+                raise SemanticExtractionCircuitOpen(self.open_reason)
+            self.request_count = next_request
+            self.estimated_input_tokens = next_tokens
+            return next_request
+
+    def record(self, *, success: bool, category: str = "") -> None:
+        with self.lock:
+            if self.open_reason:
+                return
+            self.recent.append(success)
+            if success:
+                self.consecutive_fatal = 0
+            elif category in {"authentication", "quota_exhausted", "not_found"}:
+                self.consecutive_fatal += 1
+            else:
+                self.consecutive_fatal = 0
+            if self.consecutive_fatal >= settings.semantic_graph_consecutive_fatal_limit:
+                self.open_reason = f"consecutive_{category}"
+                return
+            if len(self.recent) < settings.semantic_graph_failure_window_minimum:
+                return
+            failure_rate = 1 - (sum(self.recent) / len(self.recent))
+            if failure_rate > settings.semantic_graph_failure_rate_limit:
+                self.open_reason = "failure_rate_exceeded"
+
+
 class SemanticGraphExtractor:
     """调用当前模型抽取全文语义，并用确定性规则解析参考文献。"""
 
@@ -75,25 +147,41 @@ class SemanticGraphExtractor:
         self,
         runtime: dict[str, str] | None,
         *,
-        chat_fn: Callable[..., str] = chat_completion,
-        chunk_size: int = 6000,
-        chunk_overlap: int = 400,
+        chat_fn: Callable[..., str | ModelCallResult] = chat_completion_result,
+        chunk_size: int = settings.semantic_graph_chunk_size,
+        chunk_overlap: int = settings.semantic_graph_chunk_overlap,
+        max_output_tokens: int = settings.semantic_graph_max_output_tokens,
         entity_type_language: str = "English",
         cache_dir: str | Path | None = None,
-        max_workers: int = 4,
+        max_workers: int = settings.semantic_graph_max_workers,
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        metric_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         """初始化模型配置、调用函数与分块参数。"""
         self.runtime = dict(runtime or {})
         self.chat_fn = chat_fn
         self.chunk_size = max(1200, chunk_size)
         self.chunk_overlap = max(0, min(chunk_overlap, self.chunk_size // 3))
+        self.max_output_tokens = max(
+            1,
+            min(settings.model_output_tokens_upper_bound, int(max_output_tokens)),
+        )
         self.entity_type_language = self._normalize_entity_type_language(entity_type_language)
         self.cache_dir = Path(cache_dir).resolve() if cache_dir else None
         self.max_workers = max(1, min(int(max_workers), 16))
         self.cancel_event = cancel_event
         self.progress_callback = progress_callback
+        self.metric_callback = metric_callback
+        self._guard = _ExtractionGuard()
+        self._usage_lock = threading.Lock()
+        self._usage = {
+            "promptTokens": 0,
+            "completionTokens": 0,
+            "totalTokens": 0,
+            "cachedTokens": 0,
+            "reportedCallCount": 0,
+        }
 
     def extract(self, documents: Iterable[SemanticSourceDocument]) -> dict[str, Any]:
         """抽取所有文献并合并跨分块重复实体。"""
@@ -167,6 +255,7 @@ class SemanticGraphExtractor:
             failedChunks=0,
             cacheHits=0,
             cacheMisses=0,
+            pendingChunks=0,
             maxWorkers=self.max_workers,
         )
 
@@ -192,6 +281,7 @@ class SemanticGraphExtractor:
                 work_items.append((len(work_items), document, chunk))
 
         results: dict[int, dict[str, Any] | None] = {}
+        failure_reasons: Counter[str] = Counter()
         uncached_items: list[tuple[int, SemanticSourceDocument, TextChunk, str]] = []
         for order, document, chunk in work_items:
             raise_if_cancelled(self.cancel_event)
@@ -224,6 +314,7 @@ class SemanticGraphExtractor:
                 failedChunks=state["failedChunkCount"],
                 cacheHits=cache_hit_count,
                 cacheMisses=cache_miss_count,
+                pendingChunks=cache_miss_count,
             )
 
         if uncached_items:
@@ -233,12 +324,23 @@ class SemanticGraphExtractor:
                 cache_miss_count,
                 self.max_workers,
             )
+            self._report_progress(
+                stage="semantic_extraction",
+                message=f"正在并发抽取语义分块 {completed_chunks}/{total_chunks}",
+                completedChunks=completed_chunks,
+                processedChunks=state["processedChunkCount"],
+                failedChunks=state["failedChunkCount"],
+                cacheHits=cache_hit_count,
+                cacheMisses=cache_miss_count,
+                pendingChunks=cache_miss_count,
+                maxWorkers=self.max_workers,
+            )
             executor = ThreadPoolExecutor(
                 max_workers=self.max_workers,
                 thread_name_prefix="semantic-graph",
             )
             futures: dict[
-                Future[dict[str, Any] | None],
+                Future[ChunkOutcome],
                 tuple[int, SemanticSourceDocument, TextChunk, str],
             ] = {
                 executor.submit(self._extract_chunk, document, chunk): (
@@ -253,14 +355,16 @@ class SemanticGraphExtractor:
                 for future in as_completed(futures):
                     raise_if_cancelled(self.cancel_event)
                     order, document, chunk, cache_key = futures[future]
-                    payload = future.result()
-                    results[order] = payload
+                    outcome = future.result()
+                    results[order] = outcome.payload
                     completed_chunks += 1
-                    if payload is None:
+                    if outcome.status == "failed":
                         state["failedChunkCount"] += 1
+                        failure_reasons[outcome.error_category or "unknown"] += 1
                     else:
                         state["processedChunkCount"] += 1
-                        self._save_cached_payload(cache_key, payload)
+                        if outcome.payload is not None:
+                            self._save_cached_payload(cache_key, outcome.payload)
                     self._report_progress(
                         stage="semantic_extraction",
                         message=f"正在并发抽取语义分块 {completed_chunks}/{total_chunks}",
@@ -271,6 +375,10 @@ class SemanticGraphExtractor:
                         failedChunks=state["failedChunkCount"],
                         cacheHits=cache_hit_count,
                         cacheMisses=cache_miss_count,
+                        pendingChunks=max(
+                            0,
+                            cache_miss_count - (completed_chunks - cache_hit_count),
+                        ),
                     )
             finally:
                 if self.cancel_event is not None and self.cancel_event.is_set():
@@ -318,6 +426,13 @@ class SemanticGraphExtractor:
             len(citations),
             (time.perf_counter() - extraction_started_at) * 1000,
         )
+        coverage_ratio = state["processedChunkCount"] / total_chunks if total_chunks else 0.0
+        if coverage_ratio >= settings.semantic_graph_ready_ratio:
+            quality_status = "ready"
+        elif coverage_ratio >= settings.semantic_graph_degraded_ratio:
+            quality_status = "degraded"
+        else:
+            quality_status = "failed"
         return {
             "entities": entities,
             "semanticRelations": relations,
@@ -335,13 +450,33 @@ class SemanticGraphExtractor:
                 "semanticRelationCount": len(relations),
                 "citationCount": len(citations),
                 "evidenceCount": len(evidence),
+                "coverageRatio": round(coverage_ratio, 6),
+                "qualityStatus": quality_status,
+                "failureReasons": dict(failure_reasons),
+                "circuitOpenReason": self._guard.open_reason,
+                "requestCount": self._guard.request_count,
+                "estimatedInputTokens": self._guard.estimated_input_tokens,
+                "usage": dict(self._usage),
                 **type_normalization,
             },
         }
 
     def _report_progress(self, **update: Any) -> None:
         """把进度增量上报给任务管理器。"""
-        if self.progress_callback:
+        if not self.progress_callback:
+            return
+        completed = int(update.get("completedChunks") or 0)
+        total = int(update.get("totalChunks") or 0)
+        stage = str(update.get("stage") or "")
+        important = (
+            completed == 0
+            or (total > 0 and completed >= total)
+            or completed % settings.semantic_graph_progress_interval == 0
+            or stage != getattr(self, "_last_progress_stage", "")
+            or "retryAttempt" in update
+        )
+        if important:
+            self._last_progress_stage = stage
             self.progress_callback(update)
 
     def _chunk_cache_key(self, document: SemanticSourceDocument, chunk: TextChunk) -> str:
@@ -495,11 +630,11 @@ class SemanticGraphExtractor:
         self,
         document: SemanticSourceDocument,
         chunk: TextChunk,
-    ) -> dict[str, Any] | None:
+    ) -> ChunkOutcome:
         """调用模型抽取单个正文分块的实体、属性和关系。"""
         if not self.runtime:
             logger.warning("[%s] 未配置模型，跳过第 %s 个语义分块", document.record_id, chunk.index)
-            return None
+            return ChunkOutcome("failed", None, "model_not_configured", "模型未配置")
         prompt = self._build_extraction_prompt(document, chunk)
         messages = self._build_extraction_messages(prompt)
         started_at = time.perf_counter()
@@ -514,10 +649,10 @@ class SemanticGraphExtractor:
             settings.request_timeout,
         )
         try:
-            answer = self._call_chunk_model(messages, document, chunk)
+            answer, attempts = self._call_chunk_model(messages, document, chunk)
             payload = self._extract_json_object(answer)
             invalid_types = self._invalid_entity_types(payload)
-            if invalid_types:
+            if invalid_types and settings.semantic_graph_type_language_model_correction:
                 logger.warning(
                     "[%s] 实体类型语言不符合要求：chunk=%s expected=%s types=%s，正在纠正",
                     document.record_id,
@@ -530,7 +665,12 @@ class SemanticGraphExtractor:
                     {"role": "assistant", "content": answer},
                     {"role": "user", "content": self._build_type_language_correction(invalid_types)},
                 ]
-                answer = self._call_chunk_model(correction_messages, document, chunk)
+                answer, correction_attempts = self._call_chunk_model(
+                    correction_messages,
+                    document,
+                    chunk,
+                )
+                attempts += correction_attempts
                 payload = self._extract_json_object(answer)
                 remaining_invalid_types = self._invalid_entity_types(payload)
                 if remaining_invalid_types:
@@ -542,6 +682,9 @@ class SemanticGraphExtractor:
                         remaining_invalid_types,
                     )
                     self._replace_invalid_entity_types(payload)
+            remaining_invalid_types = self._invalid_entity_types(payload)
+            if remaining_invalid_types:
+                self._replace_invalid_entity_types(payload)
             entities = payload.get("entities") if isinstance(payload.get("entities"), list) else []
             relations = payload.get("relations") if isinstance(payload.get("relations"), list) else []
             logger.info(
@@ -555,10 +698,13 @@ class SemanticGraphExtractor:
                 len(relations),
                 _log_text_preview(answer),
             )
-            return payload
+            self._guard.record(success=True)
+            return ChunkOutcome("success", payload, attempts=attempts)
         except DomainTreeGenerationCancelled:
             raise
         except Exception as error:
+            category = self._error_category(error)
+            self._guard.record(success=False, category=category)
             logger.warning(
                 "[%s] 第 %s 个语义分块抽取失败：elapsed_ms=%.1f error=%s",
                 document.record_id,
@@ -566,7 +712,12 @@ class SemanticGraphExtractor:
                 (time.perf_counter() - started_at) * 1000,
                 error,
             )
-            return None
+            return ChunkOutcome(
+                "failed",
+                None,
+                error_category=category,
+                error_message=str(error)[:500],
+            )
 
     def _build_extraction_messages(self, prompt: str) -> list[dict[str, str]]:
         """构造与实体类型目标语言一致的模型消息。"""
@@ -593,15 +744,64 @@ class SemanticGraphExtractor:
         messages: list[dict[str, str]],
         document: SemanticSourceDocument,
         chunk: TextChunk,
-    ) -> str:
+    ) -> tuple[str, int]:
         """统一执行分块抽取和语言纠错请求，并复用传输层重试策略。"""
-        return call_with_retry(
-            lambda: self.chat_fn(
-                self.runtime,
-                messages,
-                temperature=0.0,
-                timeout=settings.request_timeout,
+        attempts = 0
+        estimated_tokens = max(
+            1,
+            int(
+                sum(len(str(message.get("content") or "")) for message in messages)
+                / settings.semantic_graph_estimated_chars_per_token
             ),
+        )
+
+        def operation() -> ModelCallResult:
+            nonlocal attempts
+            attempts += 1
+            self._guard.before_call(estimated_tokens)
+            started_at = time.perf_counter()
+            try:
+                raw = self.chat_fn(
+                    self.runtime,
+                    messages,
+                    temperature=0.0,
+                    timeout=settings.request_timeout,
+                    response_format=(
+                        {"type": "json_object"}
+                        if settings.semantic_graph_json_output
+                        else None
+                    ),
+                    max_output_tokens=self.max_output_tokens,
+                    # 结构化抽取是确定性任务，关闭 DeepSeek 默认思考，避免推理耗尽 JSON 输出预算。
+                    thinking=False,
+                )
+                result = (
+                    raw
+                    if isinstance(raw, ModelCallResult)
+                    else ModelCallResult(str(raw), ModelUsage())
+                )
+                self._record_model_metric(
+                    document,
+                    chunk,
+                    attempts,
+                    "success",
+                    result=result,
+                    elapsed_ms=(time.perf_counter() - started_at) * 1000,
+                )
+                return result
+            except Exception as error:
+                self._record_model_metric(
+                    document,
+                    chunk,
+                    attempts,
+                    "failed",
+                    error=error,
+                    elapsed_ms=(time.perf_counter() - started_at) * 1000,
+                )
+                raise
+
+        result = call_with_retry(
+            operation,
             max_attempts=settings.domain_tree_retry_attempts,
             base_delay_seconds=settings.domain_tree_retry_base_delay_seconds,
             cancel_event=self.cancel_event,
@@ -613,6 +813,85 @@ class SemanticGraphExtractor:
                 delay,
             ),
         )
+        return result.content, attempts
+
+    def _record_model_metric(
+        self,
+        document: SemanticSourceDocument | None,
+        chunk: TextChunk | None,
+        attempt: int,
+        status: str,
+        *,
+        stage: str = "semantic_extraction",
+        result: ModelCallResult | None = None,
+        error: Exception | None = None,
+        elapsed_ms: float,
+    ) -> None:
+        model_error = error if isinstance(error, ModelCallError) else None
+        usage = (
+            result.usage
+            if result is not None
+            else (model_error.usage if model_error is not None else ModelUsage())
+        )
+        with self._usage_lock:
+            self._usage["reportedCallCount"] += 1
+            self._usage["promptTokens"] += usage.prompt_tokens or 0
+            self._usage["completionTokens"] += usage.completion_tokens or 0
+            self._usage["totalTokens"] += usage.total_tokens or 0
+            self._usage["cachedTokens"] += usage.cached_tokens or 0
+        if not self.metric_callback:
+            return
+        self.metric_callback(
+            {
+                "stage": stage,
+                "documentId": document.record_id if document else None,
+                "chunkIndex": chunk.index if chunk else None,
+                "attempt": attempt,
+                "status": status,
+                "errorCategory": self._error_category(error) if error else None,
+                "httpStatus": model_error.http_status if model_error else None,
+                "requestAccepted": model_error.request_accepted if model_error else None,
+                "requestId": (
+                    result.request_id
+                    if result is not None
+                    else (model_error.request_id if model_error else "")
+                ),
+                "finishReason": (
+                    result.finish_reason
+                    if result is not None
+                    else (model_error.finish_reason if model_error else "")
+                ),
+                "promptTokens": usage.prompt_tokens,
+                "completionTokens": usage.completion_tokens,
+                "totalTokens": usage.total_tokens,
+                "cachedTokens": usage.cached_tokens,
+                "reasoningTokens": usage.reasoning_tokens,
+                "elapsedMs": elapsed_ms,
+            }
+        )
+
+    @staticmethod
+    def _error_category(error: Exception | None) -> str:
+        if isinstance(error, ModelCallError):
+            return error.category
+        if isinstance(error, SemanticExtractionCircuitOpen):
+            return str(error) or "circuit_open"
+        text = str(error or "").lower()
+        if "json" in text:
+            return "invalid_json"
+        if "timeout" in text or "timed out" in text:
+            return "timeout"
+        if "http 429" in text:
+            return "rate_limited"
+        if "http 401" in text or "http 403" in text:
+            return "authentication"
+        if "http 402" in text:
+            return "quota_exhausted"
+        if "http 404" in text:
+            return "not_found"
+        if re.search(r"http 5\d\d", text):
+            return "upstream"
+        return "unknown"
 
     def _build_type_language_correction(self, invalid_types: list[str]) -> str:
         """要求模型仅纠正类型语言并完整返回原 JSON。"""
@@ -655,114 +934,26 @@ class SemanticGraphExtractor:
         )
 
     def _build_extraction_prompt(self, document: SemanticSourceDocument, chunk: TextChunk) -> str:
-        """构造严格、可被多种模型理解的 JSON 抽取提示词。"""
+        """构造紧凑 JSON 契约，减少每个分块重复发送的固定 Token。"""
         if self.entity_type_language == "English":
-            return f"""Extract entities, entity attributes, and relations from the research text below.
-
-Document ID: {document.record_id}
-Document title: {document.title}
-Section: {chunk.section}
-
-Requirements:
-1. Keep only research-relevant entities, such as methods, models, algorithms, materials, diseases, drugs, genes, datasets, metrics, organizations, people, tasks, and theories.
-2. canonicalName must be the most complete source-language name; aliases may contain only aliases or abbreviations explicitly present in the source.
-3. Attributes must be explicit source parameters, values, units, times, performance measurements, or categories.
-4. relationType must be one of general, causal, comparison, experimental, or property.
-5. Use causal only for an explicit causal claim; never turn correlation into causation.
-6. evidenceQuote must be copied verbatim from this chunk. Omit an item if no direct quote supports it.
-7. confidence must be a number from 0 to 1.
-8. Relation source and target must use entity localId values.
-9. name, canonicalName, aliases, attribute names, and attribute values must preserve the source language and terminology without translation.
-10. predicate must preserve the source language; never translate a relation phrase.
-11. evidenceQuote must preserve the source language verbatim without translation, rewriting, or summarization.
-12. type is an inferred category label. It must use concise English only and must never contain Chinese characters. It does not need to appear verbatim in the source.
-
-Return exactly this JSON shape:
-{{
-  "entities": [
-    {{
-      "localId": "e1",
-      "name": "source name",
-      "canonicalName": "canonical source name",
-      "type": "model",
-      "aliases": ["source alias"],
-      "attributes": [{{"name": "source attribute name", "value": "source attribute value", "unit": "source unit"}}],
-      "evidenceQuote": "verbatim source quote"
-    }}
-  ],
-  "relations": [
-    {{
-      "source": "e1",
-      "target": "e2",
-      "predicate": "source relation phrase",
-      "relationType": "general",
-      "confidence": 0.9,
-      "evidenceQuote": "verbatim source quote"
-    }}
-  ]
-}}
-
-Source text:
+            return f"""Extract research entities, explicit attributes, and relations as JSON.
+Context: document={document.record_id}; title={document.title}; section={chunk.section}
+Rules:
+- Names, aliases, attributes, and quotes must preserve the source language; canonicalName is the fullest source form; predicate must preserve the source language.
+- type is an inferred category label and must be concise English. relationType is general|causal|comparison|experimental|property; use causal only for explicit causation.
+- Every item needs an exact evidenceQuote from this chunk; omit unsupported items. Relations reference entity localId; confidence is 0..1.
+Schema: {{"entities":[{{"localId":"e1","name":"","canonicalName":"","type": "model","aliases":[],"attributes":[{{"name":"","value":"","unit":""}}],"evidenceQuote":""}}],"relations":[{{"source":"e1","target":"e2","predicate":"","relationType":"general","confidence":0.9,"evidenceQuote":""}}]}}
+Source:
 {chunk.text}
 """
 
-        type_rule = "type 是推断得到的分类标签，必须使用简洁中文，不要求逐字出现在原文中。"
-        example = {
-            "name": "原文名称",
-            "canonical": "规范名称",
-            "type": "模型",
-            "alias": "原文别名",
-            "attribute_name": "原文属性名",
-            "attribute_value": "原文属性值",
-            "unit": "原文单位",
-            "quote": "原文短句",
-            "predicate": "原文关系名称",
-        }
-        return f"""请从以下科研文献原文抽取实体、实体属性和实体间关系。
-
-文献ID：{document.record_id}
-文献标题：{document.title}
-章节：{chunk.section}
-
-要求：
-1. 实体只保留具有研究意义的对象，例如方法、模型、算法、材料、疾病、药物、基因、数据集、指标、机构、人物、任务和理论。
-2. canonicalName 使用原文中最完整、最规范的名称；aliases 只填写原文明确出现的别名或缩写。
-3. 属性必须是原文明示的参数、数值、单位、时间、性能或类别。
-4. relationType 只能是 general、causal、comparison、experimental、property 之一。
-5. causal 只用于原文明示的导致、促进、抑制、影响等因果关系，不能把相关性写成因果。
-6. evidenceQuote 必须逐字复制本段中的短句，禁止改写；无法找到直接证据时不要输出该项。
-7. confidence 使用 0 到 1 之间的数字。
-8. 关系的 source 和 target 使用 entities 中的 localId。
-9. name、canonicalName、aliases、属性名称与值必须使用原文语言和原文术语，禁止翻译。
-10. predicate 必须使用原文语言描述，禁止把英文关系翻译为中文或把中文关系翻译为英文。
-11. evidenceQuote 必须保持原文语言并逐字引用，禁止翻译、改写或概括。
-12. {type_rule}
-
-严格返回以下结构：
-{{
-  "entities": [
-    {{
-      "localId": "e1",
-      "name": "{example['name']}",
-      "canonicalName": "{example['canonical']}",
-      "type": "{example['type']}",
-      "aliases": ["{example['alias']}"],
-      "attributes": [{{"name": "{example['attribute_name']}", "value": "{example['attribute_value']}", "unit": "{example['unit']}"}}],
-      "evidenceQuote": "{example['quote']}"
-    }}
-  ],
-  "relations": [
-    {{
-      "source": "e1",
-      "target": "e2",
-      "predicate": "{example['predicate']}",
-      "relationType": "general",
-      "confidence": 0.9,
-      "evidenceQuote": "{example['quote']}"
-    }}
-  ]
-}}
-
+        return f"""从科研原文抽取研究实体、明示属性和实体关系，仅返回 JSON。
+上下文：文献={document.record_id}；标题={document.title}；章节={chunk.section}
+规则：
+- 名称、别名、属性、谓词和引文保持原文语言；canonicalName 使用原文中最完整形式。
+- type 使用简洁中文分类；relationType 仅限 general|causal|comparison|experimental|property，只有明示因果才用 causal。
+- 每项必须有本段逐字 evidenceQuote，无直接证据则省略；关系引用实体 localId；confidence 范围为 0..1。
+结构：{{"entities":[{{"localId":"e1","name":"","canonicalName":"","type":"","aliases":[],"attributes":[{{"name":"","value":"","unit":""}}],"evidenceQuote":""}}],"relations":[{{"source":"e1","target":"e2","predicate":"","relationType":"general","confidence":0.9,"evidenceQuote":""}}]}}
 原文：
 {chunk.text}
 """
@@ -1035,17 +1226,75 @@ Return shape:
             stage="semantic_type_normalization",
             message=f"正在归并 {len(labels)} 个实体类型",
         )
+        if self._guard.open_reason:
+            return None
         try:
-            answer = call_with_retry(
-                lambda: self.chat_fn(
-                    self.runtime,
-                    messages,
-                    temperature=0.0,
-                    timeout=settings.request_timeout,
+            attempts = 0
+            estimated_tokens = max(
+                1,
+                int(
+                    sum(len(str(message.get("content") or "")) for message in messages)
+                    / settings.semantic_graph_estimated_chars_per_token
                 ),
+            )
+
+            def operation() -> ModelCallResult:
+                nonlocal attempts
+                attempts += 1
+                self._guard.before_call(estimated_tokens)
+                started_at = time.perf_counter()
+                try:
+                    raw = self.chat_fn(
+                        self.runtime,
+                        messages,
+                        temperature=0.0,
+                        timeout=settings.request_timeout,
+                        response_format=(
+                            {"type": "json_object"}
+                            if settings.semantic_graph_json_output
+                            else None
+                        ),
+                        max_output_tokens=self.max_output_tokens,
+                        # 类型归并同样是短 JSON 任务，不需要 DeepSeek 的长链推理。
+                        thinking=False,
+                    )
+                    result = (
+                        raw
+                        if isinstance(raw, ModelCallResult)
+                        else ModelCallResult(str(raw), ModelUsage())
+                    )
+                    self._record_model_metric(
+                        None,
+                        None,
+                        attempts,
+                        "success",
+                        stage="semantic_type_normalization",
+                        result=result,
+                        elapsed_ms=(time.perf_counter() - started_at) * 1000,
+                    )
+                    return result
+                except Exception as error:
+                    self._record_model_metric(
+                        None,
+                        None,
+                        attempts,
+                        "failed",
+                        stage="semantic_type_normalization",
+                        error=error,
+                        elapsed_ms=(time.perf_counter() - started_at) * 1000,
+                    )
+                    raise
+
+            raw_answer = call_with_retry(
+                operation,
                 max_attempts=settings.domain_tree_retry_attempts,
                 base_delay_seconds=settings.domain_tree_retry_base_delay_seconds,
                 cancel_event=self.cancel_event,
+            )
+            answer = (
+                raw_answer.content
+                if isinstance(raw_answer, ModelCallResult)
+                else str(raw_answer)
             )
             payload = self._extract_json_object(answer)
             mapping = self._validate_type_mapping(payload, labels)

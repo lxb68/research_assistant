@@ -41,7 +41,7 @@ def get_env_config() -> dict:
 
 @router.post("/api/settings/env-config")
 def update_env_config(payload: EnvConfigUpdateRequest) -> dict:
-    """校验并原子写入 backend/.env；配置在后端重启后生效。"""
+    """原子写入 backend/.env，并按字段影响范围安全刷新运行时配置。"""
     try:
         return {"status": "ok", **EnvConfigStore().update(payload.values)}
     except ValueError as error:

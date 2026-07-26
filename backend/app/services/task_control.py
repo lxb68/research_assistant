@@ -35,6 +35,8 @@ def raise_if_cancelled(cancel_event: Event | None) -> None:
 
 def is_retryable_model_error(error: Exception) -> bool:
     """仅把网络瞬断、限流和上游服务错误视为可重试。"""
+    if getattr(error, "retryable", False):
+        return True
     if isinstance(error, (requests.Timeout, requests.ConnectionError)):
         return True
     message = str(error).lower()

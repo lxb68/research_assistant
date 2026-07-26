@@ -4,8 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-
-DOMAIN_TREE_HEADING_COUNT_MAX = 50
+from app.core.config import settings
 
 
 class DatasetDownloadRequest(BaseModel):
@@ -57,10 +56,28 @@ class ImportPaperRequest(BaseModel):
 
 
 class DomainTreeGenerateOptions(BaseModel):
-    action: Literal["rebuild", "revise", "keep"] = "rebuild"
+    action: Literal["rebuild", "revise", "keep", "resume"] = "rebuild"
     language: Literal["auto", "中文", "English"] = "auto"
-    primary_heading_count: int | None = Field(None, ge=1, le=DOMAIN_TREE_HEADING_COUNT_MAX)
-    secondary_heading_count: int | None = Field(None, ge=0, le=DOMAIN_TREE_HEADING_COUNT_MAX)
+    primary_heading_count: int | None = Field(
+        None,
+        ge=1,
+        le=settings.domain_tree_max_heading_count,
+    )
+    secondary_heading_count: int | None = Field(
+        None,
+        ge=0,
+        le=settings.domain_tree_max_heading_count,
+    )
+    max_output_tokens: int | None = Field(
+        None,
+        ge=1,
+        le=settings.model_output_tokens_upper_bound,
+    )
+    semantic_max_output_tokens: int | None = Field(
+        None,
+        ge=1,
+        le=settings.model_output_tokens_upper_bound,
+    )
     all_toc: str | None = None
     new_toc: str | None = None
     delete_toc: str | None = None
@@ -69,6 +86,14 @@ class DomainTreeGenerateOptions(BaseModel):
 
 class DomainTreeGenerateRequest(DomainTreeGenerateOptions):
     project_id: str = Field(..., min_length=1)
+
+
+class DomainTreeResumeOptions(BaseModel):
+    semantic_max_output_tokens: int | None = Field(
+        None,
+        ge=1,
+        le=settings.model_output_tokens_upper_bound,
+    )
 
 
 class KnowledgeRevisionRequest(BaseModel):
@@ -98,6 +123,10 @@ class ProjectCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     description: str = Field("", max_length=2000)
     paper_ids: list[str] = Field(default_factory=list, max_length=500)
+
+
+class ProjectUpdateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
 
 
 class ProjectPapersRequest(BaseModel):

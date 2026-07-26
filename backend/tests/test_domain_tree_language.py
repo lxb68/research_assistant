@@ -60,6 +60,32 @@ class DomainTreeLanguageTest(unittest.TestCase):
         self.assertEqual([node["label"] for node in constrained[0]["child"]], ["1.1 格密码"])
         self.assertEqual([node["label"] for node in constrained[1]["child"]], ["2.1 强化学习"])
 
+    def test_heading_counts_are_limits_and_do_not_pad_short_tree(self) -> None:
+        """标题数量表示上限，模型结果不足时不应人为补齐。"""
+        generated = [
+            {"label": "1 密码学", "child": [{"label": "1.1 格密码"}]},
+            {"label": "2 机器学习"},
+        ]
+        documents = [SourceDocument("paper", "额外候选主题", "", [], None, None, [])]
+
+        constrained = self.agent._apply_heading_counts(
+            generated,
+            documents,
+            primary_heading_count=15,
+            secondary_heading_count=15,
+        )
+
+        self.assertEqual(len(constrained), 2)
+        self.assertEqual(len(constrained[0]["child"]), 1)
+        self.assertNotIn("child", constrained[1])
+
+    def test_heading_count_prompt_uses_upper_bound_semantics(self) -> None:
+        prompt = self.agent._append_heading_count_constraint("生成领域树", 15, 12, "中文")
+
+        self.assertIn("一级标题最多 15 个", prompt)
+        self.assertIn("最多 12 个二级标题", prompt)
+        self.assertNotIn("必须为", prompt)
+
     def test_zero_secondary_heading_count_removes_children(self) -> None:
         generated = [{"label": "1 密码学", "child": [{"label": "1.1 格密码"}]}]
         documents = [SourceDocument("paper", "格密码", "", [], None, None, [])]
@@ -147,6 +173,35 @@ class DomainTreeLanguageTest(unittest.TestCase):
         self.assertEqual(complete["graphStatus"], "ready")
         self.assertEqual(complete["generatedAt"], generated_at)
         self.assertEqual(complete["headingCounts"], {"primary": 4, "secondary": 3})
+
+    def test_stored_heading_limits_hide_legacy_off_by_one_nodes(self) -> None:
+        """读取历史快照时也必须保证一级、二级标题不超过记录的上限。"""
+        document = SourceDocument("paper", "Paper", "", [], None, None, [])
+        tags = [
+            {
+                "label": f"{index} Topic {index}",
+                "child": [
+                    {"label": f"{index}.{child_index} Detail {child_index}"}
+                    for child_index in range(1, 17)
+                ],
+            }
+            for index in range(1, 17)
+        ]
+        self.agent.save_domain_tree_snapshot(
+            "legacy-workspace",
+            tags,
+            documents=[document],
+            catalog_text="Paper catalog",
+            action="rebuild",
+            language="English",
+            primary_heading_count=15,
+            secondary_heading_count=15,
+        )
+
+        result = self.agent.get_result("legacy-workspace")
+
+        self.assertEqual(len(result["domainTree"]), 15)
+        self.assertTrue(all(len(node.get("child", [])) <= 15 for node in result["domainTree"]))
 
 
 if __name__ == "__main__":

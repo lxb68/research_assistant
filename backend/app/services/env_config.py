@@ -7,10 +7,11 @@ from pathlib import Path
 import os
 import shutil
 import tempfile
-from threading import Lock
+from threading import RLock
 from typing import Any, Literal
 
-from app.core.config import BACKEND_DIR, settings
+from app.core.config import BACKEND_DIR, runtime_config_manager
+from app.services.runtime_settings import RuntimeConfigManager
 
 
 FieldKind = Literal["text", "integer", "float", "boolean", "secret", "choice"]
@@ -87,35 +88,93 @@ FIELDS = (
     EnvFieldSpec("SEMANTIC_GRAPH_MAX_WORKERS", "语义图谱并发数", "server", "integer", "semantic_graph_max_workers", "语义图谱构建线程数。", 1, 16),
 )
 
+RESTART_REQUIRED_KEYS = frozenset(
+    {
+        "HOST",
+        "PORT",
+        "CORS_ORIGINS",
+        "LOG_LEVEL",
+        "BACKGROUND_JOB_MAX_WORKERS",
+        "BACKGROUND_JOB_MAX_PENDING_TASKS",
+        "STREAM_MAX_WORKERS",
+        "STREAM_MAX_PENDING_TASKS",
+        "SEMANTIC_GRAPH_MAX_WORKERS",
+    },
+)
+
+REINDEX_REQUIRED_KEYS = frozenset(
+    {
+        "RAG_EMBEDDING_API_KEY",
+        "RAG_EMBEDDING_BASE_URL",
+        "RAG_EMBEDDING_MODEL",
+        "RAG_LOCAL_EMBEDDING_API_KEY",
+        "RAG_LOCAL_EMBEDDING_BASE_URL",
+        "RAG_LOCAL_EMBEDDING_MODEL",
+        "RAG_LOCAL_EMBEDDING_PROTOCOL",
+        "RAG_CHUNK_TARGET_TOKENS",
+        "RAG_CHUNK_MAX_TOKENS",
+        "RAG_CHUNK_OVERLAP_TOKENS",
+    },
+)
+
 
 class EnvConfigStore:
     """仅允许更新明确接入运行流程的字段，并保留 .env 原有注释和未知项。"""
 
-    _lock = Lock()
+    _lock = RLock()
 
-    def __init__(self, env_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        env_path: Path | None = None,
+        *,
+        runtime_manager: RuntimeConfigManager | None = None,
+    ) -> None:
         self.env_path = env_path or BACKEND_DIR / ".env"
         self.specs = {field.key: field for field in FIELDS}
+        self.runtime_manager = runtime_manager or runtime_config_manager
+        declared_workers = max(
+            int(os.getenv("WEB_CONCURRENCY", "1") or "1"),
+            int(os.getenv("UVICORN_WORKERS", "1") or "1"),
+        )
+        self.hot_reload_available = declared_workers == 1
 
     def get_public_config(self) -> dict[str, Any]:
         file_values = self._read_values()
+        snapshot = self.runtime_manager.snapshot()
         grouped: dict[str, list[dict[str, Any]]] = {group[0]: [] for group in GROUPS}
+        pending_restart: list[str] = []
+        pending_reindex: list[str] = []
         for spec in FIELDS:
-            runtime_value = getattr(settings, spec.runtime_attr)
+            runtime_value = snapshot.get(spec.runtime_attr)
+            desired_raw = file_values.get(spec.key, runtime_value)
+            desired_value = self._coerce_runtime_value(spec, desired_raw)
+            effect = self._effect_for(spec.key)
+            pending = desired_value != runtime_value
+            if pending and effect == "restart":
+                pending_restart.append(spec.key)
+            if pending and effect == "reindex":
+                pending_reindex.append(spec.key)
             configured = bool(str(file_values.get(spec.key, runtime_value) or "").strip())
             item: dict[str, Any] = {
                 "key": spec.key,
                 "label": spec.label,
                 "kind": spec.kind,
                 "configured": configured,
+                "activeConfigured": bool(str(runtime_value or "").strip()),
                 "source": "env_file" if spec.key in file_values else "runtime_default",
                 "description": spec.description,
+                "effect": effect,
+                "pending": pending,
             }
             if spec.kind != "secret":
-                value = file_values.get(spec.key, runtime_value)
-                if isinstance(value, list):
+                value = desired_raw
+                if isinstance(value, (list, tuple)):
                     value = ",".join(str(part) for part in value)
                 item["value"] = self._coerce_for_output(spec, value)
+                active_value = runtime_value
+                if isinstance(active_value, (list, tuple)):
+                    active_value = ",".join(str(part) for part in active_value)
+                item["activeValue"] = self._coerce_for_output(spec, active_value)
             if spec.minimum is not None:
                 item["min"] = spec.minimum
             if spec.maximum is not None:
@@ -124,7 +183,11 @@ class EnvConfigStore:
                 item["options"] = list(spec.options)
             grouped[spec.group].append(item)
         return {
-            "restartRequired": True,
+            "revision": snapshot.revision,
+            "hotReloadAvailable": self.hot_reload_available,
+            "restartRequired": bool(pending_restart),
+            "restartRequiredKeys": pending_restart,
+            "reindexRequiredKeys": pending_reindex,
             "groups": [
                 {"id": group_id, "label": label, "description": description, "fields": grouped[group_id]}
                 for group_id, label, description in GROUPS
@@ -142,8 +205,83 @@ class EnvConfigStore:
                 continue
             normalized[key] = None if value is None else self._validate(spec, value)
         if normalized:
-            self._atomic_update(normalized)
-        return {**self.get_public_config(), "backupCreated": bool(normalized)}
+            self._validate_cross_fields(normalized)
+            with self._lock:
+                original_exists = self.env_path.exists()
+                original_content = self.env_path.read_text(encoding="utf-8") if original_exists else ""
+                runtime_updates = {
+                    self.specs[key].runtime_attr: self._coerce_runtime_value(self.specs[key], value)
+                    for key, value in normalized.items()
+                    if self._effect_for(key) in {"hot", "reindex"}
+                }
+                candidate = self.runtime_manager.build_candidate(runtime_updates) if runtime_updates else None
+                self._atomic_update(normalized)
+                if candidate is not None:
+                    try:
+                        self.runtime_manager.commit(candidate)
+                    except Exception:
+                        self._restore_env(original_content, existed=original_exists)
+                        raise
+        applied_keys = [key for key in normalized if self._effect_for(key) == "hot"]
+        reindex_keys = [key for key in normalized if self._effect_for(key) == "reindex"]
+        public_config = self.get_public_config()
+        return {
+            **public_config,
+            "backupCreated": bool(normalized),
+            "appliedKeys": applied_keys,
+            "reindexRequiredKeys": list(
+                dict.fromkeys([*public_config["reindexRequiredKeys"], *reindex_keys]),
+            ),
+            "effectiveFor": "new_requests_and_tasks" if applied_keys or reindex_keys else "pending",
+        }
+
+    def _effect_for(self, key: str) -> Literal["hot", "restart", "reindex"]:
+        if not self.hot_reload_available:
+            return "restart"
+        if key in REINDEX_REQUIRED_KEYS:
+            return "reindex"
+        if key in RESTART_REQUIRED_KEYS:
+            return "restart"
+        return "hot"
+
+    @staticmethod
+    def _coerce_runtime_value(spec: EnvFieldSpec, value: Any) -> Any:
+        if value is None:
+            return ""
+        if spec.kind == "integer":
+            return int(value)
+        if spec.kind == "float":
+            return float(value)
+        if spec.kind == "boolean":
+            return value if isinstance(value, bool) else str(value).strip().lower() in {"1", "true", "yes", "on"}
+        if spec.key == "CORS_ORIGINS":
+            if isinstance(value, (list, tuple)):
+                return tuple(str(part).strip() for part in value if str(part).strip())
+            return tuple(part.strip() for part in str(value).split(",") if part.strip())
+        text = str(value).strip()
+        if spec.runtime_attr.endswith(("_base_url", "api_base")):
+            return text.rstrip("/")
+        if spec.key == "LOG_LEVEL":
+            return text.upper()
+        return text
+
+    def _validate_cross_fields(self, updates: dict[str, str | None]) -> None:
+        file_values = self._read_values()
+        snapshot = self.runtime_manager.snapshot()
+
+        def value(key: str) -> Any:
+            spec = self.specs[key]
+            raw = updates.get(key, file_values.get(key, snapshot.get(spec.runtime_attr)))
+            return self._coerce_runtime_value(spec, raw)
+
+        if int(value("SPLIT_MIN_LENGTH")) > int(value("SPLIT_MAX_LENGTH")):
+            raise ValueError("默认最小分块字符数不能大于默认最大分块字符数")
+        if int(value("RAG_CHUNK_TARGET_TOKENS")) > int(value("RAG_CHUNK_MAX_TOKENS")):
+            raise ValueError("目标分块 Token 不能大于最大分块 Token")
+        if int(value("RAG_CHUNK_OVERLAP_TOKENS")) >= int(value("RAG_CHUNK_MAX_TOKENS")):
+            raise ValueError("分块重叠 Token 必须小于最大分块 Token")
+        if float(value("RAG_BM25_WEIGHT")) + float(value("RAG_VECTOR_WEIGHT")) <= 0:
+            raise ValueError("BM25 权重和向量权重不能同时为 0")
 
     def _read_values(self) -> dict[str, str]:
         if not self.env_path.exists():
@@ -239,5 +377,25 @@ class EnvConfigStore:
                 if os.path.exists(temp_name):
                     os.unlink(temp_name)
 
+    def _restore_env(self, content: str, *, existed: bool) -> None:
+        """运行时提交异常时恢复写入前的配置文件。"""
 
-__all__ = ["EnvConfigStore", "FIELDS", "GROUPS"]
+        if not existed:
+            self.env_path.unlink(missing_ok=True)
+            return
+        descriptor, temp_name = tempfile.mkstemp(prefix=".env.rollback.", suffix=".tmp", dir=self.env_path.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(content)
+            os.replace(temp_name, self.env_path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+
+__all__ = [
+    "EnvConfigStore",
+    "FIELDS",
+    "GROUPS",
+    "REINDEX_REQUIRED_KEYS",
+    "RESTART_REQUIRED_KEYS",
+]

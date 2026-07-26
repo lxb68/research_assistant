@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +12,7 @@ class DomainTreeStore:
     def load_tags(self, output_dir: Path) -> list[dict[str, Any]] | None:
         payload = self._read_json(output_dir / "domain_tree.json")
         if isinstance(payload, dict):
-            tree = payload.get("domainTree")
-            return tree if isinstance(tree, list) else None
+            return self._tree_with_heading_limits(payload)
         return payload if isinstance(payload, list) else None
 
     def load_manifest(self, output_dir: Path) -> dict[str, Any]:
@@ -39,7 +39,11 @@ class DomainTreeStore:
             if stored_project_id and stored_project_id != project_id:
                 return None
         graph_status = str(domain_payload.get("graphStatus", "ready")) if isinstance(domain_payload, dict) else "ready"
-        graph_payload = self._read_json(output_dir / "knowledge_graph.json") if graph_status == "ready" else {}
+        graph_payload = (
+            self._read_json(output_dir / "knowledge_graph.json")
+            if graph_status in {"ready", "degraded"}
+            else {}
+        )
         manifest_payload = self.load_manifest(output_dir)
         if isinstance(graph_payload, dict):
             graph_project_id = str(graph_payload.get("projectId") or "").strip()
@@ -53,7 +57,11 @@ class DomainTreeStore:
             catalog_text = catalog_path.read_text(encoding="utf-8") if catalog_path.exists() else ""
         except OSError:
             catalog_text = ""
-        domain_tree = domain_payload.get("domainTree") if isinstance(domain_payload, dict) else domain_payload
+        domain_tree = (
+            self._tree_with_heading_limits(domain_payload)
+            if isinstance(domain_payload, dict)
+            else domain_payload
+        )
         return {
             "projectId": domain_payload.get("projectId", project_id) if isinstance(domain_payload, dict) else project_id,
             "generatedAt": domain_payload.get("generatedAt", "") if isinstance(domain_payload, dict) else "",
@@ -72,6 +80,42 @@ class DomainTreeStore:
             "manifest": manifest_payload,
             "catalogText": catalog_text,
         }
+
+    @staticmethod
+    def _tree_with_heading_limits(payload: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """按快照记录的数量上限投影领域树，兼容历史超限结果。"""
+        raw_tree = payload.get("domainTree")
+        if not isinstance(raw_tree, list):
+            return None
+        heading_counts = payload.get("headingCounts")
+        limits = heading_counts if isinstance(heading_counts, dict) else {}
+        primary_limit = DomainTreeStore._parse_heading_limit(limits.get("primary"), minimum=1)
+        secondary_limit = DomainTreeStore._parse_heading_limit(limits.get("secondary"), minimum=0)
+        nodes = raw_tree[:primary_limit] if primary_limit is not None else raw_tree
+        projected: list[dict[str, Any]] = []
+        for raw_node in nodes:
+            if not isinstance(raw_node, dict):
+                continue
+            node = deepcopy(raw_node)
+            children = node.get("child")
+            if isinstance(children, list) and secondary_limit is not None:
+                limited_children = children[:secondary_limit]
+                if limited_children:
+                    node["child"] = limited_children
+                else:
+                    node.pop("child", None)
+            projected.append(node)
+        return projected
+
+    @staticmethod
+    def _parse_heading_limit(value: Any, *, minimum: int) -> int | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= minimum else None
 
     def load_curation(self, output_dir: Path) -> dict[str, Any]:
         """读取人工修订记录；不存在或损坏时返回空修订。"""

@@ -153,6 +153,8 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
   const [isPreferenceOpen, setIsPreferenceOpen] = useState(false);
   const [workspaceView, setWorkspaceView] = useState<"chat" | "records">("chat");
   const [hasHydrated, setHasHydrated] = useState(false);
+  const [hasLoadedServerConversations, setHasLoadedServerConversations] = useState(false);
+  const [isLoadingMemories, setIsLoadingMemories] = useState(true);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
   const [activeResearchJobId, setActiveResearchJobId] = useState("");
@@ -235,6 +237,7 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
   useEffect(() => {
     if (!hasHydrated) return;
     let cancelled = false;
+    setIsLoadingMemories(true);
     void Promise.all([listResearchMemories(), getUserPreferences()])
       .then(async ([loadedMemories, loadedPreferences]) => {
         if (cancelled) return;
@@ -284,6 +287,9 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
       })
       .catch((error) => {
         if (!cancelled) setMemoryError(error instanceof Error ? error.message : "加载研究记忆失败");
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingMemories(false);
       });
     return () => { cancelled = true; };
   }, [activeProjectId, hasHydrated]);
@@ -364,7 +370,10 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
         );
         nextMessageId.current = Math.max(nextMessageId.current, highest + 1);
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setHasLoadedServerConversations(true);
+      });
     return () => { cancelled = true; };
   }, [activeConversationId, hasHydrated, jobs]);
 
@@ -849,7 +858,11 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
             </div>
           ))}
           {deleteError ? <div className="research-recent-error" role="alert">{deleteError}</div> : null}
-          {conversations.length === 0 ? <div className="research-recent-empty">暂无最近对话</div> : null}
+          {conversations.length === 0 ? (
+            <div className="research-recent-empty">
+              {hasHydrated && hasLoadedServerConversations ? "暂无最近对话" : "正在恢复最近对话…"}
+            </div>
+          ) : null}
         </div>
         <div className="research-side-bottom"><div><span>LX</span><p><strong>研究工作区</strong><small>个人专业版</small></p></div></div>
       </aside>
@@ -867,7 +880,9 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
           <section className="research-records-page">
             <header><div><small>Research Memory</small><h2>研究记忆</h2><p>从对话中提炼可复用的结论、事实、决策、限制和待办；完整回答继续保留在原对话中。</p></div></header>
             {memoryError ? <p className="research-memory-error" role="alert">{memoryError}</p> : null}
-            {researchRecords.length > 0 ? (
+            {isLoadingMemories ? (
+              <div className="research-record-empty"><HistoryRounded /><h3>正在读取研究记忆…</h3></div>
+            ) : researchRecords.length > 0 ? (
               <div className="research-record-grid">
                 {researchRecords.map((record) => (
                   <article className="research-record-card" key={record.id}>
@@ -891,7 +906,11 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
           </section>
         ) : <div className="research-body">
           <section className="research-thread">
-            {!messages.length && <div className="research-empty"><span className="research-agent-mark"><AutoAwesomeRounded /></span><h2>今天想研究什么？</h2><p>我会从{projectScopeIds.length > 1 ? `所选 ${projectScopeIds.length} 个项目` : `“${activeProject?.name || "当前知识空间"}”`}的文献中检索、分析并标注每一处引用。</p></div>}
+            {!messages.length && (
+              hasHydrated && hasLoadedServerConversations
+                ? <div className="research-empty"><span className="research-agent-mark"><AutoAwesomeRounded /></span><h2>今天想研究什么？</h2><p>我会从{projectScopeIds.length > 1 ? `所选 ${projectScopeIds.length} 个项目` : `“${activeProject?.name || "当前知识空间"}”`}的文献中检索、分析并标注每一处引用。</p></div>
+                : <div className="research-empty"><span className="research-agent-mark"><AutoAwesomeRounded /></span><h2>正在恢复研究对话…</h2></div>
+            )}
             {messages.map((message) => <article className={`research-message ${message.role}`} key={message.id}>
               <div className="research-avatar">{message.role === "agent" ? <AutoAwesomeRounded /> : "LX"}</div>
               <div><header><strong>{message.role === "agent" ? "Research Agent" : "你"}</strong><span>{message.id <= 2 ? "10:24" : "刚刚"}</span></header><MessageContent content={message.content} />
@@ -909,7 +928,7 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
                 <footer><span>{isLoadingProjects ? "正在读取项目…" : "至少保留一个项目作为检索范围"}</span><button type="button" onClick={() => setIsProjectScopeOpen(false)}>完成</button></footer>
               </section>
             ) : null}
-            <form className="research-compose" onSubmit={submit}><textarea rows={2} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={keyDown} placeholder={messages.length ? "继续追问，或给 Research Agent 一个任务…" : "输入研究问题，或给 Research Agent 一个任务…"} /><div><button type="button" className="research-source-action" onClick={() => setIsProjectScopeOpen((current) => !current)} aria-expanded={isProjectScopeOpen} aria-label="添加检索项目" title="添加其他项目到当前对话的检索范围"><AddRounded />项目</button><button type="button" className="library-pill" onClick={onOpenDomainTree} aria-label={`管理项目文献：${activeProject?.name || "当前项目"}`} title="在项目知识空间管理项目文献"><FolderOpenRounded />{activeProject?.name || "当前项目"} <span>{projectScopeIds.length > 1 ? `${projectScopeIds.length} 个项目` : `${activeProject?.paperCount ?? 0} 篇`}</span></button><button className="research-send" disabled={!input.trim() || thinking}><SendRounded /></button></div></form>
+            <form className="research-compose" onSubmit={submit}><textarea rows={2} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={keyDown} placeholder={messages.length ? "继续追问，或给 Research Agent 一个任务…" : "输入研究问题，或给 Research Agent 一个任务…"} /><div><button type="button" className="research-source-action" onClick={() => setIsProjectScopeOpen((current) => !current)} aria-expanded={isProjectScopeOpen} aria-label="添加检索项目" title="添加其他项目到当前对话的检索范围"><AddRounded />项目</button><button type="button" className="library-pill" onClick={onOpenDomainTree} aria-label={`管理项目文献：${activeProject?.name || "当前项目"}`} title="在项目知识空间管理项目文献"><FolderOpenRounded />{activeProject?.name || "当前项目"} <span>{projectScopeIds.length > 1 ? `${projectScopeIds.length} 个项目` : isLoadingProjects ? "读取中…" : `${activeProject?.paperCount ?? 0} 篇`}</span></button><button className="research-send" disabled={!input.trim() || thinking}><SendRounded /></button></div></form>
             <small className="research-note">{isDirectAnswer ? "本次为普通对话，未调用研究 Agent 或知识库。" : "研究内容由 AI 基于所选知识库生成，请核验关键结论与原始文献。"}</small>
           </div>
         </div>}

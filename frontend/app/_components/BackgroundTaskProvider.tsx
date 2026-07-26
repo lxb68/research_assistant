@@ -230,6 +230,7 @@ export function BackgroundTaskProvider({ children }: { children: React.ReactNode
   const [jobs, setJobs] = useState<BackgroundJob[]>([]);
   const [open, setOpen] = useState(false);
   const [notice, setNotice] = useState("");
+  const [isInitialLoadingJobs, setIsInitialLoadingJobs] = useState(true);
   const previousStatuses = useRef(new Map<string, string>());
   const {
     buttonRef: taskButtonRef,
@@ -258,18 +259,22 @@ export function BackgroundTaskProvider({ children }: { children: React.ReactNode
   }, [jobs]);
 
   const refresh = useCallback(async () => {
-    const response = await fetch(buildApiUrl("/api/jobs?sessionId=local&limit=100"), { cache: "no-store" });
-    if (!response.ok) throw new Error(await readError(response, "读取后台任务列表失败"));
-    const payload = (await response.json()) as { jobs?: BackgroundJob[] };
-    const nextJobs = payload.jobs ?? [];
-    for (const job of nextJobs) {
-      const previous = previousStatuses.current.get(job.jobId);
-      if (previous && ACTIVE.has(previous) && job.status === "completed") {
-        setNotice(`${TYPE_LABELS[job.type] ?? job.type}已完成`);
+    try {
+      const response = await fetch(buildApiUrl("/api/jobs?sessionId=local&limit=100"), { cache: "no-store" });
+      if (!response.ok) throw new Error(await readError(response, "读取后台任务列表失败"));
+      const payload = (await response.json()) as { jobs?: BackgroundJob[] };
+      const nextJobs = payload.jobs ?? [];
+      for (const job of nextJobs) {
+        const previous = previousStatuses.current.get(job.jobId);
+        if (previous && ACTIVE.has(previous) && job.status === "completed") {
+          setNotice(`${TYPE_LABELS[job.type] ?? job.type}已完成`);
+        }
+        previousStatuses.current.set(job.jobId, job.status);
       }
-      previousStatuses.current.set(job.jobId, job.status);
+      setJobs(normalizeRecentJobs(nextJobs));
+    } finally {
+      setIsInitialLoadingJobs(false);
     }
-    setJobs(normalizeRecentJobs(nextJobs));
   }, []);
 
   useEffect(() => {
@@ -386,7 +391,11 @@ export function BackgroundTaskProvider({ children }: { children: React.ReactNode
                 {job.error ? <Alert severity="error" sx={{ mt: 1 }}>{job.error}</Alert> : null}
               </Box>
             ))}
-            {!jobs.length ? <Alert severity="info">还没有后台任务。</Alert> : null}
+            {!jobs.length ? (
+              <Alert severity="info">
+                {isInitialLoadingJobs ? "正在读取后台任务…" : "还没有后台任务。"}
+              </Alert>
+            ) : null}
           </Box>
         </Box>
       </Drawer>

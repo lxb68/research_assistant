@@ -13,7 +13,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from app.core.config import settings
+from app.core.config import runtime_config_manager, settings
+from app.services.runtime_settings import RuntimeSettingsSnapshot, bind_runtime_settings
 from app.services.task_control import TaskCancelled, raise_if_task_cancelled
 
 
@@ -69,6 +70,7 @@ class BackgroundJobRepository:
         connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 30000")
+        connection.execute("PRAGMA foreign_keys = ON")
         try:
             yield connection
             connection.commit()
@@ -92,6 +94,7 @@ class BackgroundJobRepository:
                     status TEXT NOT NULL,
                     stage TEXT NOT NULL,
                     progress INTEGER NOT NULL DEFAULT 0,
+                    progress_payload TEXT NOT NULL DEFAULT '{}',
                     message TEXT NOT NULL,
                     request_payload TEXT NOT NULL,
                     result_payload TEXT,
@@ -121,8 +124,48 @@ class BackgroundJobRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_background_job_events_cursor
                     ON background_job_events(job_id, sequence);
+                CREATE TABLE IF NOT EXISTS model_call_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    document_id TEXT,
+                    chunk_index INTEGER,
+                    attempt INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    error_category TEXT,
+                    http_status INTEGER,
+                    request_accepted INTEGER,
+                    request_id TEXT,
+                    finish_reason TEXT,
+                    prompt_tokens INTEGER,
+                    completion_tokens INTEGER,
+                    total_tokens INTEGER,
+                    cached_tokens INTEGER,
+                    reasoning_tokens INTEGER,
+                    elapsed_ms REAL NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (job_id) REFERENCES background_jobs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_model_call_metrics_job
+                    ON model_call_metrics(job_id, id);
                 """,
             )
+            job_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(background_jobs)")
+            }
+            if "progress_payload" not in job_columns:
+                connection.execute(
+                    "ALTER TABLE background_jobs ADD COLUMN progress_payload TEXT NOT NULL DEFAULT '{}'"
+                )
+            metric_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(model_call_metrics)")
+            }
+            if "finish_reason" not in metric_columns:
+                connection.execute("ALTER TABLE model_call_metrics ADD COLUMN finish_reason TEXT")
+            if "reasoning_tokens" not in metric_columns:
+                connection.execute("ALTER TABLE model_call_metrics ADD COLUMN reasoning_tokens INTEGER")
 
     def create(
         self,
@@ -248,6 +291,7 @@ class BackgroundJobRepository:
         progress: int | None = None,
         stage: str | None = None,
         message: str | None = None,
+        progress_details: dict[str, Any] | None = None,
         event_payload: dict[str, Any] | None = None,
     ) -> None:
         assignments: list[str] = ["heartbeat_at = ?"]
@@ -261,6 +305,9 @@ class BackgroundJobRepository:
         if message is not None:
             assignments.append("message = ?")
             values.append(message)
+        if progress_details is not None:
+            assignments.append("progress_payload = ?")
+            values.append(_dumps(progress_details))
         values.append(job_id)
         with self.connect() as connection:
             connection.execute(
@@ -279,6 +326,88 @@ class BackgroundJobRepository:
     def append_event(self, job_id: str, event_type: str, payload: dict[str, Any]) -> None:
         with self.connect() as connection:
             self._append_event(connection, job_id, event_type, payload)
+
+    def record_model_call(self, job_id: str, metric: dict[str, Any]) -> None:
+        """持久化单次模型尝试，独立于会被截断的任务事件。"""
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO model_call_metrics (
+                    job_id, stage, document_id, chunk_index, attempt, status,
+                    error_category, http_status, request_accepted, request_id,
+                    finish_reason, prompt_tokens, completion_tokens, total_tokens,
+                    cached_tokens, reasoning_tokens, elapsed_ms, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    str(metric.get("stage") or "model"),
+                    metric.get("documentId"),
+                    metric.get("chunkIndex"),
+                    max(1, int(metric.get("attempt") or 1)),
+                    str(metric.get("status") or "unknown"),
+                    metric.get("errorCategory"),
+                    metric.get("httpStatus"),
+                    (
+                        None
+                        if metric.get("requestAccepted") is None
+                        else int(bool(metric.get("requestAccepted")))
+                    ),
+                    str(metric.get("requestId") or ""),
+                    str(metric.get("finishReason") or ""),
+                    metric.get("promptTokens"),
+                    metric.get("completionTokens"),
+                    metric.get("totalTokens"),
+                    metric.get("cachedTokens"),
+                    metric.get("reasoningTokens"),
+                    max(0.0, float(metric.get("elapsedMs") or 0.0)),
+                    _timestamp(),
+                ),
+            )
+
+    def model_usage_summary(self, job_id: str) -> dict[str, Any]:
+        """汇总任务级模型调用、错误和 Token 用量。"""
+        with self.connect() as connection:
+            totals = connection.execute(
+                """
+                SELECT COUNT(*) AS call_count,
+                       SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+                       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+                       SUM(COALESCE(prompt_tokens, 0)) AS prompt_tokens,
+                       SUM(COALESCE(completion_tokens, 0)) AS completion_tokens,
+                       SUM(
+                           COALESCE(
+                               total_tokens,
+                               COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)
+                           )
+                       ) AS total_tokens,
+                       SUM(COALESCE(cached_tokens, 0)) AS cached_tokens,
+                       SUM(COALESCE(reasoning_tokens, 0)) AS reasoning_tokens
+                FROM model_call_metrics WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+            errors = connection.execute(
+                """
+                SELECT COALESCE(error_category, 'unknown') AS category, COUNT(*) AS count
+                FROM model_call_metrics
+                WHERE job_id = ? AND status = 'failed'
+                GROUP BY COALESCE(error_category, 'unknown')
+                ORDER BY count DESC, category
+                """,
+                (job_id,),
+            ).fetchall()
+        return {
+            "callCount": int(totals["call_count"] or 0),
+            "successCount": int(totals["success_count"] or 0),
+            "failedCount": int(totals["failed_count"] or 0),
+            "promptTokens": int(totals["prompt_tokens"] or 0),
+            "completionTokens": int(totals["completion_tokens"] or 0),
+            "totalTokens": int(totals["total_tokens"] or 0),
+            "cachedTokens": int(totals["cached_tokens"] or 0),
+            "reasoningTokens": int(totals["reasoning_tokens"] or 0),
+            "errors": {str(row["category"]): int(row["count"]) for row in errors},
+        }
 
     def _append_event(self, connection: sqlite3.Connection, job_id: str, event_type: str, payload: dict[str, Any]) -> None:
         connection.execute(
@@ -436,6 +565,7 @@ class BackgroundJobContext:
         self.manager = manager
         self.job_id = job_id
         self.cancel_event = cancel_event
+        self.config_revision = settings.revision
 
     def check_cancelled(self) -> None:
         raise_if_task_cancelled(self.cancel_event)
@@ -444,15 +574,34 @@ class BackgroundJobContext:
         self.check_cancelled()
         self.manager.repository.append_event(self.job_id, "log", {"message": message, **payload})
 
-    def progress(self, value: int, *, stage: str = "running", message: str = "", **payload: Any) -> None:
+    def progress(
+        self,
+        value: int,
+        *,
+        stage: str = "running",
+        message: str = "",
+        details: dict[str, Any] | None = None,
+        **payload: Any,
+    ) -> None:
         self.check_cancelled()
+        event_payload = dict(payload)
+        if details is not None:
+            event_payload["details"] = details
         self.manager.repository.update_progress(
             self.job_id,
             progress=value,
             stage=stage,
             message=message or None,
-            event_payload=payload,
+            progress_details=details,
+            event_payload=event_payload,
         )
+
+    def record_model_call(self, metric: dict[str, Any]) -> None:
+        """记录模型尝试，不写入高频进度事件。"""
+        self.manager.repository.record_model_call(self.job_id, metric)
+
+    def model_usage_summary(self) -> dict[str, Any]:
+        return self.manager.repository.model_usage_summary(self.job_id)
 
 
 class BackgroundJobManager:
@@ -486,6 +635,7 @@ class BackgroundJobManager:
         self._capacity = threading.BoundedSemaphore(self.max_workers + self.max_pending_tasks)
         self._handlers: dict[str, JobHandler] = {}
         self._active: dict[str, threading.Event] = {}
+        self._runtime_snapshots: dict[str, RuntimeSettingsSnapshot] = {}
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._maintenance_thread: threading.Thread | None = None
@@ -547,7 +697,7 @@ class BackgroundJobManager:
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         row = self.repository.get(job_id)
-        return self._public(row) if row else None
+        return self._public(row, include_model_usage=True) if row else None
 
     def list(self, *, session_id: str = "local", limit: int = 100) -> list[dict[str, Any]]:
         return [self._public(row) for row in self.repository.list(session_id=session_id, limit=limit)]
@@ -614,9 +764,26 @@ class BackgroundJobManager:
             if self._shutdown:
                 raise RuntimeError("后台任务执行器正在关闭")
             self._active[job_id] = cancel_event
-        self._executor.submit(self._run, job_id, cancel_event)
+            self._runtime_snapshots[job_id] = runtime_config_manager.snapshot()
+        try:
+            self._executor.submit(self._run, job_id, cancel_event)
+        except Exception:
+            with self._lock:
+                self._active.pop(job_id, None)
+                self._runtime_snapshots.pop(job_id, None)
+            raise
 
     def _run(self, job_id: str, cancel_event: threading.Event) -> None:
+        with self._lock:
+            snapshot = self._runtime_snapshots.get(job_id) or runtime_config_manager.snapshot()
+        try:
+            with bind_runtime_settings(snapshot):
+                self._run_with_bound_settings(job_id, cancel_event)
+        finally:
+            with self._lock:
+                self._runtime_snapshots.pop(job_id, None)
+
+    def _run_with_bound_settings(self, job_id: str, cancel_event: threading.Event) -> None:
         heartbeat_stop = threading.Event()
         heartbeat_thread: threading.Thread | None = None
         try:
@@ -639,6 +806,11 @@ class BackgroundJobManager:
                 raise RuntimeError(f"未注册任务处理器：{row['type']}")
             context = BackgroundJobContext(self, job_id, cancel_event)
             context.check_cancelled()
+            self.repository.append_event(
+                job_id,
+                "config",
+                {"revision": context.config_revision},
+            )
             result = handler(context, _loads(row["request_payload"], {})) or {}
             context.check_cancelled()
             self.repository.finish(job_id, status="completed", message="任务已完成", result=result)
@@ -687,10 +859,15 @@ class BackgroundJobManager:
             except sqlite3.Error:
                 logger.exception("后台任务定时维护失败")
 
-    def _public(self, row: sqlite3.Row | None) -> dict[str, Any]:
+    def _public(
+        self,
+        row: sqlite3.Row | None,
+        *,
+        include_model_usage: bool = False,
+    ) -> dict[str, Any]:
         if row is None:
             return {}
-        return {
+        payload = {
             "jobId": row["id"],
             "userId": row["user_id"],
             "sessionId": row["session_id"],
@@ -698,6 +875,7 @@ class BackgroundJobManager:
             "status": row["status"],
             "stage": row["stage"],
             "progress": row["progress"],
+            "progressDetails": _loads(row["progress_payload"], {}),
             "message": row["message"],
             "request": _loads(row["request_payload"], {}),
             "result": _loads(row["result_payload"], None),
@@ -710,6 +888,9 @@ class BackgroundJobManager:
             "finishedAt": row["finished_at"],
             "heartbeatAt": row["heartbeat_at"],
         }
+        if include_model_usage:
+            payload["modelUsage"] = self.repository.model_usage_summary(str(row["id"]))
+        return payload
 
 
 background_job_manager = BackgroundJobManager()

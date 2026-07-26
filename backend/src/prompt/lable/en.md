@@ -19,8 +19,8 @@
 1. Carefully read the entire content of the book catalog.
 2. Extract key themes and core concepts.
 3. Group and categorize the themes.
-4. Construct primary domain labels (ensure no more than 10).
-5. Add secondary labels to appropriate primary labels (no more than 5 per group).
+4. Construct primary domain labels according to the requested tree size.
+5. Add secondary labels according to the requested tree size.
 6. Check the rationality of the classification logic.
 7. Generate a JSON output that conforms to the format.
 
@@ -28,8 +28,8 @@
 {{text}}
 
 ## Constraints
-1. The number of primary domain labels should be between 5 and 10.
-2. The number of secondary domain labels ≤ 5 per primary label.
+1. Follow the explicit tree-size constraint supplied with the request.
+2. If no explicit size is supplied, choose a concise hierarchy supported by the catalog.
 3. There should be at most two classification levels.
 4. The classification must be relevant to the original catalog content.
 5. The output must conform to the specified JSON format.
@@ -42,15 +42,18 @@
 
 ## OutputFormat:
 ```json
-[
-  {
-    "label": "1 Primary Domain Label",
-    "child": [
-      {"label": "1.1 Secondary Domain Label 1"},
-      {"label": "1.2 Secondary Domain Label 2"}
-    ]
-  },
-  {
-    "label": "2 Primary Domain Label (No Sub - labels)"
-  }
-]
+{
+  "domainTree": [
+    {
+      "label": "1 Primary Domain Label",
+      "child": [
+        {"label": "1.1 Secondary Domain Label 1"},
+        {"label": "1.2 Secondary Domain Label 2"}
+      ]
+    },
+    {
+      "label": "2 Primary Domain Label (No Sub-labels)"
+    }
+  ]
+}
+```

@@ -84,6 +84,7 @@ class ModelConfigStore:
             "protocol": protocol,
             "requires_api_key": requires_api_key(provider, protocol),
             "allow_heuristic_fallback": allow_heuristic_fallback,
+            "max_output_tokens": settings.model_max_output_tokens,
             "system_constraint": SYSTEM_SECURITY_CONSTRAINT,
         }
 
@@ -169,6 +170,9 @@ class ModelConfigStore:
             "hasApiKey": bool(runtime["api_key"]),
             "secretStorage": self._secret_storage(saved=self.load_saved(), runtime=runtime),
             "allowHeuristicFallback": runtime["allow_heuristic_fallback"],
+            "domainTreeMaxOutputTokens": settings.domain_tree_max_output_tokens,
+            "semanticGraphMaxOutputTokens": settings.semantic_graph_max_output_tokens,
+            "outputTokensUpperBound": settings.model_output_tokens_upper_bound,
             "maskedApiKey": self._mask_secret(runtime["api_key"]),
             "systemConstraint": SYSTEM_SECURITY_CONSTRAINT,
         }
@@ -218,6 +222,7 @@ class ModelConfigStore:
             "base_url": normalized_base_url,
             "api_key": normalized_api_key,
             "model": str(model or "").strip(),
+            "max_output_tokens": settings.model_max_output_tokens,
             "system_constraint": SYSTEM_SECURITY_CONSTRAINT,
         }
 

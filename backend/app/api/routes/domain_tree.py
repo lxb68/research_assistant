@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.schemas.api import (
     DomainTreeGenerateOptions,
     DomainTreeGenerateRequest,
+    DomainTreeResumeOptions,
     DomainTreeNodeUpdateRequest,
     KnowledgeEntityUpdateRequest,
     KnowledgeRelationUpdateRequest,
@@ -24,6 +25,21 @@ from app.services.project_knowledge import (
 
 
 router = APIRouter()
+
+
+def _decorate_domain_tree_job(job: dict) -> dict:
+    """补齐领域树页面需要的项目、动作和可展示快照。"""
+    request = job.get("request") if isinstance(job.get("request"), dict) else {}
+    project_id = str(request.get("project_id") or "")
+    decorated = {
+        **job,
+        "projectId": project_id,
+        "action": str(request.get("action") or "rebuild"),
+    }
+    details = job.get("progressDetails") if isinstance(job.get("progressDetails"), dict) else {}
+    if project_id and details.get("domainTreeReady"):
+        decorated["partialResult"] = DomainTreeAgent().get_result(project_id)
+    return decorated
 
 
 def _require_project(project_id: str) -> dict:
@@ -47,7 +63,7 @@ def _submit(project_id: str, request_payload: dict) -> dict:
         )
     except BackgroundJobCapacityExceeded as error:
         raise HTTPException(status_code=503, detail=str(error), headers={"Retry-After": "1"}) from error
-    return {"status": "accepted", "created": created, **job}
+    return {"status": "accepted", "created": created, **_decorate_domain_tree_job(job)}
 
 
 def _require_project_job(project_id: str, job_id: str) -> dict:
@@ -56,7 +72,7 @@ def _require_project_job(project_id: str, job_id: str) -> dict:
     request = (job or {}).get("request") or {}
     if not job or job.get("type") != "domain_tree" or str(request.get("project_id") or "") != project_id:
         raise HTTPException(status_code=404, detail="当前项目中不存在该领域树任务")
-    return job
+    return _decorate_domain_tree_job(job)
 
 
 def _knowledge_service(project_id: str) -> ProjectKnowledgeService:
@@ -90,13 +106,31 @@ def generate_project_domain_tree(project_id: str, payload: DomainTreeGenerateOpt
     return _submit(project_id, payload.model_dump())
 
 
+@router.post("/api/projects/{project_id}/domain-tree/resume")
+def resume_project_semantic_extraction(
+    project_id: str,
+    payload: DomainTreeResumeOptions,
+) -> dict:
+    """复用领域树快照和成功缓存，只继续尚未成功的语义分块。"""
+    _require_project(project_id)
+    if not DomainTreeAgent().get_result(project_id):
+        raise HTTPException(status_code=409, detail="当前项目没有可恢复的领域树快照")
+    return _submit(
+        project_id,
+        {
+            "action": "resume",
+            "semantic_max_output_tokens": payload.semantic_max_output_tokens,
+        },
+    )
+
+
 @router.get("/api/domain-tree/jobs/active/{project_id}")
 def get_active_domain_tree_job(project_id: str) -> dict:
     _require_project(project_id)
     job = background_job_manager.find_active("domain_tree", f"domain-tree:{project_id}")
     if not job:
         raise HTTPException(status_code=404, detail="当前项目没有活动的领域树任务")
-    return job
+    return _decorate_domain_tree_job(job)
 
 
 @router.get("/api/projects/{project_id}/domain-tree/jobs/active")
@@ -118,7 +152,7 @@ def cancel_project_domain_tree_job(project_id: str, job_id: str) -> dict:
     job = background_job_manager.cancel(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="领域树任务不存在")
-    return job
+    return _decorate_domain_tree_job(job)
 
 
 @router.get("/api/domain-tree/{project_id}")

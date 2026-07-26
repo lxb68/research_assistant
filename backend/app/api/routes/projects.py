@@ -3,7 +3,8 @@
 from fastapi import APIRouter, HTTPException
 
 from app.core.config import settings
-from app.schemas.api import ProjectCreateRequest, ProjectPapersRequest
+from app.schemas.api import ProjectCreateRequest, ProjectPapersRequest, ProjectUpdateRequest
+from app.services.background_jobs import background_job_manager
 from app.services.paper_repository import PaperRepository
 from app.services.project_repository import (
     ProjectNotFoundError,
@@ -48,6 +49,35 @@ def get_project(project_id: str) -> dict:
         return {"project": projects.require(project_id)}
     except ProjectNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.patch("/api/projects/{project_id}")
+def rename_project(project_id: str, payload: ProjectUpdateRequest) -> dict:
+    projects, _ = _repositories()
+    try:
+        return {"status": "ok", "project": projects.rename(project_id, payload.name)}
+    except ProjectNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.delete("/api/projects/{project_id}")
+def archive_project(project_id: str) -> dict:
+    projects, _ = _repositories()
+    if background_job_manager.find_active("domain_tree", f"domain-tree:{project_id}"):
+        raise HTTPException(status_code=409, detail="项目正在生成领域树或知识图谱，完成或取消后才能删除")
+    try:
+        project = projects.archive(project_id)
+        return {
+            "status": "ok",
+            "project": project,
+            "message": "项目已归档；文献、成员关系和分析产物均已保留",
+        }
+    except ProjectNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @router.get("/api/projects/{project_id}/papers")

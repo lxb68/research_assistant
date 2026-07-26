@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.agents import DomainTreeAgent, HunterAgent, OrchestratorAgent
+from app.agents.domainTree_agent import KnowledgeGraphQualityError
 from app.core.config import settings
 from app.schemas.api import DatasetDownloadRequest, DomainTreeGenerateRequest, ResearchChatRequest
 from app.services.background_jobs import BackgroundJobContext, BackgroundJobManager
@@ -15,6 +16,88 @@ from app.services.model_config import ModelConfigStore
 from app.services.project_scope import ProjectScopeService
 from app.services.research_memory import research_memory_store
 from app.services.zotero_sync import ZoteroSyncService
+
+
+_SEMANTIC_TRANSIENT_FAILURES = {
+    "timeout",
+    "rate_limited",
+    "upstream",
+    "invalid_json",
+    "empty_response",
+    "failure_rate_exceeded",
+}
+_SEMANTIC_CONFIGURATION_FAILURES = {
+    "authentication",
+    "quota_exhausted",
+    "not_found",
+    "content_filtered",
+    "request_budget_exceeded",
+    "input_token_budget_exceeded",
+}
+_SEMANTIC_CIRCUIT_FAILURES = {
+    "failure_rate_exceeded",
+    "request_budget_exceeded",
+    "input_token_budget_exceeded",
+}
+
+
+def _semantic_auto_resume_decision(extraction: dict[str, Any]) -> tuple[bool, str]:
+    """只自动恢复瞬时故障；配置错误和大面积输出截断等待用户处理。"""
+    raw_reasons = extraction.get("failureReasons")
+    reasons = {
+        str(category): max(0, int(count or 0))
+        for category, count in (raw_reasons.items() if isinstance(raw_reasons, dict) else [])
+    }
+    if any(reasons.get(category, 0) for category in _SEMANTIC_CONFIGURATION_FAILURES):
+        return False, "检测到认证、配额或模型配置错误，已暂停自动恢复"
+
+    root_failures = {
+        category: count
+        for category, count in reasons.items()
+        if category not in _SEMANTIC_CIRCUIT_FAILURES
+    }
+    root_failure_count = sum(root_failures.values())
+    truncated_count = root_failures.get("output_truncated", 0)
+    if truncated_count >= 3 and (
+        not root_failure_count or truncated_count / root_failure_count >= 0.5
+    ):
+        return False, "检测到大面积模型输出截断，请调整模型或思考模式后手动继续"
+
+    transient_count = sum(reasons.get(category, 0) for category in _SEMANTIC_TRANSIENT_FAILURES)
+    if transient_count:
+        return True, "检测到可恢复的网络、限流或响应格式故障"
+    return False, "未识别到适合自动恢复的瞬时故障"
+
+
+def _semantic_recovery_details(
+    extraction: dict[str, Any],
+    *,
+    status: str,
+    attempt: int,
+    limit: int,
+    message: str,
+) -> dict[str, Any]:
+    """把恢复决策作为任务进度持久化，供重连和手动继续入口使用。"""
+    return {
+        "totalChunks": int(extraction.get("processedChunkCount") or 0)
+        + int(extraction.get("failedChunkCount") or 0),
+        "completedChunks": int(extraction.get("processedChunkCount") or 0)
+        + int(extraction.get("failedChunkCount") or 0),
+        "processedChunks": int(extraction.get("processedChunkCount") or 0),
+        "failedChunks": int(extraction.get("failedChunkCount") or 0),
+        "cacheHits": int(extraction.get("cacheHitCount") or 0),
+        "cacheMisses": int(extraction.get("cacheMissCount") or 0),
+        "pendingChunks": int(extraction.get("failedChunkCount") or 0),
+        "coverageRatio": float(extraction.get("coverageRatio") or 0),
+        "failureReasons": dict(extraction.get("failureReasons") or {}),
+        "circuitOpenReason": str(extraction.get("circuitOpenReason") or ""),
+        "autoResumeStatus": status,
+        "autoResumeAttempt": attempt,
+        "autoResumeLimit": limit,
+        "manualResumeAvailable": status == "paused",
+        "recoveryMessage": message,
+        "domainTreeReady": True,
+    }
 
 
 def _research_arguments(payload: ResearchChatRequest) -> dict[str, Any]:
@@ -109,11 +192,14 @@ def _domain_tree(context: BackgroundJobContext, raw: dict[str, Any]) -> dict[str
         raise ValueError("请先配置模型参数")
     agent = DomainTreeAgent()
 
+    recovery_state: dict[str, Any] = {}
+
     def report(update: dict[str, Any]) -> None:
         completed = int(update.get("completedChunks") or 0)
         total = int(update.get("totalChunks") or 0)
         progress = int(completed * 90 / total) + 5 if total else 5
         safe_update = {key: value for key, value in update.items() if key != "partialResult"}
+        safe_update.update(recovery_state)
         context.progress(
             progress,
             stage=str(update.get("stage") or "building"),
@@ -121,19 +207,100 @@ def _domain_tree(context: BackgroundJobContext, raw: dict[str, Any]) -> dict[str
             details=safe_update,
         )
 
-    tags = agent.handle_domain_tree_sync(
-        payload.project_id,
-        action=payload.action,
-        all_toc=payload.all_toc,
-        new_toc=payload.new_toc,
-        model=payload.model or model_payload,
-        language=payload.language,
-        primary_heading_count=payload.primary_heading_count,
-        secondary_heading_count=payload.secondary_heading_count,
-        delete_toc=payload.delete_toc,
-        cancel_event=context.cancel_event,
-        progress_callback=report,
-    )
+    def execute(*, resume: bool) -> list[dict[str, Any]] | None:
+        if resume:
+            return agent.resume_knowledge_graph_sync(
+                payload.project_id,
+                model=payload.model or model_payload,
+                semantic_max_output_tokens=payload.semantic_max_output_tokens,
+                cancel_event=context.cancel_event,
+                progress_callback=report,
+                metric_callback=context.record_model_call,
+            )
+        return agent.handle_domain_tree_sync(
+            payload.project_id,
+            action=payload.action,
+            all_toc=payload.all_toc,
+            new_toc=payload.new_toc,
+            model=payload.model or model_payload,
+            language=payload.language,
+            primary_heading_count=payload.primary_heading_count,
+            secondary_heading_count=payload.secondary_heading_count,
+            max_output_tokens=payload.max_output_tokens,
+            semantic_max_output_tokens=payload.semantic_max_output_tokens,
+            delete_toc=payload.delete_toc,
+            cancel_event=context.cancel_event,
+            progress_callback=report,
+            metric_callback=context.record_model_call,
+        )
+
+    auto_resume_limit = settings.semantic_graph_auto_resume_attempts
+    auto_resume_attempt = 0
+    try:
+        tags = execute(resume=payload.action == "resume")
+    except KnowledgeGraphQualityError as initial_error:
+        quality_error = initial_error
+        while auto_resume_attempt < auto_resume_limit:
+            should_resume, decision_message = _semantic_auto_resume_decision(
+                quality_error.extraction
+            )
+            if not should_resume:
+                break
+            auto_resume_attempt += 1
+            recovery_state.clear()
+            recovery_state.update(
+                {
+                    "autoResumeStatus": "running",
+                    "autoResumeAttempt": auto_resume_attempt,
+                    "autoResumeLimit": auto_resume_limit,
+                    "resumeMode": "automatic",
+                }
+            )
+            details = _semantic_recovery_details(
+                quality_error.extraction,
+                status="running",
+                attempt=auto_resume_attempt,
+                limit=auto_resume_limit,
+                message=decision_message,
+            )
+            context.progress(
+                5,
+                stage="semantic_auto_resume",
+                message=f"正在自动继续语义抽取（{auto_resume_attempt}/{auto_resume_limit}）",
+                details={**details, **recovery_state},
+            )
+            delay = settings.semantic_graph_auto_resume_delay_seconds * (
+                2 ** (auto_resume_attempt - 1)
+            )
+            if delay and context.cancel_event.wait(delay):
+                context.check_cancelled()
+            try:
+                tags = execute(resume=True)
+                break
+            except KnowledgeGraphQualityError as next_error:
+                quality_error = next_error
+        else:
+            decision_message = "自动恢复次数已用尽"
+
+        if "tags" not in locals():
+            _should_resume, decision_message = _semantic_auto_resume_decision(
+                quality_error.extraction
+            )
+            details = _semantic_recovery_details(
+                quality_error.extraction,
+                status="paused",
+                attempt=auto_resume_attempt,
+                limit=auto_resume_limit,
+                message=decision_message,
+            )
+            context.progress(
+                5,
+                stage="semantic_resume_paused",
+                message="语义自动恢复已暂停，可调整模型后继续失败分块",
+                details=details,
+            )
+            raise quality_error
+
     if not tags:
         raise ValueError("未找到可用于生成领域树的 Markdown 或目录数据")
     domain_tree_path = agent.get_result_path(payload.project_id)
@@ -141,11 +308,22 @@ def _domain_tree(context: BackgroundJobContext, raw: dict[str, Any]) -> dict[str
         raise RuntimeError("领域树已生成，但读取结果失败")
     graph_path = domain_tree_path.parent / "knowledge_graph.json"
     manifest_path = domain_tree_path.parent / "manifest.json"
+    result = agent.get_result(payload.project_id) or {}
+    graph = result.get("knowledgeGraph") if isinstance(result.get("knowledgeGraph"), dict) else {}
+    extraction = graph.get("extraction") if isinstance(graph.get("extraction"), dict) else {}
     return {
         "projectId": payload.project_id,
         "domainTreePath": str(domain_tree_path),
         "knowledgeGraphPath": str(graph_path) if graph_path.exists() else None,
         "manifestPath": str(manifest_path) if manifest_path.exists() else None,
+        "quality": extraction,
+        "resume": {
+            "mode": "manual" if payload.action == "resume" else (
+                "automatic" if auto_resume_attempt else "none"
+            ),
+            "attempts": auto_resume_attempt,
+        },
+        "modelUsage": context.model_usage_summary(),
     }
 
 

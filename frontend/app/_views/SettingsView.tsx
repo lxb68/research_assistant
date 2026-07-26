@@ -52,7 +52,11 @@ type RuntimeIntegration = {
 };
 
 type RuntimeConfigResponse = {
+  revision?: number;
   restartRequired?: boolean;
+  restartRequiredKeys?: string[];
+  reindexRequiredKeys?: string[];
+  hotReloadAvailable?: boolean;
   server?: Record<string, unknown>;
   research?: Record<string, unknown>;
   retrieval?: Record<string, unknown>;
@@ -68,15 +72,26 @@ type EnvField = {
   kind: "text" | "integer" | "float" | "boolean" | "secret" | "choice";
   value?: string | number | boolean;
   configured: boolean;
+  activeConfigured?: boolean;
   source: "env_file" | "runtime_default";
   description: string;
+  effect?: "hot" | "restart" | "reindex";
+  pending?: boolean;
+  activeValue?: string | number | boolean;
   min?: number;
   max?: number;
   options?: string[];
 };
 
 type EnvConfigResponse = {
+  revision?: number;
   restartRequired?: boolean;
+  restartRequiredKeys?: string[];
+  reindexRequiredKeys?: string[];
+  appliedKeys?: string[];
+  effectiveFor?: "new_requests_and_tasks" | "pending";
+  hotReloadAvailable?: boolean;
+  backupCreated?: boolean;
   groups?: Array<{ id: string; label: string; description: string; fields: EnvField[] }>;
 };
 
@@ -476,7 +491,8 @@ export default function SettingsWorkspace() {
         body: JSON.stringify({ values: { SPLIT_MIN_LENGTH: documentSettings.minimumLength, SPLIT_MAX_LENGTH: documentSettings.maximumSplitLength } }),
       });
       if (!response.ok) throw new Error(await responseError(response, "保存后端默认分块失败"));
-      setEnvConfig(await response.json() as EnvConfigResponse);
+      const payload = await response.json() as EnvConfigResponse;
+      setEnvConfig(payload);
       let current: Record<string, unknown> = {};
       try {
         current = JSON.parse(window.localStorage.getItem(WORKSPACE_SETTINGS_STORAGE_KEY) || "{}") as Record<string, unknown>;
@@ -488,7 +504,11 @@ export default function SettingsWorkspace() {
         JSON.stringify({ ...current, ...documentSettings }),
       );
       setSavedDocumentSettings(documentSettings);
-      setMessage("分块设置已保存：下次重新解析立即使用，后端默认值将在重启后生效。");
+      setMessage(
+        payload.appliedKeys?.length
+          ? "分块设置已保存并应用；新创建的解析任务会立即使用新默认值。"
+          : "分块设置已保存，当前部署模式需要重启后端后生效。",
+      );
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "保存文档分块设置失败");
     } finally {
@@ -597,9 +617,24 @@ export default function SettingsWorkspace() {
         body: JSON.stringify({ values: envChanges }),
       });
       if (!response.ok) throw new Error(await responseError(response, "保存环境配置失败"));
-      setEnvConfig(await response.json() as EnvConfigResponse);
+      const payload = await response.json() as EnvConfigResponse;
+      setEnvConfig(payload);
       setEnvChanges({});
-      setMessage("已安全写入 backend/.env 并生成备份。请重启后端服务使新配置生效。");
+      const effects: string[] = [];
+      if (payload.appliedKeys?.length) {
+        effects.push(`${payload.appliedKeys.length} 项已应用到新请求和新任务`);
+      }
+      if (payload.reindexRequiredKeys?.length) {
+        effects.push(`${payload.reindexRequiredKeys.length} 项将在后续检索中重新生成隔离的向量缓存`);
+      }
+      if (payload.restartRequiredKeys?.length) {
+        effects.push(`${payload.restartRequiredKeys.length} 项需重启后端`);
+      }
+      setMessage(
+        `已安全写入 backend/.env${payload.backupCreated ? "并生成备份" : ""}。${
+          effects.length ? effects.join("；") : "运行配置未发生变化"
+        }。`,
+      );
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "保存环境配置失败");
     } finally {
@@ -670,7 +705,19 @@ export default function SettingsWorkspace() {
                         )}
                         {field.kind === "secret" ? <button type="button" className="settings-env-clear" onClick={() => updateEnvField(field.key, null)}>清除</button> : null}
                       </div>
-                      <p>{field.description}<span>{field.kind === "secret" ? draftValue === null ? " · 保存后清除" : field.configured ? " · 已配置" : " · 未配置" : field.source === "env_file" ? " · 来自 .env" : " · 当前默认值"}</span></p>
+                      <p>
+                        {field.description}
+                        <span>{field.kind === "secret" ? draftValue === null ? " · 保存后清除" : field.configured ? " · 已配置" : " · 未配置" : field.source === "env_file" ? " · 来自 .env" : " · 当前默认值"}</span>
+                        {field.pending ? (
+                          <span>
+                            {field.effect === "restart"
+                              ? " · 待重启生效"
+                              : field.effect === "reindex"
+                                ? " · 待重建索引"
+                                : " · 待应用"}
+                          </span>
+                        ) : null}
+                      </p>
                     </div>
                   );
                 })}
@@ -719,7 +766,19 @@ export default function SettingsWorkspace() {
                     )}
                     {field.kind === "secret" ? <button type="button" className="settings-env-clear" onClick={() => updateEnvField(field.key, null)}>清除</button> : null}
                   </div>
-                  <p>{field.description}<span>{field.kind === "secret" ? draftValue === null ? " · 保存后清除" : field.configured ? " · 已配置" : " · 未配置" : field.source === "env_file" ? " · 来自 .env" : " · 当前默认值"}</span></p>
+                  <p>
+                    {field.description}
+                    <span>{field.kind === "secret" ? draftValue === null ? " · 保存后清除" : field.configured ? " · 已配置" : " · 未配置" : field.source === "env_file" ? " · 来自 .env" : " · 当前默认值"}</span>
+                    {field.pending ? (
+                      <span>
+                        {field.effect === "restart"
+                          ? " · 待重启生效"
+                          : field.effect === "reindex"
+                            ? " · 待重建索引"
+                            : " · 待应用"}
+                      </span>
+                    ) : null}
+                  </p>
                 </div>
               );
             })}

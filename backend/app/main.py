@@ -13,9 +13,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import ALL_ROUTERS
 from app.api.routes.mineru import _process_mineru_sync
 from app.api.routes.system import install_debug_route
-from app.core.config import settings
+from app.core.config import runtime_config_manager, settings
 from app.core.logging_config import configure_app_logging
 from app.services.mineru import MinerURequest
+from app.services.runtime_settings import bind_runtime_settings
 from app.services.stream_tasks import stream_task_manager
 from app.services.background_jobs import background_job_manager
 from app.services.background_job_handlers import register_background_job_handlers
@@ -41,6 +42,18 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def bind_request_runtime_settings(request, call_next):
+    """让单个 HTTP 请求固定使用进入请求时的完整配置版本。"""
+
+    snapshot = runtime_config_manager.snapshot()
+    with bind_runtime_settings(snapshot):
+        response = await call_next(request)
+    response.headers["X-Runtime-Config-Revision"] = str(snapshot.revision)
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,

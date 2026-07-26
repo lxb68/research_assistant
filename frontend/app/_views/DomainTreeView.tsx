@@ -12,6 +12,7 @@ import { useProjects } from "@/app/_components/ProjectProvider";
 import { DomainTreePanel } from "@/app/_views/project-knowledge/DomainTreePanel";
 import { KnowledgeGraphPanel } from "@/app/_views/project-knowledge/KnowledgeGraphPanel";
 import { HeadingCountControl } from "@/app/_views/project-knowledge/HeadingCountControl";
+import { TokenLimitControl } from "@/app/_views/project-knowledge/TokenLimitControl";
 import { ProjectLiteraturePanel } from "@/app/_views/project-knowledge/ProjectLiteraturePanel";
 import {
   KnowledgeCurationDialog,
@@ -166,20 +167,25 @@ type ModelConfigStatus = {
   model?: string;
   baseUrl?: string;
   maskedApiKey?: string;
+  domainTreeMaxOutputTokens?: number;
+  semanticGraphMaxOutputTokens?: number;
+  outputTokensUpperBound?: number;
 };
 
 type DomainTreeAction = "revise" | "rebuild" | "keep";
+type DomainTreeJobAction = DomainTreeAction | "resume";
 type DomainTreeViewMode = "project" | "tree" | "graph";
 type DomainTreeLanguage = "auto" | "中文" | "English";
 
 type DomainTreeJob = {
   jobId: string;
   projectId: string;
-  action: DomainTreeAction;
+  action: DomainTreeJobAction;
   status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted";
   stage: string;
   message: string;
-  progress?: {
+  progress: number;
+  progressDetails?: {
     documentCount?: number;
     totalChunks?: number;
     currentChunk?: number;
@@ -189,11 +195,21 @@ type DomainTreeJob = {
     retryAttempt?: number;
     cacheHits?: number;
     cacheMisses?: number;
+    pendingChunks?: number;
     maxWorkers?: number;
     domainTreeReady?: boolean;
     generationMode?: "llm" | "heuristic";
     degraded?: boolean;
     degradeReason?: string;
+    coverageRatio?: number;
+    failureReasons?: Record<string, number>;
+    circuitOpenReason?: string;
+    autoResumeStatus?: "running" | "paused" | string;
+    autoResumeAttempt?: number;
+    autoResumeLimit?: number;
+    manualResumeAvailable?: boolean;
+    recoveryMessage?: string;
+    resumeMode?: "automatic" | "manual" | string;
   };
   partialResult?: DomainTreeResult | null;
   result?: DomainTreeResult | null;
@@ -265,10 +281,11 @@ const RELATION_TYPE_LABELS: Record<string, string> = {
 
 const EXCLUDED_CHUNK_CATEGORIES = new Set(["references", "front_matter", "back_matter"]);
 
-const ACTION_LABELS: Record<DomainTreeAction, string> = {
+const ACTION_LABELS: Record<DomainTreeJobAction, string> = {
   revise: "修改领域树",
   rebuild: "重建领域树",
   keep: "保持不变",
+  resume: "继续语义抽取",
 };
 
 /* 提交按钮直接说明预期结果，避免只写“更新”而无法对应当前执行模式。 */
@@ -456,12 +473,13 @@ function DomainTreeProjectPage({
     projectError,
     selectProject,
     createProject,
+    renameProject,
+    deleteProject,
     refreshProjects,
   } = useProjects();
   const [papers, setPapers] = useState<SavedPaper[]>([]);
   const [availablePapers, setAvailablePapers] = useState<SavedPaper[]>([]);
   const [memberDraftIds, setMemberDraftIds] = useState<string[]>([]);
-  const [isEditingMembers, setIsEditingMembers] = useState(false);
   const [isSavingMembers, setIsSavingMembers] = useState(false);
   const [sourceProjectId, setSourceProjectId] = useState("");
   const [isLoadingSourcePapers, setIsLoadingSourcePapers] = useState(false);
@@ -475,7 +493,7 @@ function DomainTreeProjectPage({
   const [activeJobId, setActiveJobId] = useState("");
   const [activeJob, setActiveJob] = useState<DomainTreeJob | null>(null);
   const [isCancelling, setIsCancelling] = useState(false);
-  const [isLoadingExisting, setIsLoadingExisting] = useState(false);
+  const [isLoadingExisting, setIsLoadingExisting] = useState(true);
   const [isLoadingChunks, setIsLoadingChunks] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
@@ -486,6 +504,8 @@ function DomainTreeProjectPage({
   const [generationLanguage, setGenerationLanguage] = useState<DomainTreeLanguage>("auto");
   const [primaryHeadingCountInput, setPrimaryHeadingCountInput] = useState<string | null>(null);
   const [secondaryHeadingCountInput, setSecondaryHeadingCountInput] = useState<string | null>(null);
+  const [domainTreeTokenInput, setDomainTreeTokenInput] = useState("");
+  const [semanticTokenInput, setSemanticTokenInput] = useState("");
   const [viewMode, setViewMode] = useState<DomainTreeViewMode>("project");
   const [selectedSecondaryKey, setSelectedSecondaryKey] = useState("");
   const [selectedSecondaryLabel, setSelectedSecondaryLabel] = useState("");
@@ -522,6 +542,27 @@ function DomainTreeProjectPage({
       || secondaryHeadingCount > DOMAIN_TREE_HEADING_COUNT_MAX
       ? `二级标题数量必须是 0–${DOMAIN_TREE_HEADING_COUNT_MAX} 的整数`
       : "";
+  const domainTreeTokenLimit = Number(domainTreeTokenInput);
+  const semanticTokenLimit = Number(semanticTokenInput);
+  const tokenUpperBound = modelStatus?.outputTokensUpperBound;
+  const semanticTokenLimitError = semanticTokenInput
+    && (
+      !Number.isInteger(semanticTokenLimit)
+      || semanticTokenLimit < 1
+      || (tokenUpperBound !== undefined && semanticTokenLimit > tokenUpperBound)
+    )
+    ? `语义分块输出 Token 必须是 1–${tokenUpperBound ?? "后端上限"} 的整数`
+    : "";
+  const tokenLimitError = domainTreeTokenInput
+    && (
+      !Number.isInteger(domainTreeTokenLimit)
+      || domainTreeTokenLimit < 1
+      || (tokenUpperBound !== undefined && domainTreeTokenLimit > tokenUpperBound)
+    )
+    ? `领域树输出 Token 必须是 1–${tokenUpperBound ?? "后端上限"} 的整数`
+    : semanticTokenLimitError;
+  const semanticResumeAvailable = result?.graphStatus === "failed"
+    || Boolean(activeJob?.progressDetails?.manualResumeAvailable);
 
   const currentDocumentMap = useMemo(() => {
     // flatMap 显式保留二元组类型，同时过滤没有记录 ID 的论文。
@@ -1075,7 +1116,7 @@ function DomainTreeProjectPage({
 
         setActiveJob(payload);
         setStatus(payload.message || "领域树任务正在后台运行");
-        if (payload.progress?.domainTreeReady && payload.partialResult) {
+        if (payload.progressDetails?.domainTreeReady && payload.partialResult) {
           setResult((current) =>
             current?.generatedAt === payload.partialResult?.generatedAt
               ? current
@@ -1086,13 +1127,14 @@ function DomainTreeProjectPage({
           if (payload.result) {
             setResult(payload.result);
           }
+          setError("");
           setMatchedChunks([]);
           setSelectedSecondaryKey("");
           setSelectedSecondaryLabel("");
           setStatus(
             payload.result?.degraded
-              ? `${ACTION_LABELS[payload.action]}已降级完成：模型生成失败，本次结果来自启发式规则。`
-              : `${ACTION_LABELS[payload.action]}完成，领域树和知识图谱已更新。`,
+              ? `${ACTION_LABELS[payload.action] || "领域树任务"}已降级完成：模型生成失败，本次结果来自启发式规则。`
+              : `${ACTION_LABELS[payload.action] || "领域树任务"}完成，领域树和知识图谱已更新。`,
           );
           setIsGenerating(false);
           setIsCancelling(false);
@@ -1178,6 +1220,11 @@ function DomainTreeProjectPage({
       setStatus("");
       return;
     }
+    if (tokenLimitError) {
+      setError(tokenLimitError);
+      setStatus("");
+      return;
+    }
 
     setIsGenerating(true);
     setError("");
@@ -1202,6 +1249,8 @@ function DomainTreeProjectPage({
           language: generationLanguage,
           primary_heading_count: primaryHeadingCount,
           secondary_heading_count: secondaryHeadingCount,
+          max_output_tokens: domainTreeTokenInput ? domainTreeTokenLimit : undefined,
+          semantic_max_output_tokens: semanticTokenInput ? semanticTokenLimit : undefined,
         }),
         },
       );
@@ -1246,6 +1295,44 @@ function DomainTreeProjectPage({
     }
   }
 
+  /** 复用成功语义缓存，只提交尚未成功的分块。 */
+  async function handleResumeSemanticExtraction() {
+    if (isGenerating || !modelStatus?.configured) {
+      return;
+    }
+    if (semanticTokenLimitError) {
+      setError(semanticTokenLimitError);
+      return;
+    }
+    setIsGenerating(true);
+    setError("");
+    setStatus("正在准备继续抽取失败的语义分块...");
+    try {
+      const response = await fetch(
+        buildApiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}/domain-tree/resume`),
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            semantic_max_output_tokens: semanticTokenInput ? semanticTokenLimit : undefined,
+          }),
+        },
+      );
+      const payload = (await response.json().catch(() => ({}))) as DomainTreeJob & { detail?: string };
+      if (!response.ok) {
+        throw new Error(payload.detail || "继续语义抽取失败");
+      }
+      setActiveJob(payload);
+      setActiveJobId(payload.jobId);
+      setStatus(payload.message || "语义断点续跑任务已进入后台队列");
+    } catch (resumeError) {
+      setError(resumeError instanceof Error ? resumeError.message : "继续语义抽取失败");
+      setIsGenerating(false);
+    }
+  }
+
   /** 创建空项目，论文成员由项目文献面板显式选择。 */
   async function handleCreateProject() {
     const name = newProjectName.trim();
@@ -1284,22 +1371,6 @@ function DomainTreeProjectPage({
     }
   }
 
-  /** 打开成员管理时默认展示全部文献，也允许按来源项目缩小范围。 */
-  async function handleToggleMemberEditor() {
-    if (isEditingMembers) {
-      setIsEditingMembers(false);
-      return;
-    }
-    const sourceId = sourceProjectId === "" || projects.some(
-      (project) => project.id === sourceProjectId && project.id !== activeProjectId,
-    )
-      ? sourceProjectId
-      : "";
-    setSourceProjectId(sourceId);
-    setIsEditingMembers(true);
-    await loadSourceProjectPapers(sourceId);
-  }
-
   /** 保存当前项目的完整论文成员集合。 */
   async function handleSaveProjectMembers() {
     setIsSavingMembers(true);
@@ -1316,7 +1387,6 @@ function DomainTreeProjectPage({
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || "保存项目论文失败");
       setPapers(payload.papers ?? []);
-      setIsEditingMembers(false);
       setManualGenerationMode(null);
       setStatus("项目论文集合已更新，可修订或重建领域树与知识图谱。");
       await refreshProjects();
@@ -1636,6 +1706,16 @@ function DomainTreeProjectPage({
   const latestAction = (result?.action as DomainTreeAction | undefined) ?? "rebuild";
   const treeCardTitle = latestAction === "revise" ? "修订标签树" : "领域树";
   const isModelConfigurationMissing = modelStatus?.configured === false;
+  const analysisStats = (
+    <div className="domain-tree-stats" aria-label="当前项目分析统计">
+      <span>{isLoadingPapers ? "—" : markdownReadyPapers.length} 篇文献</span>
+      <span>{isLoadingExisting ? "—" : graphStats.nodeCount} 个节点</span>
+      <span>{isLoadingExisting ? "—" : graphStats.edgeCount} 条关系</span>
+      {!isLoadingExisting && result?.curation?.hasManualChanges ? (
+        <span className="knowledge-curation-badge">人工修订 v{result.curation.revision}</span>
+      ) : null}
+    </div>
+  );
 
   return (
     <main className="domain-tree-page">
@@ -1668,19 +1748,13 @@ function DomainTreeProjectPage({
             知识图谱
           </button>
         </section>
-          <div className="domain-tree-stats" aria-label="当前项目分析统计">
-            <span>{markdownReadyPapers.length} 篇文献</span>
-            <span>{graphStats.nodeCount} 个节点</span>
-            <span>{graphStats.edgeCount} 条关系</span>
-            {result?.curation?.hasManualChanges ? (
-              <span className="knowledge-curation-badge">人工修订 v{result.curation.revision}</span>
-            ) : null}
-          </div>
+          {viewMode === "project" ? null : analysisStats}
         </div>
 
         {viewMode === "project" ? (
           <>
           <ProjectLiteraturePanel
+            analysisStats={analysisStats}
             projects={projects}
             activeProjectId={activeProjectId}
             projectError={projectError}
@@ -1689,13 +1763,16 @@ function DomainTreeProjectPage({
             isCreateProjectOpen={isCreateProjectOpen}
             newProjectName={newProjectName}
             isCreatingProject={isCreatingProject}
-            isEditingMembers={isEditingMembers}
+            isLoadingMembers={isLoadingPapers}
             sourceProjectId={sourceProjectId}
             isLoadingSourcePapers={isLoadingSourcePapers}
             isSavingMembers={isSavingMembers}
             availablePapers={availablePapers}
+            savedMemberIds={papers.flatMap((paper) => paper.id ? [paper.id] : [])}
             memberDraftIds={memberDraftIds}
             onSelectProject={selectProject}
+            onRenameProject={renameProject}
+            onDeleteProject={deleteProject}
             onToggleCreateProject={() => setIsCreateProjectOpen((current) => !current)}
             onNewProjectNameChange={setNewProjectName}
             onCreateProject={() => void handleCreateProject()}
@@ -1703,7 +1780,9 @@ function DomainTreeProjectPage({
               setIsCreateProjectOpen(false);
               setNewProjectName("");
             }}
-            onToggleMemberEditor={() => void handleToggleMemberEditor()}
+            onResetMembers={() => {
+              setMemberDraftIds(papers.flatMap((paper) => paper.id ? [paper.id] : []));
+            }}
             onSourceProjectChange={(projectId) => {
               setSourceProjectId(projectId);
               void loadSourceProjectPapers(projectId);
@@ -1719,7 +1798,7 @@ function DomainTreeProjectPage({
               const sourceIds = new Set(availablePapers.flatMap((paper) => paper.id ? [paper.id] : []));
               setMemberDraftIds((current) => current.filter((paperId) => !sourceIds.has(paperId)));
             }}
-            onSaveMembers={() => void handleSaveProjectMembers()}
+            onSaveMembers={handleSaveProjectMembers}
           />
 
         {isModelConfigurationMissing && !isLoadingModelStatus ? (
@@ -1838,13 +1917,36 @@ function DomainTreeProjectPage({
                 setError("");
               }}
             />
+            <TokenLimitControl
+              domainTreeValue={domainTreeTokenInput}
+              semanticValue={semanticTokenInput}
+              domainTreeDefault={modelStatus?.domainTreeMaxOutputTokens}
+              semanticDefault={modelStatus?.semanticGraphMaxOutputTokens}
+              upperBound={tokenUpperBound}
+              error={tokenLimitError}
+              disabled={isGenerating}
+              onDomainTreeChange={(value) => {
+                setDomainTreeTokenInput(value);
+                setError("");
+              }}
+              onSemanticChange={(value) => {
+                setSemanticTokenInput(value);
+                setError("");
+              }}
+            />
           </div>
 
           <div className="domain-tree-action-buttons">
             <button
               type="button"
               className="domain-tree-generate-button"
-              disabled={isGenerating || !modelStatus?.configured || markdownReadyPapers.length === 0}
+              disabled={
+                isGenerating
+                || !modelStatus?.configured
+                || markdownReadyPapers.length === 0
+                || Boolean(headingCountError)
+                || Boolean(tokenLimitError)
+              }
               onClick={() => {
                 void handleGenerate();
               }}
@@ -1887,26 +1989,49 @@ function DomainTreeProjectPage({
             <span>{result.warnings?.[0] || "模型生成失败，本次领域树由启发式规则生成。"}</span>
           </div>
         ) : null}
+        {semanticResumeAvailable && !isGenerating ? (
+          <div className="domain-tree-degraded-warning" role="status">
+            <strong>知识图谱语义抽取尚未完成</strong>
+            <span>
+              {activeJob?.progressDetails?.recoveryMessage
+                || "已保留领域树快照和成功分块缓存，可从失败位置继续。"}
+            </span>
+            <button
+              type="button"
+              className="domain-tree-inline-button"
+              disabled={!modelStatus?.configured || Boolean(semanticTokenLimitError)}
+              onClick={() => void handleResumeSemanticExtraction()}
+            >
+              继续抽取失败分块
+            </button>
+          </div>
+        ) : null}
         {isGenerating && activeJob ? (
           <div className="domain-tree-job-progress" aria-live="polite">
             <div className="domain-tree-job-progress-head">
               <strong>{activeJob.message || "领域树任务正在运行"}</strong>
               <span>
-                {activeJob.progress?.completedChunks ?? 0}/{activeJob.progress?.totalChunks ?? "?"} 分块
+                {activeJob.progressDetails?.completedChunks ?? 0}/{activeJob.progressDetails?.totalChunks ?? "?"} 分块
               </span>
             </div>
             <progress
-              max={Math.max(1, activeJob.progress?.totalChunks ?? 1)}
-              value={activeJob.progress?.completedChunks ?? 0}
+              max={Math.max(1, activeJob.progressDetails?.totalChunks ?? 1)}
+              value={activeJob.progressDetails?.completedChunks ?? 0}
             />
             <div className="domain-tree-meta">
-              <span>{activeJob.progress?.processedChunks ?? 0} 个成功分块</span>
-              <span>{activeJob.progress?.failedChunks ?? 0} 个失败分块</span>
-              <span>{activeJob.progress?.cacheHits ?? 0} 个缓存命中</span>
-              <span>{activeJob.progress?.cacheMisses ?? 0} 个待抽取分块</span>
-              <span>{activeJob.progress?.maxWorkers ?? 4} 路并发</span>
-              {activeJob.progress?.retryAttempt ? (
-                <span>正在进行第 {activeJob.progress.retryAttempt} 次尝试</span>
+              <span>{activeJob.progressDetails?.processedChunks ?? 0} 个成功分块</span>
+              <span>{activeJob.progressDetails?.failedChunks ?? 0} 个失败分块</span>
+              <span>{activeJob.progressDetails?.cacheHits ?? 0} 个缓存命中</span>
+              <span>{activeJob.progressDetails?.pendingChunks ?? 0} 个待抽取分块</span>
+              <span>{activeJob.progressDetails?.maxWorkers ?? 4} 路并发</span>
+              {activeJob.progressDetails?.retryAttempt ? (
+                <span>正在进行第 {activeJob.progressDetails.retryAttempt} 次尝试</span>
+              ) : null}
+              {activeJob.progressDetails?.autoResumeStatus === "running" ? (
+                <span>
+                  自动续跑 {activeJob.progressDetails.autoResumeAttempt ?? 1}/
+                  {activeJob.progressDetails.autoResumeLimit ?? 2}
+                </span>
               ) : null}
             </div>
           </div>
@@ -1936,7 +2061,28 @@ function DomainTreeProjectPage({
             ) : null}
           </div>
         ) : null}
-        {error ? <div className="domain-tree-error"><span>{error}</span></div> : null}
+        {error ? (
+          <div className="domain-tree-error">
+            <span>{error}</span>
+          </div>
+        ) : null}
+        {semanticResumeAvailable && !isGenerating ? (
+          <div className="domain-tree-degraded-warning" role="status">
+            <strong>知识图谱语义抽取尚未完成</strong>
+            <span>
+              {activeJob?.progressDetails?.recoveryMessage
+                || "已保留领域树快照和成功分块缓存，可从失败位置继续。"}
+            </span>
+            <button
+              type="button"
+              className="domain-tree-inline-button"
+              disabled={!modelStatus?.configured || Boolean(semanticTokenLimitError)}
+              onClick={() => void handleResumeSemanticExtraction()}
+            >
+              继续抽取失败分块
+            </button>
+          </div>
+        ) : null}
         {isLoadingPapers || isLoadingExisting ? (
           <div className="domain-tree-empty">
             <strong>正在准备数据...</strong>

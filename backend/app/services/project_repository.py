@@ -179,6 +179,36 @@ class ProjectRepository:
             connection.commit()
         return self.require(project_id)
 
+    def rename(self, project_id: str, name: str) -> dict[str, Any]:
+        """只修改项目元数据，不触碰论文成员关系和分析产物。"""
+        project = self.require(project_id)
+        normalized_name = str(name or "").strip()
+        if not normalized_name:
+            raise ValueError("项目名称不能为空")
+        with closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE projects SET name = ?, updated_at = ? WHERE id = ?",
+                (normalized_name[:200], _timestamp(), project["id"]),
+            )
+            connection.commit()
+        return self.require(project["id"])
+
+    def archive(self, project_id: str) -> dict[str, Any]:
+        """归档用户项目；保留论文关联与分析产物，避免不可恢复删除。"""
+        project = self.require(project_id)
+        if project["id"] == DEFAULT_PROJECT_ID:
+            raise ValueError("默认研究项目不能删除")
+        with closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE projects SET status = 'archived', updated_at = ? WHERE id = ?",
+                (_timestamp(), project["id"]),
+            )
+            connection.commit()
+        archived = self.get(project["id"])
+        if not archived:
+            raise ProjectNotFoundError("项目归档后读取失败")
+        return archived
+
     def list_paper_ids(self, project_id: str) -> list[str]:
         self.require(project_id)
         with closing(self.connect()) as connection:

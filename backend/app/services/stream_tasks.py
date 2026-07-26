@@ -10,7 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from app.core.config import settings
+from app.core.config import runtime_config_manager, settings
+from app.services.runtime_settings import RuntimeSettingsSnapshot, bind_runtime_settings
 from app.services.task_control import TaskCancelled, raise_if_task_cancelled
 
 
@@ -109,6 +110,7 @@ class StreamTask:
     id: str
     producer: StreamProducer
     buffer: BoundedEventBuffer
+    runtime_snapshot: RuntimeSettingsSnapshot
     status: str = "queued"
     cancel_event: threading.Event = field(default_factory=threading.Event)
     created_at: float = field(default_factory=time.monotonic)
@@ -157,8 +159,16 @@ class StreamTaskManager:
                 id=job_id,
                 producer=producer,
                 buffer=BoundedEventBuffer(self.event_queue_size),
+                runtime_snapshot=runtime_config_manager.snapshot(),
             )
-            task.buffer.emit({"type": "job", "jobId": job_id, "status": "queued"})
+            task.buffer.emit(
+                {
+                    "type": "job",
+                    "jobId": job_id,
+                    "status": "queued",
+                    "configRevision": task.runtime_snapshot.revision,
+                },
+            )
             self._tasks[job_id] = task
         try:
             self._executor.submit(self._run, task)
@@ -217,6 +227,10 @@ class StreamTaskManager:
             return len(self._tasks)
 
     def _run(self, task: StreamTask) -> None:
+        with bind_runtime_settings(task.runtime_snapshot):
+            self._run_with_bound_settings(task)
+
+    def _run_with_bound_settings(self, task: StreamTask) -> None:
         with self._lock:
             should_run = not task.cancel_event.is_set()
             task.status = "running" if should_run else "cancelled"

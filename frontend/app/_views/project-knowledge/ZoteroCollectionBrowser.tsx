@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import AutoStoriesRounded from "@mui/icons-material/AutoStoriesRounded";
 import FolderRounded from "@mui/icons-material/FolderRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
@@ -83,21 +83,37 @@ export function ZoteroCollectionBrowser({
   const [isLoadingTrees, setIsLoadingTrees] = useState(false);
   const [isLoadingPapers, setIsLoadingPapers] = useState(false);
   const [error, setError] = useState("");
+  const [loadedProjectId, setLoadedProjectId] = useState("");
+  const treeRequestRef = useRef<AbortController | null>(null);
+  const paperRequestRef = useRef<AbortController | null>(null);
 
   const loadTrees = useCallback(async () => {
+    treeRequestRef.current?.abort();
+    paperRequestRef.current?.abort();
+    paperRequestRef.current = null;
+    const controller = new AbortController();
+    treeRequestRef.current = controller;
     setIsLoadingTrees(true);
     setError("");
     try {
       const response = await fetch(buildApiUrl(
         `/api/projects/${encodeURIComponent(projectId)}/zotero-collections/tree`,
-      ), { cache: "no-store" });
+      ), { cache: "no-store", signal: controller.signal });
       const payload = await responsePayload(response, "读取 Zotero 分类结构失败");
+      if (treeRequestRef.current !== controller) return;
       setTrees((payload.trees ?? []) as ZoteroCollectionTree[]);
+      setLoadedProjectId(projectId);
     } catch (reason) {
+      if (reason instanceof DOMException && reason.name === "AbortError") return;
+      if (treeRequestRef.current !== controller) return;
       setTrees([]);
+      setLoadedProjectId(projectId);
       setError(reason instanceof Error ? reason.message : "读取 Zotero 分类结构失败");
     } finally {
-      setIsLoadingTrees(false);
+      if (treeRequestRef.current === controller) {
+        treeRequestRef.current = null;
+        setIsLoadingTrees(false);
+      }
     }
   }, [projectId]);
 
@@ -110,8 +126,17 @@ export function ZoteroCollectionBrowser({
     return () => window.clearTimeout(timer);
   }, [loadTrees, refreshToken]);
 
+  useEffect(() => () => {
+    treeRequestRef.current?.abort();
+    paperRequestRef.current?.abort();
+  }, []);
+
   async function selectNode(node: ZoteroCollectionTreeNode) {
+    paperRequestRef.current?.abort();
+    const controller = new AbortController();
+    paperRequestRef.current = controller;
     setSelectedNode(node);
+    setPapers([]);
     setIsLoadingPapers(true);
     setError("");
     try {
@@ -119,19 +144,28 @@ export function ZoteroCollectionBrowser({
         `/api/projects/${encodeURIComponent(projectId)}/zotero-collections/`
         + `${encodeURIComponent(node.sourceId)}/${encodeURIComponent(node.key)}/papers`
         + "?includeDescendants=true",
-      ), { cache: "no-store" });
+      ), { cache: "no-store", signal: controller.signal });
       const payload = await responsePayload(response, "读取分类文献失败");
+      if (paperRequestRef.current !== controller) return;
       setPapers((payload.papers ?? []) as SavedPaper[]);
     } catch (reason) {
+      if (reason instanceof DOMException && reason.name === "AbortError") return;
+      if (paperRequestRef.current !== controller) return;
       setPapers([]);
       setError(reason instanceof Error ? reason.message : "读取分类文献失败");
     } finally {
-      setIsLoadingPapers(false);
+      if (paperRequestRef.current === controller) {
+        paperRequestRef.current = null;
+        setIsLoadingPapers(false);
+      }
     }
   }
 
-  const hasTrees = trees.some((tree) => tree.roots.length);
-  const selectedId = selectedNode ? `${selectedNode.sourceId}:${selectedNode.key}` : "";
+  const isCurrentProjectLoaded = loadedProjectId === projectId;
+  const isTreePending = !isCurrentProjectLoaded || isLoadingTrees;
+  const currentSelectedNode = isCurrentProjectLoaded ? selectedNode : null;
+  const hasTrees = isCurrentProjectLoaded && trees.some((tree) => tree.roots.length);
+  const selectedId = currentSelectedNode ? `${currentSelectedNode.sourceId}:${currentSelectedNode.key}` : "";
   return (
     <section className="project-zotero-collections" aria-label="当前项目的 Zotero 分类">
       <header>
@@ -145,8 +179,8 @@ export function ZoteroCollectionBrowser({
           刷新
         </button>
       </header>
-      {error ? <div className="project-zotero-error">{error}</div> : null}
-      {!isLoadingTrees && !error && !hasTrees ? (
+      {isCurrentProjectLoaded && error ? <div className="project-zotero-error">{error}</div> : null}
+      {!isTreePending && !error && !hasTrees ? (
         <div className="project-zotero-empty">
           <FolderRounded />
           <div>
@@ -158,7 +192,7 @@ export function ZoteroCollectionBrowser({
       ) : (
         <div className="zotero-library-browser-grid">
         <nav aria-label="Zotero 分类树">
-          {isLoadingTrees ? (
+          {isTreePending ? (
             <div className="zotero-collection-papers-empty"><SyncRounded className="zotero-spin" />正在读取分类…</div>
           ) : trees.map((tree) => (
             <ul className="zotero-saved-tree" key={tree.sourceId}>
@@ -174,14 +208,14 @@ export function ZoteroCollectionBrowser({
           ))}
         </nav>
         <div className="zotero-collection-papers">
-          {selectedNode ? (
+          {currentSelectedNode ? (
             <>
               <div className="zotero-collection-papers-heading">
                 <div>
-                  <strong>{selectedNode.name}</strong>
-                  <small>{selectedNode.path}</small>
+                  <strong>{currentSelectedNode.name}</strong>
+                  <small>{currentSelectedNode.path}</small>
                 </div>
-                <span>{papers.length} 篇</span>
+                <span>{isLoadingPapers ? "正在读取…" : `${papers.length} 篇`}</span>
               </div>
               {isLoadingPapers ? (
                 <div className="zotero-collection-papers-empty"><SyncRounded className="zotero-spin" />正在读取文献…</div>

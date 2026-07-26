@@ -105,8 +105,7 @@ export function HeadingCountControl({
         <span className={styles.kicker}>结构规模</span>
         <div className={styles.summary} aria-label="当前标题数量设置" aria-live="polite">
           <span>
-            <strong>{Number.isInteger(primaryCount) ? primaryCount : "—"}</strong>
-            个一级标题
+            最多 <strong>{Number.isInteger(primaryCount) ? primaryCount : "—"}</strong> 个一级标题
           </span>
           <i aria-hidden="true">×</i>
           <span>
@@ -119,7 +118,7 @@ export function HeadingCountControl({
         <HeadingCountStepper
           id="domain-tree-primary-heading-count"
           label="一级标题"
-          description="领域树的顶层分类数量"
+          description="领域树的顶层分类数量上限"
           value={primaryValue}
           min={1}
           max={DOMAIN_TREE_HEADING_COUNT_MAX}
@@ -129,7 +128,7 @@ export function HeadingCountControl({
         <HeadingCountStepper
           id="domain-tree-secondary-heading-count"
           label="每项二级标题"
-          description="每个一级标题下的子分类；设为 0 时只生成一级标题"
+          description="每个一级标题下的子分类数量上限；设为 0 时只生成一级标题"
           value={secondaryValue}
           min={0}
           max={DOMAIN_TREE_HEADING_COUNT_MAX}

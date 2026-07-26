@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.core.config import settings
-from app.services.model_client import chat_completion
+from app.services.model_client import ModelCallError, ModelCallResult, ModelUsage, chat_completion_result
 from app.services.model_config import ModelConfigStore
 from app.services.domain_tree_store import DomainTreeStore
 from app.services.project_repository import DEFAULT_PROJECT_ID, ProjectRepository
@@ -32,7 +32,7 @@ from app.services.task_control import (
 logger = logging.getLogger(__name__)
 
 _MODEL_OUTPUT_PREVIEW_CHARS = 2000
-_MAX_HEADING_COUNT = 50
+_TRUNCATED_FINISH_REASONS = {"length", "max_tokens", "max_output_tokens"}
 
 
 class DomainTreeModelGenerationError(RuntimeError):
@@ -41,6 +41,15 @@ class DomainTreeModelGenerationError(RuntimeError):
     def __init__(self, message: str, *, reason: str = "model_call_failed") -> None:
         super().__init__(message)
         self.reason = reason
+
+
+class KnowledgeGraphQualityError(RuntimeError):
+    """知识图谱覆盖率未达到配置阈值时阻止发布不完整结果。"""
+
+    def __init__(self, extraction: dict[str, Any]) -> None:
+        self.extraction = dict(extraction)
+        coverage = float(extraction.get("coverageRatio") or 0)
+        super().__init__(f"知识图谱语义抽取覆盖率未达到最低质量阈值：{coverage:.1%}")
 
 
 _AUTO_LANGUAGE_VALUES = {"auto", "跟随文献语言", "follow source", "source"}
@@ -250,6 +259,7 @@ class DomainTreeAgent:
         # 项目仓储按需初始化，纯模型/图谱单元测试不会产生数据库副作用。
         self.project_repository = project_repository
         self._generation_metadata: dict[str, Any] = self._default_generation_metadata()
+        self._metric_callback: Callable[[dict[str, Any]], None] | None = None
 
     async def handle_domain_tree(
         self,
@@ -262,6 +272,8 @@ class DomainTreeAgent:
         language: str = "auto",
         primary_heading_count: int | None = None,
         secondary_heading_count: int | None = None,
+        max_output_tokens: int | None = None,
+        semantic_max_output_tokens: int | None = None,
         delete_toc: str | None = None,
         project: dict[str, Any] | None = None,
         cancel_event: threading.Event | None = None,
@@ -278,6 +290,8 @@ class DomainTreeAgent:
             language=language,
             primary_heading_count=primary_heading_count,
             secondary_heading_count=secondary_heading_count,
+            max_output_tokens=max_output_tokens,
+            semantic_max_output_tokens=semantic_max_output_tokens,
             delete_toc=delete_toc,
             project=project,
             cancel_event=cancel_event,
@@ -295,14 +309,26 @@ class DomainTreeAgent:
         language: str = "auto",
         primary_heading_count: int | None = None,
         secondary_heading_count: int | None = None,
+        max_output_tokens: int | None = None,
+        semantic_max_output_tokens: int | None = None,
         delete_toc: str | None = None,
         project: dict[str, Any] | None = None,
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        metric_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]] | None:
         """同步执行领域树主流程，供工作线程和测试直接调用。"""
         started_at = time.perf_counter()
         self._generation_metadata = self._default_generation_metadata()
+        self._metric_callback = metric_callback
+        domain_output_limit = self._resolve_output_token_limit(
+            max_output_tokens,
+            settings.domain_tree_max_output_tokens,
+        )
+        semantic_output_limit = self._resolve_output_token_limit(
+            semantic_max_output_tokens,
+            settings.semantic_graph_max_output_tokens,
+        )
 
         def report(**update: Any) -> None:
             if progress_callback:
@@ -402,6 +428,7 @@ class DomainTreeAgent:
             catalog_text=catalog_text,
             language=language,
             model=model,
+            max_output_tokens=domain_output_limit,
             cancel_event=cancel_event,
             progress_callback=progress_callback,
         )
@@ -456,6 +483,7 @@ class DomainTreeAgent:
                 entity_type_language=language,
                 cancel_event=cancel_event,
                 progress_callback=progress_callback,
+                max_output_tokens=semantic_output_limit,
             )
         except DomainTreeGenerationCancelled:
             self._set_graph_status(normalized_project_id, "cancelled")
@@ -464,6 +492,11 @@ class DomainTreeAgent:
             self._set_graph_status(normalized_project_id, "failed")
             raise
         extraction = graph.get("extraction") if isinstance(graph.get("extraction"), dict) else {}
+        try:
+            self._validate_knowledge_graph_quality(extraction)
+        except KnowledgeGraphQualityError:
+            self._set_graph_status(normalized_project_id, "failed")
+            raise
         logger.info(
             "[%s] 知识图谱构建完成：nodes=%s edges=%s entities=%s relations=%s "
             "processed_chunks=%s failed_chunks=%s elapsed_ms=%.1f",
@@ -499,6 +532,112 @@ class DomainTreeAgent:
             (time.perf_counter() - started_at) * 1000,
         )
         return tags
+
+    def resume_knowledge_graph_sync(
+        self,
+        project_id: str,
+        *,
+        model: Any | None = None,
+        semantic_max_output_tokens: int | None = None,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        metric_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[dict[str, Any]]:
+        """复用领域树快照和成功分块缓存，只继续缺失的语义抽取。"""
+        normalized_project_id = self._normalize_project_id(project_id)
+        result = self.get_result(normalized_project_id)
+        if not result or not isinstance(result.get("domainTree"), list):
+            raise ValueError("当前项目没有可恢复的领域树快照，请先重新生成领域树")
+        tags = self.filter_domain_tree(result["domainTree"])
+        if not tags:
+            raise ValueError("当前领域树快照为空，无法继续语义抽取")
+
+        documents = self._load_documents(normalized_project_id)
+        if not documents:
+            raise ValueError("未找到可用于继续语义抽取的 Markdown 文献")
+        manifest = result.get("manifest") if isinstance(result.get("manifest"), dict) else {}
+        manifest_documents = manifest.get("documents") if isinstance(manifest.get("documents"), list) else []
+        snapshot_ids = {
+            str(item.get("recordId") or "")
+            for item in manifest_documents
+            if isinstance(item, dict) and str(item.get("recordId") or "")
+        }
+        current_ids = {document.record_id for document in documents}
+        if snapshot_ids and snapshot_ids != current_ids:
+            raise ValueError("项目文献已发生变化，请使用“修订领域树”或“完全重建”保持结果一致")
+
+        self._metric_callback = metric_callback
+        self._generation_metadata = {
+            "generationMode": str(result.get("generationMode") or "unknown"),
+            "degraded": bool(result.get("degraded")),
+            "degradeReason": str(result.get("degradeReason") or ""),
+            "warnings": list(result.get("warnings") or []),
+        }
+        language = str(result.get("language") or "English")
+        requested_language = str(result.get("requestedLanguage") or language)
+        heading_counts = result.get("headingCounts") if isinstance(result.get("headingCounts"), dict) else {}
+        catalog_text = str(result.get("catalogText") or "") or self._build_catalog_text(documents)
+        semantic_output_limit = self._resolve_output_token_limit(
+            semantic_max_output_tokens,
+            settings.semantic_graph_max_output_tokens,
+        )
+
+        def report(**update: Any) -> None:
+            if progress_callback:
+                progress_callback(update)
+
+        raise_if_cancelled(cancel_event)
+        self._set_graph_status(normalized_project_id, "building")
+        report(
+            stage="semantic_resume",
+            message="正在从成功缓存继续抽取缺失的语义分块",
+            domainTreeReady=True,
+            partialResult=self.get_result(normalized_project_id),
+        )
+        try:
+            graph = self._build_knowledge_graph(
+                project_id=normalized_project_id,
+                documents=documents,
+                tags=tags,
+                catalog_text=catalog_text,
+                project={},
+                model_runtime=self._resolve_model_runtime(model),
+                entity_type_language=language,
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+                max_output_tokens=semantic_output_limit,
+            )
+            extraction = graph.get("extraction") if isinstance(graph.get("extraction"), dict) else {}
+            self._validate_knowledge_graph_quality(extraction)
+        except DomainTreeGenerationCancelled:
+            self._set_graph_status(normalized_project_id, "cancelled")
+            raise
+        except Exception:
+            self._set_graph_status(normalized_project_id, "failed")
+            raise
+
+        raise_if_cancelled(cancel_event)
+        report(stage="saving", message="语义断点续跑完成，正在发布知识图谱")
+        self.batch_save_tags(
+            normalized_project_id,
+            tags,
+            graph,
+            documents=documents,
+            catalog_text=catalog_text,
+            action=str(result.get("action") or "rebuild"),
+            language=language,
+            requested_language=requested_language,
+            primary_heading_count=heading_counts.get("primary"),
+            secondary_heading_count=heading_counts.get("secondary"),
+            generated_at=str(result.get("generatedAt") or "") or None,
+        )
+        return tags
+
+    @staticmethod
+    def _validate_knowledge_graph_quality(extraction: dict[str, Any]) -> None:
+        """发布前校验语义覆盖率，避免把严重不完整的图谱标记为可用。"""
+        if str(extraction.get("qualityStatus") or "failed") == "failed":
+            raise KnowledgeGraphQualityError(extraction)
 
     # 获取当前项目的领域树标签，如果不存在则返回 None
     def get_tags(self, project_id: str) -> list[dict[str, Any]] | None:
@@ -542,21 +681,31 @@ class DomainTreeAgent:
         secondary_count: int | None,
         language: str,
     ) -> str:
-        """把前端设置的标题数量作为显式模型约束。"""
+        """把前端设置的一、二级标题数量上限作为显式模型约束。"""
         if primary_count is None and secondary_count is None:
             return prompt
+        primary_count = (
+            max(1, min(settings.domain_tree_max_heading_count, int(primary_count)))
+            if primary_count is not None
+            else None
+        )
+        secondary_count = (
+            max(0, min(settings.domain_tree_max_heading_count, int(secondary_count)))
+            if secondary_count is not None
+            else None
+        )
         if self._is_chinese_language(language):
-            parts = ["请严格遵守用户设置的领域树数量："]
+            parts = ["请严格遵守用户设置的领域树数量上限："]
             if primary_count is not None:
-                parts.append(f"一级标题必须为 {primary_count} 个")
+                parts.append(f"一级标题最多 {primary_count} 个")
             if secondary_count is not None:
-                parts.append(f"每个一级标题下必须为 {secondary_count} 个二级标题")
+                parts.append(f"每个一级标题下最多 {secondary_count} 个二级标题")
         else:
-            parts = ["Strictly follow the user-specified tree size:"]
+            parts = ["Strictly follow the user-specified tree size limits:"]
             if primary_count is not None:
-                parts.append(f"exactly {primary_count} primary headings")
+                parts.append(f"at most {primary_count} primary headings")
             if secondary_count is not None:
-                parts.append(f"exactly {secondary_count} secondary headings under every primary heading")
+                parts.append(f"at most {secondary_count} secondary headings under each primary heading")
         return f"{prompt}\n\n{'；'.join(parts)}。"
 
     @staticmethod
@@ -572,38 +721,22 @@ class DomainTreeAgent:
         primary_heading_count: int | None,
         secondary_heading_count: int | None,
     ) -> list[dict[str, Any]]:
-        """裁剪或补充模型结果，使一二级标题数量尽量精确匹配前端设置。"""
+        """裁剪模型结果，使一、二级标题数量不超过前端设置的上限。"""
+        del documents
         if primary_heading_count is None and secondary_heading_count is None:
             return tags
         primary_target = (
-            max(1, min(_MAX_HEADING_COUNT, int(primary_heading_count)))
+            max(1, min(settings.domain_tree_max_heading_count, int(primary_heading_count)))
             if primary_heading_count is not None else None
         )
         secondary_target = (
-            max(0, min(_MAX_HEADING_COUNT, int(secondary_heading_count)))
+            max(0, min(settings.domain_tree_max_heading_count, int(secondary_heading_count)))
             if secondary_heading_count is not None else None
         )
         nodes = [node for node in tags if isinstance(node, dict) and str(node.get("label") or "").strip()]
         if primary_target is not None:
             nodes = nodes[:primary_target]
-            existing_primary = {
-                self._strip_heading_number(str(node.get("label") or "")).casefold()
-                for node in nodes
-            }
-            topic_scores, _topic_documents = self._collect_topic_candidates(documents)
-            candidates = [name for name, _score in topic_scores.most_common()]
-            candidates.extend(self._collect_specific_candidates_from_documents(documents))
-            for candidate in candidates:
-                clean = self._short_label(self._strip_heading_number(candidate))
-                key = clean.casefold()
-                if not clean or key in existing_primary:
-                    continue
-                nodes.append({"label": clean})
-                existing_primary.add(key)
-                if len(nodes) >= primary_target:
-                    break
 
-        global_candidates = self._collect_specific_candidates_from_documents(documents)
         normalized: list[dict[str, Any]] = []
         for primary_index, raw_node in enumerate(nodes, start=1):
             primary_label = self._short_label(self._strip_heading_number(str(raw_node.get("label") or "")))
@@ -622,18 +755,6 @@ class DomainTreeAgent:
                     seen_children.add(key)
             if secondary_target is not None:
                 child_labels = child_labels[:secondary_target]
-                related_ids = self._related_document_ids_for_topic(primary_label, documents)
-                scoped_documents = [document for document in documents if document.record_id in related_ids] or documents
-                candidates = self._collect_specific_candidates_from_documents(scoped_documents) + global_candidates
-                for candidate in candidates:
-                    clean = self._short_label(self._strip_heading_number(candidate))
-                    key = clean.casefold()
-                    if not clean or key in seen_children:
-                        continue
-                    child_labels.append(clean)
-                    seen_children.add(key)
-                    if len(child_labels) >= secondary_target:
-                        break
             node: dict[str, Any] = {"label": f"{primary_index} {primary_label}"}
             if child_labels:
                 node["child"] = [
@@ -731,18 +852,24 @@ class DomainTreeAgent:
         return generated_at
 
     def _set_graph_status(self, project_id: str, status: str) -> None:
-        """在图谱任务取消或失败时更新领域树快照状态。"""
-        domain_tree_path = self._analysis_dir(project_id) / "domain_tree.json"
-        if not domain_tree_path.exists():
-            return
-        try:
-            payload = json.loads(domain_tree_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                return
-            payload["graphStatus"] = status
-            self._write_json_atomic(domain_tree_path, payload)
-        except (OSError, json.JSONDecodeError) as error:
-            logger.warning("[%s] 更新知识图谱状态失败：%s", project_id, error)
+        """在图谱任务取消或失败时同步更新领域树与清单状态。"""
+        output_dir = self._analysis_dir(project_id)
+        for path in (output_dir / "domain_tree.json", output_dir / "manifest.json"):
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    continue
+                payload["graphStatus"] = status
+                self._write_json_atomic(path, payload)
+            except (OSError, json.JSONDecodeError) as error:
+                logger.warning(
+                    "[%s] 更新知识图谱状态失败：path=%s error=%s",
+                    project_id,
+                    path,
+                    error,
+                )
 
     def batch_save_tags(
         self,
@@ -764,6 +891,12 @@ class DomainTreeAgent:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         generated_at = generated_at or datetime.now(timezone.utc).isoformat()
+        extraction = (
+            knowledge_graph.get("extraction")
+            if isinstance(knowledge_graph.get("extraction"), dict)
+            else {}
+        )
+        graph_status = str(extraction.get("qualityStatus") or "ready")
         domain_payload = {
             "projectId": project_id,
             "generatedAt": generated_at,
@@ -774,7 +907,7 @@ class DomainTreeAgent:
                 "primary": primary_heading_count,
                 "secondary": secondary_heading_count,
             },
-            "graphStatus": "ready",
+            "graphStatus": graph_status,
             "documentCount": len(documents),
             "domainTree": tags,
             **self._generation_metadata,
@@ -784,7 +917,7 @@ class DomainTreeAgent:
             "projectId": project_id,
             "generatedAt": generated_at,
             "documentCount": len(documents),
-            "graphStatus": "ready",
+            "graphStatus": graph_status,
         }
         manifest_payload = {
             "projectId": project_id,
@@ -796,7 +929,7 @@ class DomainTreeAgent:
                 "primary": primary_heading_count,
                 "secondary": secondary_heading_count,
             },
-            "graphStatus": "ready",
+            "graphStatus": graph_status,
             **self._generation_metadata,
             "documents": [
                 {
@@ -845,6 +978,7 @@ class DomainTreeAgent:
         catalog_text: str,
         language: str,
         model: Any | None,
+        max_output_tokens: int | None = None,
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
@@ -857,6 +991,7 @@ class DomainTreeAgent:
                 prompt,
                 language=language,
                 model=runtime,
+                max_output_tokens=max_output_tokens,
                 cancel_event=cancel_event,
                 progress_callback=progress_callback,
             )
@@ -907,6 +1042,7 @@ class DomainTreeAgent:
         *,
         language: str,
         model: Any | None,
+        max_output_tokens: int | None = None,
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> str:
@@ -942,13 +1078,44 @@ class DomainTreeAgent:
             settings.request_timeout,
         )
         try:
-            answer = call_with_retry(
-                lambda: chat_completion(
-                    runtime,
-                    messages,
-                    temperature=0.2,
-                    timeout=settings.request_timeout,
-                ),
+            attempts = 0
+
+            def operation() -> ModelCallResult:
+                nonlocal attempts
+                attempts += 1
+                call_started_at = time.perf_counter()
+                try:
+                    result = chat_completion_result(
+                        runtime,
+                        messages,
+                        temperature=0.2,
+                        timeout=settings.request_timeout,
+                        response_format=(
+                            {"type": "json_object"}
+                            if settings.domain_tree_json_output
+                            else None
+                        ),
+                        max_output_tokens=self._resolve_output_token_limit(
+                            max_output_tokens,
+                            settings.domain_tree_max_output_tokens,
+                        ),
+                    )
+                    self._record_domain_tree_metric(
+                        result=result,
+                        attempt=attempts,
+                        elapsed_ms=(time.perf_counter() - call_started_at) * 1000,
+                    )
+                    return result
+                except Exception as error:
+                    self._record_domain_tree_metric(
+                        error=error,
+                        attempt=attempts,
+                        elapsed_ms=(time.perf_counter() - call_started_at) * 1000,
+                    )
+                    raise
+
+            result = call_with_retry(
+                operation,
                 max_attempts=settings.domain_tree_retry_attempts,
                 base_delay_seconds=settings.domain_tree_retry_base_delay_seconds,
                 cancel_event=cancel_event,
@@ -959,6 +1126,12 @@ class DomainTreeAgent:
                     delay,
                 ),
             )
+            if result.finish_reason in _TRUNCATED_FINISH_REASONS:
+                raise DomainTreeModelGenerationError(
+                    "领域树模型输出达到配置的 Token 上限，未生成完整 JSON",
+                    reason="model_output_truncated",
+                )
+            answer = result.content
             logger.info(
                 "领域树模型请求完成：elapsed_ms=%.1f output_chars=%s output_preview=%s",
                 (time.perf_counter() - started_at) * 1000,
@@ -967,6 +1140,8 @@ class DomainTreeAgent:
             )
             return answer
         except DomainTreeGenerationCancelled:
+            raise
+        except DomainTreeModelGenerationError:
             raise
         except Exception as error:
             logger.warning(
@@ -978,6 +1153,49 @@ class DomainTreeAgent:
                 f"领域树模型调用失败：{error}",
                 reason="model_call_failed",
             ) from error
+
+    def _record_domain_tree_metric(
+        self,
+        *,
+        attempt: int,
+        elapsed_ms: float,
+        result: ModelCallResult | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        if not self._metric_callback:
+            return
+        model_error = error if isinstance(error, ModelCallError) else None
+        usage = (
+            result.usage
+            if result is not None
+            else (model_error.usage if model_error is not None else ModelUsage())
+        )
+        self._metric_callback(
+            {
+                "stage": "domain_tree",
+                "attempt": attempt,
+                "status": "success" if result is not None else "failed",
+                "errorCategory": model_error.category if model_error else ("unknown" if error else None),
+                "httpStatus": model_error.http_status if model_error else None,
+                "requestAccepted": model_error.request_accepted if model_error else None,
+                "requestId": (
+                    result.request_id
+                    if result is not None
+                    else (model_error.request_id if model_error else "")
+                ),
+                "finishReason": (
+                    result.finish_reason
+                    if result is not None
+                    else (model_error.finish_reason if model_error else "")
+                ),
+                "promptTokens": usage.prompt_tokens,
+                "completionTokens": usage.completion_tokens,
+                "totalTokens": usage.total_tokens,
+                "cachedTokens": usage.cached_tokens,
+                "reasoningTokens": usage.reasoning_tokens,
+                "elapsedMs": elapsed_ms,
+            }
+        )
 
     def _report_model_retry(
         self,
@@ -1014,6 +1232,12 @@ class DomainTreeAgent:
             "warnings": [],
         }
 
+    @staticmethod
+    def _resolve_output_token_limit(value: int | None, default: int) -> int:
+        """应用任务级 Token 设置，并受部署级安全上限约束。"""
+        requested = default if value is None else int(value)
+        return max(1, min(settings.model_output_tokens_upper_bound, requested))
+
     def extract_json_from_llm_output(self, output: str | None) -> list[dict[str, Any]] | None:
         """从大模型文本响应中提取 JSON 对象。"""
         if not output:
@@ -1036,6 +1260,12 @@ class DomainTreeAgent:
                 continue
             if isinstance(parsed, list):
                 return [item for item in parsed if isinstance(item, dict)]
+            if isinstance(parsed, dict) and isinstance(parsed.get("domainTree"), list):
+                return [
+                    item
+                    for item in parsed["domainTree"]
+                    if isinstance(item, dict)
+                ]
         return None
 
     def _load_documents(self, project_id: str) -> list[SourceDocument]:
@@ -1320,6 +1550,7 @@ class DomainTreeAgent:
         entity_type_language: str = "English",
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        max_output_tokens: int | None = None,
     ) -> dict[str, Any]:
         """构建领域结构图，并合并全文实体、证据和引用关系。"""
         del catalog_text, project
@@ -1403,6 +1634,11 @@ class DomainTreeAgent:
             max_workers=settings.semantic_graph_max_workers,
             cancel_event=cancel_event,
             progress_callback=progress_callback,
+            metric_callback=self._metric_callback,
+            max_output_tokens=self._resolve_output_token_limit(
+                max_output_tokens,
+                settings.semantic_graph_max_output_tokens,
+            ),
         ).extract(
             SemanticSourceDocument(
                 record_id=document.record_id,

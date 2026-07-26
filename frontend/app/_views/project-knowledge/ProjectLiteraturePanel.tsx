@@ -2,7 +2,7 @@
 
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { ResearchProject } from "@/app/_components/ProjectProvider";
 import { WORKSPACE_DOMAIN_TREE_PROJECT_ID } from "@/lib/constants";
 import type { SavedPaper } from "@/lib/papers";
@@ -10,6 +10,7 @@ import { ProjectTree } from "@/app/_views/project-knowledge/ProjectTree";
 import { ZoteroSourcePanel } from "@/app/_views/project-knowledge/ZoteroSourcePanel";
 
 type ProjectLiteraturePanelProps = {
+  analysisStats: ReactNode;
   projects: ResearchProject[];
   activeProjectId: string;
   projectError: string | null;
@@ -18,26 +19,30 @@ type ProjectLiteraturePanelProps = {
   isCreateProjectOpen: boolean;
   newProjectName: string;
   isCreatingProject: boolean;
-  isEditingMembers: boolean;
+  isLoadingMembers: boolean;
   sourceProjectId: string;
   isLoadingSourcePapers: boolean;
   isSavingMembers: boolean;
   availablePapers: SavedPaper[];
+  savedMemberIds: string[];
   memberDraftIds: string[];
   onSelectProject: (projectId: string) => void;
+  onRenameProject: (projectId: string, name: string) => Promise<unknown>;
+  onDeleteProject: (projectId: string) => Promise<void>;
   onToggleCreateProject: () => void;
   onNewProjectNameChange: (name: string) => void;
   onCreateProject: () => void;
   onCancelCreateProject: () => void;
-  onToggleMemberEditor: () => void;
+  onResetMembers: () => void;
   onSourceProjectChange: (projectId: string) => void;
   onTogglePaper: (paperId: string, checked: boolean) => void;
   onSelectAllSourcePapers: () => void;
   onClearSourcePapers: () => void;
-  onSaveMembers: () => void;
+  onSaveMembers: () => Promise<void>;
 };
 
 export function ProjectLiteraturePanel({
+  analysisStats,
   projects,
   activeProjectId,
   projectError,
@@ -46,18 +51,21 @@ export function ProjectLiteraturePanel({
   isCreateProjectOpen,
   newProjectName,
   isCreatingProject,
-  isEditingMembers,
+  isLoadingMembers,
   sourceProjectId,
   isLoadingSourcePapers,
   isSavingMembers,
   availablePapers,
+  savedMemberIds,
   memberDraftIds,
   onSelectProject,
+  onRenameProject,
+  onDeleteProject,
   onToggleCreateProject,
   onNewProjectNameChange,
   onCreateProject,
   onCancelCreateProject,
-  onToggleMemberEditor,
+  onResetMembers,
   onSourceProjectChange,
   onTogglePaper,
   onSelectAllSourcePapers,
@@ -65,101 +73,183 @@ export function ProjectLiteraturePanel({
   onSaveMembers,
 }: ProjectLiteraturePanelProps) {
   const [zoteroCollectionRefreshToken, setZoteroCollectionRefreshToken] = useState(0);
+  const [paperSearch, setPaperSearch] = useState("");
+  const activeProject = projects.find((project) => project.id === activeProjectId);
+  const sourceProject = projects.find((project) => project.id === sourceProjectId);
+  const savedMemberIdSet = new Set(savedMemberIds);
+  const memberDraftIdSet = new Set(memberDraftIds);
+  const normalizedSearch = paperSearch.trim().toLocaleLowerCase();
+  const filteredPapers = normalizedSearch
+    ? availablePapers.filter((paper) => (
+      `${paper.title || ""} ${paper.id || ""}`.toLocaleLowerCase().includes(normalizedSearch)
+    ))
+    : availablePapers;
   const sourcePaperIds = availablePapers.flatMap((paper) => paper.id ? [paper.id] : []);
   const allSourcePapersSelected = sourcePaperIds.length > 0
-    && sourcePaperIds.every((paperId) => memberDraftIds.includes(paperId));
+    && sourcePaperIds.every((paperId) => memberDraftIdSet.has(paperId));
+  const addedCount = memberDraftIds.filter((paperId) => !savedMemberIdSet.has(paperId)).length;
+  const removedCount = savedMemberIds.filter((paperId) => !memberDraftIdSet.has(paperId)).length;
+  const hasChanges = addedCount > 0 || removedCount > 0;
+  const isLoadingLiterature = isLoadingMembers || isLoadingSourcePapers;
+  const managementDisabled = isGenerating || isSavingMembers || isLoadingMembers;
+
+  async function saveMembersAndRefreshProjectTree() {
+    await onSaveMembers();
+    setZoteroCollectionRefreshToken((current) => current + 1);
+  }
 
   return (
     <section aria-label="项目文献管理">
+      <ZoteroSourcePanel
+        projectId={activeProjectId}
+        disabled={isGenerating}
+        onCollectionsChanged={() => setZoteroCollectionRefreshToken((current) => current + 1)}
+      />
+
       <section className="domain-tree-project-workspace" aria-label="当前研究项目">
         <section className="domain-tree-project-bar">
           <div>
             <span className="project-workspace-eyebrow">项目空间</span>
             <h2>项目与文献</h2>
           </div>
-          <div className="domain-tree-project-actions">
-            <button type="button" onClick={onToggleCreateProject} disabled={isGenerating}>
-              新建项目
-            </button>
-          </div>
+          {analysisStats}
         </section>
 
         <ProjectTree
           projects={projects}
           activeProjectId={activeProjectId}
-          canManage={!isGenerating}
           disabled={isLoadingProjects || isGenerating}
           refreshToken={zoteroCollectionRefreshToken}
-          managementPanel={isEditingMembers ? (
+          managementPanel={(
             <section className="domain-tree-member-editor">
               <div className="domain-tree-card-head">
                 <div>
-                  <h2>管理项目文献</h2>
-                  <p>选择需要参与当前项目领域树、知识图谱和问答检索的文献。</p>
+                  <h2>管理「{activeProject?.name || "当前项目"}」的文献范围</h2>
+                  <p>决定哪些文献参与本项目的问答、领域树和知识图谱。</p>
                 </div>
                 <div className="project-workspace-management-actions">
-                  <span>{memberDraftIds.length} 篇已选择</span>
-                  <button type="button" onClick={onToggleMemberEditor}>完成</button>
+                  <span>{isLoadingMembers ? "正在加载文献范围…" : `当前已包含 ${savedMemberIds.length} 篇`}</span>
+                  <button type="button" onClick={onResetMembers} disabled={managementDisabled || !hasChanges}>
+                    取消更改
+                  </button>
                 </div>
               </div>
               <div className="domain-tree-source-project">
-                <label>
-                  <span>从项目选择文献</span>
-                  <select
-                    value={sourceProjectId}
-                    onChange={(event) => onSourceProjectChange(event.target.value)}
-                    disabled={isLoadingSourcePapers || isSavingMembers}
-                  >
-                    <option value="">全部文献</option>
-                    {projects.map((project) => (
-                      <option
-                        key={project.id}
-                        value={project.id}
-                        disabled={project.id === activeProjectId}
-                      >
-                        {project.name}（{project.paperCount} 篇）
-                        {project.id === activeProjectId ? " · 当前项目" : ""}
-                      </option>
-                    ))}
-                  </select>
-                  <small>当前项目会显示在列表中，但不能作为自身的文献来源。</small>
-                </label>
+                <div className="project-literature-filter-fields">
+                  <label>
+                    <span>来源筛选</span>
+                    <select
+                      value={sourceProjectId}
+                      onChange={(event) => onSourceProjectChange(event.target.value)}
+                      disabled={isLoadingLiterature || managementDisabled}
+                    >
+                      <option value="">全部文献</option>
+                      {projects
+                        .filter((project) => project.id !== activeProjectId)
+                        .map((project) => (
+                          <option key={project.id} value={project.id}>
+                            {project.name}（{project.paperCount} 篇）
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>搜索文献</span>
+                    <input
+                      type="search"
+                      value={paperSearch}
+                      onChange={(event) => setPaperSearch(event.target.value)}
+                      placeholder="搜索标题或文献 ID"
+                      disabled={isLoadingLiterature || managementDisabled}
+                    />
+                  </label>
+                </div>
                 <div className="domain-tree-project-actions">
                   <button
                     type="button"
                     onClick={allSourcePapersSelected ? onClearSourcePapers : onSelectAllSourcePapers}
-                    disabled={isLoadingSourcePapers || sourcePaperIds.length === 0}
+                    disabled={isLoadingLiterature || managementDisabled || sourcePaperIds.length === 0}
                   >
-                    {allSourcePapersSelected ? "取消全选" : "全选来源项目"}
+                    {allSourcePapersSelected
+                      ? "全部移除"
+                      : "全部加入"}
                   </button>
                 </div>
               </div>
+              <div className="project-literature-list-summary">
+                <span>{sourceProject ? `正在查看：${sourceProject.name}` : "正在查看：全部文献"}</span>
+                <span>{filteredPapers.length} 篇可见</span>
+              </div>
               <div className="domain-tree-member-list">
-                {availablePapers.map((paper) => {
+                {filteredPapers.map((paper) => {
                   const paperId = paper.id || "";
+                  const isSaved = savedMemberIdSet.has(paperId);
+                  const isSelected = memberDraftIdSet.has(paperId);
+                  const changeState = isSaved && !isSelected
+                    ? "removing"
+                    : !isSaved && isSelected
+                      ? "adding"
+                      : "neutral";
+                  const membershipState = isSaved
+                    ? (isSelected ? "已在当前项目" : "待移除")
+                    : (isSelected ? "待添加" : "可添加");
                   return (
-                    <label key={paperId}>
+                    <label
+                      key={paperId}
+                      className={`project-literature-paper project-literature-paper--${changeState}`}
+                    >
                       <input
                         type="checkbox"
-                        checked={memberDraftIds.includes(paperId)}
+                        checked={isSelected}
+                        disabled={managementDisabled}
                         onChange={(event) => onTogglePaper(paperId, event.target.checked)}
                       />
-                      <span>{paper.title || paperId}</span>
+                      <span className="project-literature-paper-copy">
+                        <strong>{paper.title || paperId}</strong>
+                        <small>
+                          <span className={`project-literature-membership-state project-literature-membership-state--${changeState}`}>
+                            {membershipState}
+                          </span>
+                          {sourceProject ? <span>来源筛选：{sourceProject.name}</span> : null}
+                        </small>
+                      </span>
                     </label>
                   );
                 })}
-                {isLoadingSourcePapers ? <span>正在加载来源项目论文…</span> : null}
-                {!isLoadingSourcePapers && availablePapers.length === 0 ? <span>所选来源项目当前没有论文。</span> : null}
+                {isLoadingLiterature ? <span>正在加载文献…</span> : null}
+                {!isLoadingLiterature && availablePapers.length === 0 ? <span>该来源当前没有文献。</span> : null}
+                {!isLoadingLiterature && availablePapers.length > 0 && filteredPapers.length === 0
+                  ? <span>没有与“{paperSearch.trim()}”匹配的文献。</span>
+                  : null}
               </div>
-              <div className="domain-tree-project-actions">
-                <button type="button" onClick={onSaveMembers} disabled={isSavingMembers}>
-                  {isSavingMembers ? "正在保存…" : "保存项目文献"}
+              <div className="project-literature-save-bar">
+                <div aria-live="polite">
+                  <strong>
+                    {isLoadingMembers
+                      ? "正在读取当前项目的文献范围"
+                      : hasChanges
+                        ? `本次更改：新增 ${addedCount} 篇，移除 ${removedCount} 篇`
+                        : "尚未更改文献范围"}
+                  </strong>
+                  <span>应用后，当前项目共包含 {memberDraftIds.length} 篇文献。</span>
+                </div>
+                <button
+                  type="button"
+                  className="project-literature-save-button"
+                  onClick={() => void saveMembersAndRefreshProjectTree()}
+                  disabled={managementDisabled || !hasChanges}
+                >
+                  {isSavingMembers ? "正在应用…" : `应用更改（共 ${memberDraftIds.length} 篇）`}
                 </button>
               </div>
             </section>
-          ) : undefined}
-          onToggleManagement={onToggleMemberEditor}
+          )}
           onSelectProject={onSelectProject}
+          onCreateProject={() => {
+            if (!isCreateProjectOpen) onToggleCreateProject();
+          }}
+          onRenameProject={onRenameProject}
+          onDeleteProject={onDeleteProject}
         />
 
         {isCreateProjectOpen ? (
@@ -202,12 +292,6 @@ export function ProjectLiteraturePanel({
           默认项目会自动接收新增的全局论文；手动移除的文献会保持移除状态，也可随时重新加入。
         </div>
       ) : null}
-
-      <ZoteroSourcePanel
-        projectId={activeProjectId}
-        disabled={isGenerating}
-        onCollectionsChanged={() => setZoteroCollectionRefreshToken((current) => current + 1)}
-      />
 
       {projectError ? <div className="domain-tree-error">{projectError}</div> : null}
     </section>

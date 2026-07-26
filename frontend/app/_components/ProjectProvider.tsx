@@ -25,6 +25,8 @@ type ProjectContextValue = {
   selectProject: (projectId: string) => void;
   refreshProjects: () => Promise<ResearchProject[]>;
   createProject: (name: string, description?: string) => Promise<ResearchProject>;
+  renameProject: (projectId: string, name: string) => Promise<ResearchProject>;
+  deleteProject: (projectId: string) => Promise<void>;
 };
 
 const ProjectContext = createContext<ProjectContextValue | null>(null);
@@ -85,6 +87,32 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     return project;
   }, [refreshProjects, selectProject]);
 
+  const renameProject = useCallback(async (projectId: string, name: string) => {
+    const response = await fetch(buildApiUrl(`/api/projects/${encodeURIComponent(projectId)}`), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.detail || "修改项目名称失败");
+    }
+    const project = payload.project as ResearchProject;
+    await refreshProjects();
+    return project;
+  }, [refreshProjects]);
+
+  const deleteProject = useCallback(async (projectId: string) => {
+    const response = await fetch(buildApiUrl(`/api/projects/${encodeURIComponent(projectId)}`), {
+      method: "DELETE",
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.detail || "删除项目失败");
+    }
+    await refreshProjects();
+  }, [refreshProjects]);
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void refreshProjects();
@@ -101,13 +129,17 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     selectProject,
     refreshProjects,
     createProject,
+    renameProject,
+    deleteProject,
   }), [
     activeProjectId,
     createProject,
+    deleteProject,
     isLoadingProjects,
     projectError,
     projects,
     refreshProjects,
+    renameProject,
     selectProject,
   ]);
 

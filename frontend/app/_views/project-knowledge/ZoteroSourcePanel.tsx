@@ -117,6 +117,7 @@ export function ZoteroSourcePanel({
   const { submitJob, openCenter } = useBackgroundTasks();
   const { refreshProjects, selectProject } = useProjects();
   const activeProjectIdRef = useRef(projectId);
+  const sourceRequestIdRef = useRef(0);
   const [apiBaseUrl, setApiBaseUrl] = useState("http://127.0.0.1:23119/api");
   const [collections, setCollections] = useState<ZoteroCollection[]>([]);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
@@ -131,6 +132,8 @@ export function ZoteroSourcePanel({
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [loadedSourcesProjectId, setLoadedSourcesProjectId] = useState("");
+  const [isLoadingSources, setIsLoadingSources] = useState(true);
 
   const connectionPayload = useMemo(() => ({
     api_base_url: apiBaseUrl.trim(),
@@ -151,16 +154,33 @@ export function ZoteroSourcePanel({
   }, [projectId]);
 
   const loadSources = useCallback(async (targetProjectId = projectId) => {
-    const response = await fetch(buildApiUrl(`/api/zotero/sources?projectId=${encodeURIComponent(targetProjectId)}`), {
-      cache: "no-store",
-    });
-    const payload = await responsePayload(response, "读取 Zotero 数据源失败");
-    const values = (payload.sources ?? []) as ZoteroSource[];
+    const requestId = sourceRequestIdRef.current + 1;
+    sourceRequestIdRef.current = requestId;
     if (activeProjectIdRef.current === targetProjectId) {
-      setSources(values);
-      setIsSetupOpen((current) => current || values.length === 0);
+      setIsLoadingSources(true);
     }
-    return values;
+    try {
+      const response = await fetch(buildApiUrl(`/api/zotero/sources?projectId=${encodeURIComponent(targetProjectId)}`), {
+        cache: "no-store",
+      });
+      const payload = await responsePayload(response, "读取 Zotero 数据源失败");
+      const values = (payload.sources ?? []) as ZoteroSource[];
+      if (activeProjectIdRef.current === targetProjectId && sourceRequestIdRef.current === requestId) {
+        setSources(values);
+        setIsSetupOpen((current) => current || values.length === 0);
+      }
+      return values;
+    } catch (reason) {
+      if (activeProjectIdRef.current !== targetProjectId || sourceRequestIdRef.current !== requestId) {
+        return [];
+      }
+      throw reason;
+    } finally {
+      if (activeProjectIdRef.current === targetProjectId && sourceRequestIdRef.current === requestId) {
+        setLoadedSourcesProjectId(targetProjectId);
+        setIsLoadingSources(false);
+      }
+    }
   }, [projectId]);
 
   useEffect(() => {
@@ -173,6 +193,8 @@ export function ZoteroSourcePanel({
       setMessage("");
       setError("");
       setConfirmRemoveId("");
+      setSyncingSourceIds([]);
+      setIsLoadingSources(true);
       void loadSources().catch((reason) => {
         setError(reason instanceof Error ? reason.message : "读取 Zotero 数据源失败");
       });
@@ -180,7 +202,9 @@ export function ZoteroSourcePanel({
     return () => window.clearTimeout(timer);
   }, [loadSources]);
 
-  const hasServerSyncingSource = sources.some((source) => source.status === "syncing");
+  const visibleSources = sources.filter((source) => source.projectId === projectId);
+  const sourcesReady = loadedSourcesProjectId === projectId;
+  const hasServerSyncingSource = visibleSources.some((source) => source.status === "syncing");
   useEffect(() => {
     if (!hasServerSyncingSource) return;
     const interval = window.setInterval(() => {
@@ -336,7 +360,7 @@ export function ZoteroSourcePanel({
       : current.filter((value) => value !== key));
   }
 
-  const activeSyncCount = syncingSourceIds.length + sources.filter(
+  const activeSyncCount = syncingSourceIds.length + visibleSources.filter(
     (source) => source.status === "syncing" && !syncingSourceIds.includes(source.id),
   ).length;
 
@@ -352,8 +376,8 @@ export function ZoteroSourcePanel({
           <p>同步题录和 PDF 全文到当前项目，原文件继续由 Zotero 管理。</p>
         </div>
         <div className="zotero-panel-summary">
-          <span><strong>{sources.length}</strong> 个数据源</span>
-          <span><strong>{activeSyncCount}</strong> 个同步中</span>
+          <span><strong>{sourcesReady ? visibleSources.length : "—"}</strong> 个数据源</span>
+          <span><strong>{sourcesReady ? activeSyncCount : "—"}</strong> 个同步中</span>
         </div>
         <div className="zotero-header-actions">
           <button className="zotero-icon-button" type="button" onClick={() => void loadSources()} disabled={disabled || Boolean(busy)} title="刷新数据源状态" aria-label="刷新数据源状态">
@@ -365,9 +389,14 @@ export function ZoteroSourcePanel({
         </div>
       </header>
 
-      {sources.length ? (
+      {!sourcesReady || isLoadingSources ? (
+        <div className="zotero-empty-state">
+          <SyncRounded className="zotero-spin" />
+          <strong>正在读取 Zotero 数据源…</strong>
+        </div>
+      ) : visibleSources.length ? (
         <div className="zotero-source-list">
-          {sources.map((source) => {
+          {visibleSources.map((source) => {
             const isSyncing = syncingSourceIds.includes(source.id) || source.status === "syncing";
             const effectiveStatus = isSyncing ? "syncing" : source.status;
             const removePending = confirmRemoveId === source.id;

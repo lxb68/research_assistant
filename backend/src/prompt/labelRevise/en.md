@@ -32,8 +32,8 @@
    - Use English for every primary and secondary label, preserving technical names and abbreviations from the source literature
 
 4. Hierarchical structure limitations:
-   - Primary domain tag count: 5-10
-   - Secondary domain tag count: 1-10 per primary tag
+   - Follow the explicit tree-size constraint supplied with the request
+   - If no explicit size is supplied, preserve a concise hierarchy supported by the catalog
    - Maximum two classification levels
    - Ensure reasonable parent-child relationships between tags
 
@@ -57,15 +57,18 @@
 - Return only the revised complete domain tree JSON structure
 - Format example:
 ```json
-[
-  {
-    "label": "1 Primary Domain Label",
-    "child": [
-      {"label": "1.1 Secondary Domain Label 1"},
-      {"label": "1.2 Secondary Domain Label 2"}
-    ]
-  },
-  {
-    "label": "2 Primary Domain Label (No Sub-labels)"
-  }
-]
+{
+  "domainTree": [
+    {
+      "label": "1 Primary Domain Label",
+      "child": [
+        {"label": "1.1 Secondary Domain Label 1"},
+        {"label": "1.2 Secondary Domain Label 2"}
+      ]
+    },
+    {
+      "label": "2 Primary Domain Label (No Sub-labels)"
+    }
+  ]
+}
+```

@@ -17,6 +17,7 @@ export type BackgroundJob = {
   status: BackgroundJobStatus;
   stage: string;
   progress: number;
+  progressDetails?: Record<string, unknown>;
   message: string;
   request?: Record<string, unknown>;
   result?: Record<string, unknown> | null;
