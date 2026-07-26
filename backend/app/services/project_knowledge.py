@@ -10,6 +10,7 @@ import threading
 from typing import Any
 
 from app.services.domain_tree_store import DomainTreeStore
+from app.services.semantic_graph import SemanticGraphExtractor
 
 
 class KnowledgeCurationError(ValueError):
@@ -184,6 +185,19 @@ def apply_project_curation(
         if str(relation.get("source") or "") not in entity_ids or str(relation.get("target") or "") not in entity_ids:
             continue
         relations.append(relation)
+    if any("citationIds" not in relation for relation in relations):
+        # 历史图谱在读取时做确定性升级；只使用已有证据和引用上下文，不发起模型调用。
+        citations = _as_dict_list(graph.get("citations"))
+        evidence = _as_dict_list(graph.get("evidence"))
+        extractor = SemanticGraphExtractor(None)
+        extractor.annotate_evidence_languages(evidence)
+        extractor.bind_relation_citations(
+            relations,
+            evidence,
+            citations,
+        )
+        graph["citations"] = citations
+        graph["evidence"] = evidence
 
     base_nodes = _as_dict_list(graph.get("nodes"))
     replaceable_node_types = {"domain", "subdomain"}
@@ -258,6 +272,7 @@ def apply_project_curation(
             "confidence": relation.get("confidence", 0.5),
             "evidenceIds": deepcopy(relation.get("evidenceIds") or []),
             "documentIds": deepcopy(relation.get("documentIds") or []),
+            "citationIds": deepcopy(relation.get("citationIds") or []),
         })
 
     graph["entities"] = entities

@@ -6061,6 +6061,18 @@ select.settings-input {
   margin-bottom: 14px;
 }
 
+.domain-tree-evidence-language {
+  display: inline-flex;
+  margin-left: 0.55rem;
+  padding: 0.08rem 0.42rem;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  border-radius: 999px;
+  color: #93c5fd;
+  font-size: 0.72rem;
+  font-style: normal;
+  line-height: 1.35;
+}
+
 .knowledge-browser {
   display: grid;
   gap: 20px;

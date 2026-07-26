@@ -72,6 +72,7 @@ type SemanticRelation = {
   confidence: number;
   evidenceIds?: string[];
   documentIds?: string[];
+  citationIds?: string[];
 };
 
 type SemanticEvidence = {
@@ -82,6 +83,9 @@ type SemanticEvidence = {
   lineStart?: number;
   quote: string;
   kind?: string;
+  language?: "zh" | "en" | "mixed" | "unknown" | string;
+  documentLanguage?: "zh" | "en" | "mixed" | "unknown" | string;
+  languageMismatch?: boolean;
 };
 
 type CitationContext = {
@@ -101,6 +105,9 @@ type GraphCitation = {
   doi?: string;
   url?: string;
   matchedDocumentId?: string;
+  authors?: string[];
+  metadataSource?: "zotero" | "csl" | "local" | "doi" | "text" | string;
+  metadataQuality?: "valid" | "invalid_title" | string;
   contexts?: CitationContext[];
 };
 
@@ -262,6 +269,7 @@ type KnowledgeBrowserRelation = {
   confidence?: number;
   evidence: SemanticEvidence[];
   documentIds: string[];
+  citationIds: string[];
   editable: boolean;
 };
 
@@ -796,6 +804,7 @@ function DomainTreeProjectPage({
           ...(relation.documentIds ?? []),
           ...relationEvidence.map((item) => item.documentId),
         ]).map((documentId) => documentId.replace(/^doc:/, "")),
+        citationIds: uniqueStrings(relation.citationIds ?? []),
         editable: true,
       };
     });
@@ -826,6 +835,7 @@ function DomainTreeProjectPage({
           ...endpointDocumentIds,
           ...relationEvidence.map((item) => item.documentId.replace(/^doc:/, "")),
         ]),
+        citationIds: [],
         editable: false,
       };
     });
@@ -901,13 +911,13 @@ function DomainTreeProjectPage({
       return null;
     }
     const documentIdSet = new Set(selectedGraphRelation.documentIds);
+    const citationIdSet = new Set(selectedGraphRelation.citationIds);
     return {
       source: knowledgeBrowser.entityMap.get(selectedGraphRelation.sourceId),
       target: knowledgeBrowser.entityMap.get(selectedGraphRelation.targetId),
       documents: knowledgeBrowser.documentOptions.filter((document) => documentIdSet.has(document.id)),
       citations: semanticOverview.citations
-        .filter((citation) => documentIdSet.has(citation.documentId.replace(/^doc:/, "")))
-        .slice(0, 6),
+        .filter((citation) => citationIdSet.has(citation.id)),
     };
   }, [knowledgeBrowser.documentOptions, knowledgeBrowser.entityMap, selectedGraphRelation, semanticOverview.citations]);
 
@@ -2439,7 +2449,14 @@ function DomainTreeProjectPage({
                           <h3>原文证据</h3>
                           {selectedGraphRelation.evidence.length > 0 ? selectedGraphRelation.evidence.map((item) => (
                             <blockquote key={item.id} className="domain-tree-evidence-quote">
-                              <span>{item.section || "正文"} · 第 {item.lineStart ?? "?"} 行</span>
+                              <span>
+                                {item.section || "正文"} · 第 {item.lineStart ?? "?"} 行
+                                {item.languageMismatch ? (
+                                  <em className="domain-tree-evidence-language">
+                                    {item.language === "mixed" ? "混合语言片段" : "与文献主语言不同"}
+                                  </em>
+                                ) : null}
+                              </span>
                               {item.quote}
                             </blockquote>
                           )) : <span className="domain-tree-readable-empty">当前关系没有可展示的原文证据。</span>}
@@ -2447,7 +2464,7 @@ function DomainTreeProjectPage({
 
                         {selectedGraphContext.citations.length > 0 ? (
                           <section>
-                            <h3>相关引用</h3>
+                            <h3>证据引用</h3>
                             <div className="knowledge-browser-citations">
                               {selectedGraphContext.citations.map((citation) => (
                                 <article key={citation.id}>

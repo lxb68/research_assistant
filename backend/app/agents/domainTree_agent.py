@@ -11,7 +11,7 @@ import threading
 import time
 from collections import Counter, defaultdict
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -236,6 +236,7 @@ class SourceDocument:
     markdown_path: Path | None
     markdown_dir: Path | None
     toc_entries: list[dict[str, Any]]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class DomainTreeAgent:
@@ -723,8 +724,6 @@ class DomainTreeAgent:
     ) -> list[dict[str, Any]]:
         """裁剪模型结果，使一、二级标题数量不超过前端设置的上限。"""
         del documents
-        if primary_heading_count is None and secondary_heading_count is None:
-            return tags
         primary_target = (
             max(1, min(settings.domain_tree_max_heading_count, int(primary_heading_count)))
             if primary_heading_count is not None else None
@@ -802,6 +801,12 @@ class DomainTreeAgent:
         secondary_heading_count: int | None = None,
     ) -> str:
         """先保存可展示的领域树快照，并将知识图谱标记为后台构建中。"""
+        tags = self._apply_heading_counts(
+            tags,
+            documents,
+            primary_heading_count=primary_heading_count,
+            secondary_heading_count=secondary_heading_count,
+        )
         output_dir = self._analysis_dir(project_id)
         output_dir.mkdir(parents=True, exist_ok=True)
         generated_at = datetime.now(timezone.utc).isoformat()
@@ -887,6 +892,12 @@ class DomainTreeAgent:
         generated_at: str | None = None,
     ) -> None:
         """批量保存领域树标签及相关分析产物。"""
+        tags = self._apply_heading_counts(
+            tags,
+            documents,
+            primary_heading_count=primary_heading_count,
+            secondary_heading_count=secondary_heading_count,
+        )
         output_dir = self._analysis_dir(project_id)
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1353,6 +1364,7 @@ class DomainTreeAgent:
             markdown_path=markdown_path,
             markdown_dir=markdown_dir,
             toc_entries=toc_entries,
+            metadata=dict(metadata),
         )
 
     def _build_document_from_markdown_dir(
@@ -1375,6 +1387,7 @@ class DomainTreeAgent:
             markdown_path=markdown_path,
             markdown_dir=markdown_dir,
             toc_entries=toc_entries,
+            metadata=dict(metadata),
         )
 
     def _build_catalog_text(self, documents: list[SourceDocument]) -> str:
@@ -1644,6 +1657,7 @@ class DomainTreeAgent:
                 record_id=document.record_id,
                 title=document.title,
                 markdown_path=document.markdown_path,
+                metadata=document.metadata,
             )
             for document in documents
         )
@@ -1680,6 +1694,7 @@ class DomainTreeAgent:
                 confidence=relation.get("confidence", 0.5),
                 evidenceIds=relation.get("evidenceIds") or [],
                 documentIds=relation.get("documentIds") or [],
+                citationIds=relation.get("citationIds") or [],
             )
 
         for citation in semantic_graph.get("citations", []):
@@ -1693,7 +1708,10 @@ class DomainTreeAgent:
                 target = str(citation.get("id") or "")
                 add_node(
                     target,
-                    str(citation.get("title") or citation.get("rawReference") or "未命名参考文献"),
+                    str(
+                        citation.get("title")
+                        or f"未识别参考文献 [{citation.get('referenceNumber', '?')}]"
+                    ),
                     "reference",
                     referenceNumber=citation.get("referenceNumber"),
                     rawReference=str(citation.get("rawReference") or ""),
@@ -2191,9 +2209,23 @@ class DomainTreeAgent:
         words = cleaned.split()
         if not words:
             return "未分类"
+        shortened = False
         if len(words) > 4:
             cleaned = " ".join(words[:4])
-        return cleaned[:36]
+            shortened = True
+        if len(cleaned) > 36:
+            if " " in cleaned:
+                kept: list[str] = []
+                for word in cleaned.split():
+                    candidate = " ".join([*kept, word])
+                    if len(candidate) > 35:
+                        break
+                    kept.append(word)
+                cleaned = " ".join(kept) or cleaned.split()[0][:35]
+            else:
+                cleaned = cleaned[:35]
+            shortened = True
+        return f"{cleaned.rstrip('…')}…" if shortened else cleaned
 
     def _slugify(self, value: str) -> str:
         """把文本转换为稳定、可用于标识的短字符串。"""

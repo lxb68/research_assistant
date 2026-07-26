@@ -62,6 +62,7 @@ class SemanticSourceDocument:
     record_id: str
     title: str
     markdown_path: Path | None
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -204,12 +205,20 @@ class SemanticGraphExtractor:
             for document in source_documents
             if self._normalize_name(document.title)
         }
+        local_metadata = {
+            document.record_id: {
+                **(document.metadata or {}),
+                "title": document.title,
+            }
+            for document in source_documents
+        }
         state: dict[str, Any] = {
             "entities": {},
             "entityAliases": {},
             "relations": {},
             "evidence": {},
             "citations": [],
+            "documentLanguages": {},
             "processedChunkCount": 0,
             "failedChunkCount": 0,
             "documentCount": len(source_documents),
@@ -227,6 +236,7 @@ class SemanticGraphExtractor:
                 continue
 
             body, reference_text, reference_start_line = self.split_reference_section(markdown)
+            state["documentLanguages"][document.record_id] = self._detect_text_language(body)
             chunks = self.split_chunks(body)
             prepared_documents.append(
                 (document, body, reference_text, reference_start_line, chunks)
@@ -268,6 +278,7 @@ class SemanticGraphExtractor:
                 reference_text,
                 reference_start_line=reference_start_line,
                 local_titles=local_titles,
+                local_metadata=local_metadata,
             )
             state["citations"].extend(citations)
 
@@ -415,6 +426,7 @@ class SemanticGraphExtractor:
             state["citations"],
             key=lambda item: (item["documentId"], item.get("referenceNumber", 0)),
         )
+        self.bind_relation_citations(relations, evidence, citations)
         logger.info(
             "全文语义抽取完成：processed_chunks=%s failed_chunks=%s entities=%s relations=%s "
             "evidence=%s citations=%s elapsed_ms=%.1f",
@@ -584,6 +596,7 @@ class SemanticGraphExtractor:
         *,
         reference_start_line: int,
         local_titles: dict[str, str],
+        local_metadata: dict[str, dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """解析参考文献条目、正文引用标记以及本地文献链接。"""
         if not reference_text:
@@ -591,18 +604,39 @@ class SemanticGraphExtractor:
         entries = self._parse_reference_entries(reference_text)
         contexts = self._find_inline_citation_contexts(body)
         citations: list[dict[str, Any]] = []
+        metadata_by_id = local_metadata or {}
 
         for number, raw_reference, entry_line in entries:
             doi_match = _DOI_PATTERN.search(raw_reference)
             url_match = _URL_PATTERN.search(raw_reference)
-            year_match = _YEAR_PATTERN.search(raw_reference)
-            title = self._guess_reference_title(raw_reference)
+            parsed = self._parse_reference_metadata(raw_reference)
+            title = str(parsed.get("title") or "")
             matched_document_id = self._match_local_document(raw_reference, title, local_titles)
+            parsed_doi = doi_match.group(0).rstrip(".,;") if doi_match else ""
+            if not matched_document_id and parsed_doi:
+                normalized_doi = self._normalize_doi(parsed_doi)
+                matched_document_id = next(
+                    (
+                        record_id
+                        for record_id, item in metadata_by_id.items()
+                        if self._normalize_doi(item.get("doi")) == normalized_doi
+                    ),
+                    "",
+                )
+            local_item = metadata_by_id.get(matched_document_id, {})
+            if matched_document_id:
+                title = str(local_item.get("title") or title).strip()
+            year = self._coerce_year(local_item.get("year")) or parsed.get("year")
+            authors = self._string_list(local_item.get("authors")) or list(parsed.get("authors") or [])
+            doi = str(local_item.get("doi") or parsed_doi).rstrip(".,;")
+            title_valid = self._is_valid_reference_title(title, raw_reference, authors, year)
+            if not title_valid:
+                title = ""
             citation_id = f"citation:{document.record_id}:{number}"
             citation_contexts = contexts.get(number, []) + self._find_author_year_contexts(
                 body,
-                raw_reference,
-                year_match.group(0) if year_match else "",
+                list(parsed.get("authorKeys") or []),
+                str(year or ""),
             )
             unique_contexts = {
                 (str(item.get("section")), int(item.get("lineStart") or 0), str(item.get("quote"))): item
@@ -616,10 +650,24 @@ class SemanticGraphExtractor:
                     "marker": f"[{number}]",
                     "title": title,
                     "rawReference": raw_reference,
-                    "year": int(year_match.group(0)) if year_match else None,
-                    "doi": doi_match.group(0).rstrip(".,;") if doi_match else "",
+                    "authors": authors,
+                    "year": year,
+                    "doi": doi,
                     "url": url_match.group(0).rstrip(".,;") if url_match else "",
                     "matchedDocumentId": matched_document_id,
+                    "metadataSource": (
+                        "csl"
+                        if matched_document_id and local_item.get("csl")
+                        else "zotero"
+                        if matched_document_id and str(local_item.get("source") or "").lower() == "zotero"
+                        else "local"
+                        if matched_document_id
+                        else "doi"
+                        if doi
+                        else "text"
+                    ),
+                    "metadataQuality": "valid" if title_valid else "invalid_title",
+                    "authorKeys": list(parsed.get("authorKeys") or []),
                     "referenceLine": reference_start_line + entry_line,
                     "contexts": list(unique_contexts.values())[:8],
                 }
@@ -1435,7 +1483,16 @@ Return shape:
                 "lineStart": line_start,
                 "quote": normalized_quote,
                 "kind": kind,
+                "language": self._detect_text_language(normalized_quote),
+                "documentLanguage": state.get("documentLanguages", {}).get(
+                    document.record_id,
+                    "unknown",
+                ),
             },
+        )
+        evidence = state["evidence"][evidence_id]
+        evidence["languageMismatch"] = (
+            evidence.get("language") not in {"unknown", evidence.get("documentLanguage")}
         )
         return evidence_id
 
@@ -1488,20 +1545,19 @@ Return shape:
     def _find_author_year_contexts(
         self,
         body: str,
-        raw_reference: str,
+        author_keys: list[str],
         year: str,
     ) -> list[dict[str, Any]]:
         """为作者—年份制参考文献查找正文引用上下文。"""
-        if not year:
+        if not year or not author_keys:
             return []
-        author_prefix = raw_reference.split(":", 1)[0].split(",", 1)[0].strip()
-        surname_matches = re.findall(r"[A-Za-z][A-Za-z'’\-]+", author_prefix)
-        if not surname_matches:
+        surnames = [value for value in author_keys if len(value) >= 3][:3]
+        if not surnames:
             return []
-        surname = surname_matches[-1]
+        surname_pattern = "|".join(re.escape(value) for value in surnames)
         pattern = re.compile(
-            rf"(?i)\b{re.escape(surname)}\b[^\n]{{0,100}}?\b{re.escape(year)}\b"
-            rf"|\b{re.escape(year)}\b[^\n]{{0,100}}?\b{re.escape(surname)}\b"
+            rf"(?i)\b(?:{surname_pattern})\b"
+            rf"(?:\s+et\s+al\.?)?\s*[,;(]?\s*\b{re.escape(year)}\b"
         )
         headings = list(_HEADING_PATTERN.finditer(body))
         contexts: list[dict[str, Any]] = []
@@ -1538,12 +1594,301 @@ Return shape:
                 continue
         return sorted(numbers)
 
+    def _parse_reference_metadata(self, raw_reference: str) -> dict[str, Any]:
+        """按常见 CSL 输出结构解析作者、年份和标题；只在无结构化元数据时使用。"""
+        compact = re.sub(r"\s+", " ", raw_reference).strip()
+        year_match = _YEAR_PATTERN.search(compact)
+        year = int(year_match.group(0)) if year_match else None
+        author_text = compact[: year_match.start()].strip(" .,:;()") if year_match else ""
+        remainder = compact[year_match.end() :].strip(" .,:;()") if year_match else compact
+
+        # Springer/BibTeX 风格常以“作者: 标题”分隔，冒号比年份更可靠。
+        colon_index = compact.find(":")
+        if 0 < colon_index < 160 and not compact[:colon_index].lower().endswith(("http", "https", "doi")):
+            author_text = compact[:colon_index].strip(" .,:;()")
+            remainder = compact[colon_index + 1 :].strip()
+            embedded_year = _YEAR_PATTERN.search(remainder)
+            if embedded_year and year is None:
+                year = int(embedded_year.group(0))
+
+        authors = self._parse_author_names(author_text)
+        author_keys = self._author_keys(authors)
+        title = self._extract_title_candidate(remainder)
+        return {
+            "authors": authors,
+            "authorKeys": author_keys,
+            "year": year,
+            "title": title,
+        }
+
     def _guess_reference_title(self, raw_reference: str) -> str:
-        """从常见参考文献格式中保守推断标题，失败时保留截断原文。"""
-        after_authors = raw_reference.split(":", 1)[1].strip() if ":" in raw_reference else raw_reference
-        title = re.split(r"\.\s+(?:In:|arXiv|https?://|[A-Z][A-Za-z. ]+\s+\d)", after_authors, maxsplit=1)[0]
-        title = re.sub(r"\s+", " ", title).strip(" .")
-        return title[:300] or raw_reference[:300]
+        """兼容旧调用方，返回通过质量校验的标题。"""
+        parsed = self._parse_reference_metadata(raw_reference)
+        title = str(parsed.get("title") or "")
+        return title if self._is_valid_reference_title(
+            title,
+            raw_reference,
+            list(parsed.get("authors") or []),
+            parsed.get("year"),
+        ) else ""
+
+    def _extract_title_candidate(self, value: str) -> str:
+        """从去除作者与年份后的 CSL 文本中保守提取标题。"""
+        cleaned = re.sub(r"^\(?\d{4}[a-z]?\)?[.,;:]?\s*", "", value, flags=re.IGNORECASE)
+        cleaned = re.sub(_DOI_PATTERN, "", cleaned)
+        cleaned = re.sub(_URL_PATTERN, "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,:;()")
+        if not cleaned:
+            return ""
+        title = re.split(
+            r"\.\s+(?=(?:In\b|Proceedings\b|Proc\.\b|arXiv\b|"
+            r"(?:International|Annual|IEEE|ACM|Springer|Elsevier)\b))",
+            cleaned,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        # 普通期刊信息通常从标题后的首个句号开始；缩写后的短片段不据此切分。
+        sentence = re.match(r"^(.{4,240}?[A-Za-z0-9)])\.\s+[A-Z]", title)
+        if sentence:
+            title = sentence.group(1)
+        return re.sub(r"\s+", " ", title).strip(" .,:;()")
+
+    def _parse_author_names(self, value: str) -> list[str]:
+        """解析作者串并排除卷号、年份和单字符噪声。"""
+        cleaned = re.sub(r"^\s*(?:\[\d+\]|\d+[.)])\s*", "", value).strip(" .,:;")
+        if not cleaned:
+            return []
+        parts = re.split(r"\s+(?:and|&)\s+|;\s*|,\s*(?=[A-Z][a-z]+\s+[A-Z])", cleaned)
+        authors = []
+        for part in parts:
+            candidate = re.sub(r"\s+", " ", part).strip(" .,:;")
+            letters = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ\u3400-\u9fff]", "", candidate)
+            if len(letters) >= 2 and not candidate.isdigit():
+                authors.append(candidate)
+        return authors[:20]
+
+    def _author_keys(self, authors: list[str]) -> list[str]:
+        """提取可用于作者—年份上下文匹配的稳定姓氏。"""
+        keys: list[str] = []
+        for author in authors:
+            tokens = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’\-]+", author)
+            if not tokens:
+                continue
+            key = tokens[0] if "," in author else tokens[-1]
+            if len(key) >= 3 and key.casefold() not in {"and", "the", "with"}:
+                keys.append(key)
+        return list(dict.fromkeys(keys))
+
+    def _is_valid_reference_title(
+        self,
+        title: str,
+        raw_reference: str,
+        authors: list[str],
+        year: int | None,
+    ) -> bool:
+        """拒绝单字符、纯数字、作者年份串和整条参考文献被误当标题。"""
+        compact = re.sub(r"\s+", " ", str(title or "")).strip(" .,:;")
+        raw = re.sub(r"\s+", " ", raw_reference).strip()
+        if len(compact) < 4 or len(compact) > 300 or compact.isdigit():
+            return False
+        if self._normalize_name(compact) == self._normalize_name(raw):
+            return False
+        if len(raw) > 80 and len(compact) / len(raw) > 0.88:
+            return False
+        normalized = self._normalize_name(compact)
+        if year and normalized == str(year):
+            return False
+        return not any(normalized == self._normalize_name(author) for author in authors)
+
+    @staticmethod
+    def _coerce_year(value: Any) -> int | None:
+        match = _YEAR_PATTERN.search(str(value or ""))
+        return int(match.group(0)) if match else None
+
+    @staticmethod
+    def _normalize_doi(value: Any) -> str:
+        """统一 DOI URL、doi: 前缀和大小写，供本地元数据精确匹配。"""
+        normalized = str(value or "").strip().casefold()
+        normalized = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", normalized)
+        return normalized.rstrip(".,;")
+
+    @staticmethod
+    def _detect_text_language(value: str) -> str:
+        """按 Unicode 文字脚本检测语言，不依赖领域词典。"""
+        text = str(value or "")
+        han_count = len(re.findall(r"[\u3400-\u9fff]", text))
+        latin_count = len(re.findall(r"[A-Za-z]", text))
+        total = han_count + latin_count
+        if total == 0:
+            return "unknown"
+        if han_count >= 3 and latin_count >= 3 and min(han_count, latin_count) / total >= 0.1:
+            return "mixed"
+        return "zh" if han_count > latin_count else "en"
+
+    def bind_relation_citations(
+        self,
+        relations: list[dict[str, Any]],
+        evidence: list[dict[str, Any]],
+        citations: list[dict[str, Any]],
+    ) -> None:
+        """建立关系证据到正文引用上下文再到参考文献的可验证链路。"""
+        evidence_by_id = {str(item.get("id") or ""): item for item in evidence}
+        citations_by_document: dict[str, list[dict[str, Any]]] = {}
+        citations_by_number: dict[tuple[str, int], dict[str, Any]] = {}
+        citations_by_year: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        contexts_by_line: dict[tuple[str, int], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+        for citation in citations:
+            self._upgrade_legacy_citation(citation)
+            document_id = str(citation.get("documentId") or "")
+            citations_by_document.setdefault(document_id, []).append(citation)
+            citations_by_number[(document_id, int(citation.get("referenceNumber") or 0))] = citation
+            citation_year = self._coerce_year(citation.get("year"))
+            if citation_year:
+                citations_by_year.setdefault((document_id, citation_year), []).append(citation)
+            for context in citation.get("contexts") or []:
+                line_start = int(context.get("lineStart") or 0)
+                if line_start:
+                    contexts_by_line.setdefault((document_id, line_start), []).append(
+                        (citation, context)
+                    )
+
+        for relation in relations:
+            linked: set[str] = set()
+            relation_evidence = [
+                evidence_by_id[evidence_id]
+                for evidence_id in relation.get("evidenceIds") or []
+                if evidence_id in evidence_by_id
+            ]
+            for item in relation_evidence:
+                document_id = str(item.get("documentId") or "")
+                quote = re.sub(r"\s+", " ", str(item.get("quote") or "")).strip()
+                if not quote:
+                    continue
+                explicit_numbers = {
+                    number
+                    for match in _INLINE_CITATION_PATTERN.finditer(quote)
+                    for number in self._expand_citation_numbers(match.group(1))
+                }
+                for number in explicit_numbers:
+                    citation = citations_by_number.get((document_id, number))
+                    if citation and citation.get("id"):
+                        linked.add(str(citation["id"]))
+
+                evidence_line = int(item.get("lineStart") or 0)
+                nearby_contexts = [
+                    pair
+                    for line_number in range(max(1, evidence_line - 4), evidence_line + 5)
+                    for pair in contexts_by_line.get((document_id, line_number), [])
+                ] if evidence_line else [
+                    (citation, context)
+                    for citation in citations_by_document.get(document_id, [])
+                    for context in citation.get("contexts") or []
+                ]
+                for citation, context in nearby_contexts:
+                    citation_id = str(citation.get("id") or "")
+                    if citation_id and self._evidence_matches_citation_context(item, context):
+                        linked.add(citation_id)
+                quote_years = {int(value) for value in _YEAR_PATTERN.findall(quote)}
+                for quote_year in quote_years:
+                    for citation in citations_by_year.get((document_id, quote_year), []):
+                        citation_id = str(citation.get("id") or "")
+                        if citation_id and self._quote_contains_author_year(
+                            quote,
+                            list(citation.get("authorKeys") or []),
+                            quote_year,
+                        ):
+                            linked.add(citation_id)
+            relation["citationIds"] = sorted(linked)
+
+    def annotate_evidence_languages(self, evidence: list[dict[str, Any]]) -> None:
+        """为历史证据按文档整体脚本分布补齐语言及异常语言标记。"""
+        quotes_by_document: dict[str, list[str]] = {}
+        for item in evidence:
+            document_id = str(item.get("documentId") or "")
+            quote = str(item.get("quote") or "")
+            if document_id and quote:
+                quotes_by_document.setdefault(document_id, []).append(quote)
+        document_languages: dict[str, str] = {}
+        for document_id, quotes in quotes_by_document.items():
+            language_counts = Counter(
+                language
+                for language in (self._detect_text_language(quote) for quote in quotes)
+                if language in {"zh", "en"}
+            )
+            document_languages[document_id] = (
+                language_counts.most_common(1)[0][0]
+                if language_counts
+                else self._detect_text_language(" ".join(quotes))
+            )
+        for item in evidence:
+            language = str(item.get("language") or "") or self._detect_text_language(
+                str(item.get("quote") or "")
+            )
+            document_language = str(item.get("documentLanguage") or "") or document_languages.get(
+                str(item.get("documentId") or ""),
+                "unknown",
+            )
+            item["language"] = language
+            item["documentLanguage"] = document_language
+            item["languageMismatch"] = language not in {"unknown", document_language}
+
+    def _upgrade_legacy_citation(self, citation: dict[str, Any]) -> None:
+        """在读取历史图谱时补齐新版结构化引用字段，不修改原始参考文献。"""
+        if citation.get("metadataQuality"):
+            return
+        raw_reference = str(citation.get("rawReference") or "")
+        if not raw_reference:
+            return
+        parsed = self._parse_reference_metadata(raw_reference)
+        authors = list(parsed.get("authors") or [])
+        year = self._coerce_year(citation.get("year")) or parsed.get("year")
+        title = str(parsed.get("title") or "")
+        title_valid = self._is_valid_reference_title(title, raw_reference, authors, year)
+        citation["title"] = title if title_valid else ""
+        citation["authors"] = authors
+        citation["authorKeys"] = list(parsed.get("authorKeys") or [])
+        citation["year"] = year
+        citation["metadataSource"] = (
+            "doi" if self._normalize_doi(citation.get("doi")) else "text"
+        )
+        citation["metadataQuality"] = "valid" if title_valid else "invalid_title"
+
+    @staticmethod
+    def _evidence_matches_citation_context(
+        evidence: dict[str, Any],
+        context: dict[str, Any],
+    ) -> bool:
+        """用行号邻近和词项覆盖确认引用上下文确实包含关系证据。"""
+        evidence_line = int(evidence.get("lineStart") or 0)
+        context_line = int(context.get("lineStart") or 0)
+        if evidence_line and context_line and abs(evidence_line - context_line) > 4:
+            return False
+        evidence_tokens = re.findall(
+            r"[\w\u3400-\u9fff]+",
+            str(evidence.get("quote") or "").casefold(),
+        )
+        context_tokens = set(
+            re.findall(
+                r"[\w\u3400-\u9fff]+",
+                str(context.get("quote") or "").casefold(),
+            )
+        )
+        if len(evidence_tokens) < 6:
+            return False
+        covered = sum(token in context_tokens for token in evidence_tokens)
+        return covered / len(evidence_tokens) >= 0.72
+
+    @staticmethod
+    def _quote_contains_author_year(quote: str, author_keys: list[str], year: Any) -> bool:
+        if not author_keys or not year:
+            return False
+        for surname in author_keys[:3]:
+            if re.search(
+                rf"(?i)\b{re.escape(surname)}\b(?:\s+et\s+al\.?)?\s*[,;(]?\s*\b{year}\b",
+                quote,
+            ):
+                return True
+        return False
 
     def _match_local_document(
         self,

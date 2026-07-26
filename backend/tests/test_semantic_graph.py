@@ -155,6 +155,144 @@ Method A improves Dataset B accuracy to 95%. Prior work is described in [1, 2].
         self.assertEqual(citations[0]["year"], 2020)
         self.assertTrue(citations[0]["contexts"])
 
+    def test_parses_acm_reference_without_using_author_initial_as_title(self) -> None:
+        """ACM 作者年份格式不得把首字母 S 或整条参考文献当作标题。"""
+        extractor = SemanticGraphExtractor(None)
+        raw = (
+            "S. Sobitha Ahila and K.L. Shunmuganathan. 2014. "
+            "State Of Art In Homomorphic Encryption. "
+            "International Journal of Computer Applications 104 (2014), 15-19."
+        )
+
+        citations = extractor.parse_citations(
+            SemanticSourceDocument("paper", "Paper", None),
+            "## Related Work\n\nNo author-year citation is present here.",
+            f"[3] {raw}",
+            reference_start_line=10,
+            local_titles={},
+        )
+
+        self.assertEqual(citations[0]["title"], "State Of Art In Homomorphic Encryption")
+        self.assertNotEqual(citations[0]["title"], "S")
+        self.assertEqual(citations[0]["metadataQuality"], "valid")
+        self.assertEqual(citations[0]["contexts"], [])
+
+    def test_doi_match_prefers_local_zotero_metadata_over_reference_text(self) -> None:
+        """DOI 命中本地 Zotero 条目时，应以结构化元数据覆盖文本回退结果。"""
+        extractor = SemanticGraphExtractor(None)
+        citations = extractor.parse_citations(
+            SemanticSourceDocument("paper", "Paper", None),
+            "## Body\n\nPrior work is cited in [1].",
+            "[1] X. 2020. Corrupted title. doi:10.1000/example",
+            reference_start_line=8,
+            local_titles={},
+            local_metadata={
+                "zotero:item": {
+                    "source": "zotero",
+                    "title": "Authoritative CSL Title",
+                    "authors": ["Ada Lovelace"],
+                    "year": "2021",
+                    "doi": "https://doi.org/10.1000/EXAMPLE",
+                }
+            },
+        )
+
+        self.assertEqual(citations[0]["matchedDocumentId"], "zotero:item")
+        self.assertEqual(citations[0]["title"], "Authoritative CSL Title")
+        self.assertEqual(citations[0]["authors"], ["Ada Lovelace"])
+        self.assertEqual(citations[0]["year"], 2021)
+        self.assertEqual(citations[0]["metadataSource"], "zotero")
+
+    def test_relation_only_links_citations_supported_by_its_evidence_context(self) -> None:
+        """关系只能绑定证据所在正文引用上下文对应的参考文献。"""
+        extractor = SemanticGraphExtractor(None)
+        relations = [{"id": "r1", "evidenceIds": ["e1"], "documentIds": ["paper"]}]
+        evidence = [{
+            "id": "e1",
+            "documentId": "paper",
+            "lineStart": 480,
+            "quote": "The optimized parameters remain vulnerable to subfield lattice attacks (Albrecht et al. 2016).",
+        }]
+        citations = [
+            {
+                "id": "citation:paper:3",
+                "documentId": "paper",
+                "referenceNumber": 3,
+                "year": 2014,
+                "authorKeys": ["Ahila"],
+                "contexts": [],
+            },
+            {
+                "id": "citation:paper:5",
+                "documentId": "paper",
+                "referenceNumber": 5,
+                "year": 2016,
+                "authorKeys": ["Albrecht"],
+                "contexts": [{
+                    "lineStart": 482,
+                    "quote": (
+                        "Optimized parameters remain vulnerable to subfield lattice "
+                        "attacks (Albrecht et al. 2016). The attack affects NTRU schemes."
+                    ),
+                }],
+            },
+        ]
+
+        extractor.bind_relation_citations(relations, evidence, citations)
+
+        self.assertEqual(relations[0]["citationIds"], ["citation:paper:5"])
+
+    def test_evidence_marks_mixed_language_against_english_document(self) -> None:
+        """英文文献中的中英混合批注应被标注，而不是静默当作英文正文。"""
+        extractor = SemanticGraphExtractor(None)
+        state = {"evidence": {}, "documentLanguages": {"paper": "en"}}
+        document = SemanticSourceDocument("paper", "SilentWood", None)
+        chunk = TextChunk(
+            1,
+            "Evaluation",
+            "BCC 对计算速度贡献最大，GPU acceleration is limited.",
+            12,
+        )
+
+        evidence_id = extractor._add_evidence(
+            state,
+            document,
+            chunk,
+            chunk.text,
+            kind="relation",
+        )
+
+        item = state["evidence"][evidence_id]
+        self.assertEqual(item["language"], "mixed")
+        self.assertTrue(item["languageMismatch"])
+
+    def test_legacy_evidence_language_is_inferred_from_document_majority(self) -> None:
+        """历史图谱也应按同文档证据的整体语言补齐异常片段标记。"""
+        extractor = SemanticGraphExtractor(None)
+        evidence = [
+            {
+                "id": "e1",
+                "documentId": "paper",
+                "quote": "This English evidence sentence describes private inference performance.",
+            },
+            {
+                "id": "e2",
+                "documentId": "paper",
+                "quote": "Another English paragraph explains the experimental evaluation in detail.",
+            },
+            {
+                "id": "e3",
+                "documentId": "paper",
+                "quote": "BCC 对计算速度贡献最大，GPU acceleration is limited.",
+            },
+        ]
+
+        extractor.annotate_evidence_languages(evidence)
+
+        self.assertEqual(evidence[2]["documentLanguage"], "en")
+        self.assertEqual(evidence[2]["language"], "mixed")
+        self.assertTrue(evidence[2]["languageMismatch"])
+
     def test_retries_timeout_and_reports_chunk_progress(self) -> None:
         """语义分块超时应有限重试，并持续上报可观察进度。"""
         calls = 0

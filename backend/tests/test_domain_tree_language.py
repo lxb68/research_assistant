@@ -86,6 +86,16 @@ class DomainTreeLanguageTest(unittest.TestCase):
         self.assertIn("最多 12 个二级标题", prompt)
         self.assertNotIn("必须为", prompt)
 
+    def test_english_heading_is_shortened_at_word_boundary_with_ellipsis(self) -> None:
+        """英文领域标题不得在单词内部按字符硬切。"""
+        label = self.agent._short_label(
+            "Privacy-Preserving Decision Tree Evaluation for Batched Inputs"
+        )
+
+        self.assertTrue(label.endswith("…"))
+        self.assertEqual(label.removesuffix("…").split()[-1], "Tree")
+        self.assertNotIn("Evaluat…", label)
+
     def test_zero_secondary_heading_count_removes_children(self) -> None:
         generated = [{"label": "1 密码学", "child": [{"label": "1.1 格密码"}]}]
         documents = [SourceDocument("paper", "格密码", "", [], None, None, [])]
