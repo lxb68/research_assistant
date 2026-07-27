@@ -119,6 +119,7 @@ def normalize_execution_complexity(
     question_type: str,
     facet_count: int,
     requirement_count: int,
+    broad_evidence_required: bool = False,
 ) -> str:
     """修正规划字段内部矛盾，避免综合任务被当作无需校验的简单事实。"""
     if (
@@ -126,6 +127,7 @@ def normalize_execution_complexity(
         or question_type in SEMANTIC_QUESTION_TYPES
         or facet_count > 1
         or requirement_count > 1
+        or broad_evidence_required
     ):
         return "complex"
     return "simple"

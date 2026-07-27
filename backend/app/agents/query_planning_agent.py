@@ -29,11 +29,20 @@ class QueryPlanningAgent:
 1. standalone_question 必须脱离历史后仍语义完整，不得机械拼接无关历史。
    historical_user_intents 表示历史用户目标；prior_answers 是旧回答，仅可用于指代消解、识别待核验命题或文本变换，绝不能作为事实、研究结论或证据。
    当前用户问题和当前用户的纠正优先于所有旧回答；若用户质疑旧结论，standalone_question 必须表达“重新核验该命题”的真实意图。
+   interaction_context.mode 从 new_topic、followup、reference、correction、transform 中选择。
+   reference、correction、transform 必须在 interaction_context.basis 中逐项原样复制当前问题里的最短语义依据；
+   不得从历史回答中复制依据。new_topic 和 followup 的 basis 必须为空。
 2. target_paper_ids 和 target_chunks 只能使用 candidate_sources 或 explicit_paper_ids 中真实存在的值。
-   target_chunks 只用于用户明确追问某个既有片段、引用或局部内容；当用户询问整篇论文、全文或宽范围主题时，保留 target_paper_ids，但 target_chunks 必须为空，避免旧摘要片段挤占全文检索结果。
+   candidate_sources 只是用于消解“它、这篇、上述两篇”等明确指代的候选对象，绝不是默认检索范围。
+   scope_mode 只能为 corpus 或 referenced。只有 interaction_context 表明当前问题明确指向特定历史论文或片段时
+   才使用 referenced；否则必须使用 corpus，target_paper_ids 和 target_chunks 均为空。
+   target_chunks 只用于用户明确追问某个既有片段、引用或局部内容；当用户询问某篇明确论文的整篇或全文时，
+   保留该论文的 target_paper_ids，但 target_chunks 必须为空，避免旧摘要片段挤占全文检索结果。
 3. 无法唯一解析“它、前者、这个片段”等指代时，needs_clarification=true。
 4. question_type 从 simple_fact、mechanism、comparison、evaluation、synthesis 中选择。
-5. complexity 从 simple、complex 中选择。单一事实查询通常为 simple；机制、比较、综合、多维分析通常为 complex。
+5. complexity 从 simple、complex 中选择；evidence_breadth 从 narrow、broad 中选择。
+   单一事实且少量证据足够时使用 simple+narrow；需要覆盖多个类别、来源或维度时使用 complex+broad，
+   不能只按句子长度判断。
 6. complex 问题应动态拆成 2 至 5 个互补 retrieval_facets。每个 facet 描述一个回答所需的信息缺口，不能针对某篇固定论文套用预设关键词。
 7. preferred_section_types 使用通用语义类型，例如 abstract、introduction、contribution、method、framework、experiment、result、conclusion。
 8. 必须保持用户原问题的粒度，不得把“介绍、怎么做、主要流程”等概述问题擅自扩大成完整协议复现、精确通信轮次或全部安全性证明。
@@ -46,6 +55,9 @@ class QueryPlanningAgent:
   "standalone_question":"...",
   "question_type":"simple_fact|mechanism|comparison|evaluation|synthesis",
   "complexity":"simple|complex",
+  "interaction_context":{"mode":"new_topic|followup|reference|correction|transform","basis":[]},
+  "scope_mode":"corpus|referenced",
+  "evidence_breadth":"narrow|broad",
   "target_paper_ids":[],
   "target_chunks":[{"record_id":"...","chunk_index":0}],
   "document_requirements":{"has_pdf":null,"has_abstract":null,"has_parsed_full_text":null},
@@ -93,7 +105,7 @@ class QueryPlanningAgent:
         candidate_sources = resolved_context.candidate_sources
         planner_input = {
             "current_question": normalized_question,
-            "usage_mode": planning_context["usage_mode"],
+            "history_available": planning_context["history_available"],
             "historical_user_intents": planning_context["historical_user_intents"],
             "prior_answers": planning_context["prior_answers"],
             "candidate_sources": candidate_sources,
@@ -116,6 +128,7 @@ class QueryPlanningAgent:
                 question=normalized_question,
                 candidate_sources=candidate_sources,
                 explicit_paper_ids=explicit_paper_ids or [],
+                has_history=bool(resolved_context.conversation.normalized_history),
             ).to_dict()
         except Exception as error:
             setattr(error, "raw_response", str(raw_response or ""))
@@ -129,6 +142,7 @@ class QueryPlanningAgent:
         normalized_question: str,
         candidate_sources: list[dict[str, Any]],
         explicit_paper_ids: list[str],
+        has_history: bool = False,
     ) -> dict[str, Any]:
         """兼容旧入口；问题范围由独立 QuestionContractBuilder 维护。"""
         return self.contract_builder.build(
@@ -136,6 +150,7 @@ class QueryPlanningAgent:
             question=normalized_question,
             candidate_sources=candidate_sources,
             explicit_paper_ids=explicit_paper_ids,
+            has_history=has_history,
         ).to_dict()
 
     @staticmethod

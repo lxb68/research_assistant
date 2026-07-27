@@ -15,7 +15,6 @@ class ConversationContext:
     """保存当前问题及从历史中提取出的意图、旧回答和来源引用。"""
 
     current_question: str
-    usage_mode: str
     normalized_history: list[dict[str, Any]] = field(default_factory=list)
     user_intents: list[dict[str, Any]] = field(default_factory=list)
     prior_answers: list[dict[str, Any]] = field(default_factory=list)
@@ -24,7 +23,7 @@ class ConversationContext:
     def for_query_planning(self) -> dict[str, Any]:
         """返回查询规划需要的语义历史，旧回答始终是不可验证输入。"""
         return {
-            "usage_mode": self.usage_mode,
+            "history_available": bool(self.normalized_history),
             "historical_user_intents": self.user_intents,
             "prior_answers": self.prior_answers,
             "candidate_sources": self.reference_sources,
@@ -33,7 +32,7 @@ class ConversationContext:
     def for_model_context(self, *, user_limit: int = 6, answer_limit: int = 3) -> dict[str, Any]:
         """返回路由、直答和工具循环共享的结构化上下文视图。"""
         return {
-            "usageMode": self.usage_mode,
+            "historyAvailable": bool(self.normalized_history),
             "historicalUserIntents": self.user_intents[-max(1, user_limit) :],
             "priorAnswers": self.prior_answers[-max(1, answer_limit) :],
             "referenceSources": self.reference_sources,
@@ -91,7 +90,6 @@ class ConversationContextProjector:
 
         return ConversationContext(
             current_question=question,
-            usage_mode=self._classify_usage(question, bool(normalized)),
             normalized_history=normalized,
             user_intents=user_intents,
             prior_answers=prior_answers,
@@ -144,21 +142,6 @@ class ConversationContextProjector:
             "chunk_index": chunk_index,
             "excerpt": str(source.get("excerpt") or "")[:1200],
         }
-
-    @staticmethod
-    def _classify_usage(question: str, has_history: bool) -> str:
-        normalized = question.casefold()
-        transform_markers = ("翻译", "改写", "重写", "润色", "压缩", "总结上", "translate", "rewrite")
-        correction_markers = ("不对", "不是", "重新核对", "重新检查", "更正", "纠正", "靠谱吗", "可靠吗")
-        reference_markers = ("它", "这个", "该结论", "上述", "上面", "刚才", "前者", "后者", "两者")
-        if any(marker in normalized for marker in transform_markers):
-            return "transform"
-        if any(marker in normalized for marker in correction_markers):
-            return "correction"
-        if any(marker in normalized for marker in reference_markers):
-            return "reference"
-        return "followup" if has_history else "new_topic"
-
 
 __all__ = [
     "ConversationContext",

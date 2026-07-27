@@ -13,6 +13,7 @@ from app.services.document_capabilities import normalize_document_requirements
 from app.services.grounding_validator import GroundingValidator
 from app.services.question_contract_builder import QuestionContractBuilder
 from app.services.retrieval_refiner import RetrievalRefiner
+from app.services.semantic_context_contract import SemanticContextContractBuilder
 
 
 def test_context_resolver_only_exposes_unverified_reference_objects() -> None:
@@ -29,7 +30,7 @@ def test_context_resolver_only_exposes_unverified_reference_objects() -> None:
     )
 
     planning = resolved.for_planning()
-    assert planning["usage_mode"] == "reference"
+    assert planning["history_available"] is True
     assert planning["prior_answers"][0]["allowed_as_evidence"] is False
     assert resolved.candidate_sources[0]["record_id"] == "paper-a"
 
@@ -40,12 +41,15 @@ def test_question_contract_builder_rejects_unknown_scope() -> None:
             "standalone_question": "论文 A 的机制是什么？",
             "question_type": "mechanism",
             "complexity": "complex",
+            "interaction_context": {"mode": "reference", "basis": ["它"]},
+            "scope_mode": "referenced",
             "target_paper_ids": ["invented"],
             "retrieval_facets": [{"id": "f1", "query": "mechanism", "preferred_section_types": ["methods"]}],
             "core_requirements": [{"id": "r1", "description": "解释机制", "evidence_intent": "mechanism"}],
         },
         question="它的机制是什么？",
         candidate_sources=[{"record_id": "paper-a", "chunk_index": 2}],
+        has_history=True,
     )
 
     assert contract.needsClarification is True
@@ -53,6 +57,31 @@ def test_question_contract_builder_rejects_unknown_scope() -> None:
     assert contract.invalidTargetIds == ["invented"]
     assert contract.retrievalFacets[0]["preferredSectionTypes"] == ["method"]
     assert contract.requirementSpecs[0]["evidenceIntent"] == "mechanism"
+
+
+def test_semantic_context_contract_validates_mode_and_current_question_basis() -> None:
+    classification = SemanticContextContractBuilder().build(
+        {"mode": "correction", "basis": ["重新核对"]},
+        question="请重新核对这个结论",
+        has_history=True,
+    )
+
+    assert classification.mode == "correction"
+    assert classification.basis == ["重新核对"]
+    assert classification.repaired is False
+
+
+def test_semantic_context_contract_repairs_unverifiable_classification() -> None:
+    classification = SemanticContextContractBuilder().build(
+        {"mode": "reference", "basis": ["上面两篇"]},
+        question="分析当前项目",
+        has_history=True,
+    )
+
+    assert classification.mode == "followup"
+    assert classification.basis == []
+    assert classification.invalid_basis == ["上面两篇"]
+    assert classification.repaired is True
 
 
 def test_question_contract_builder_preserves_only_typed_document_requirements() -> None:

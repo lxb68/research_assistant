@@ -12,6 +12,8 @@ from app.services.retrieval_contracts import (
     normalize_section_types,
 )
 from app.services.document_capabilities import normalize_document_requirements
+from app.services.retrieval_scope_resolver import RetrievalScopeResolver
+from app.services.semantic_context_contract import SemanticContextContractBuilder
 
 
 @dataclass(slots=True)
@@ -36,6 +38,13 @@ class QuestionContract:
     candidateSourceCount: int = 0
     invalidTargetIds: list[str] = field(default_factory=list)
     invalidTargetChunks: list[dict[str, Any]] = field(default_factory=list)
+    retrievalScopeMode: str = "unscoped"
+    scopeExpandedFromHistory: bool = False
+    evidenceBreadth: str = "narrow"
+    interactionMode: str = "new_topic"
+    interactionBasis: list[str] = field(default_factory=list)
+    invalidInteractionBasis: list[str] = field(default_factory=list)
+    interactionClassificationRepaired: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -49,6 +58,8 @@ class QuestionContractBuilder:
 
     def __init__(self, *, max_facets: int | None = None) -> None:
         self.max_facets = max(1, min(int(max_facets or settings.query_planner_max_facets), 8))
+        self.scope_resolver = RetrievalScopeResolver()
+        self.semantic_context_builder = SemanticContextContractBuilder()
 
     def build(
         self,
@@ -57,15 +68,11 @@ class QuestionContractBuilder:
         question: str,
         candidate_sources: list[dict[str, Any]],
         explicit_paper_ids: list[str] | None = None,
+        has_history: bool = False,
     ) -> QuestionContract:
         explicit_ids = [str(value) for value in explicit_paper_ids or [] if str(value)]
-        known_ids = {str(source["record_id"]) for source in candidate_sources}
-        allowed_ids = known_ids | set(explicit_ids)
         proposed = payload.get("target_paper_ids")
         proposed = proposed if isinstance(proposed, list) else []
-        target_ids = list(dict.fromkeys(explicit_ids or [str(value).strip() for value in proposed if str(value).strip()]))
-        invalid_ids = [value for value in target_ids if value not in allowed_ids]
-        target_ids = [value for value in target_ids if value in allowed_ids]
 
         known_chunks = {(str(source["record_id"]), int(source["chunk_index"])) for source in candidate_sources}
         target_chunks: list[dict[str, Any]] = []
@@ -84,6 +91,26 @@ class QuestionContractBuilder:
                     target_chunks.append(reference)
             else:
                 invalid_chunks.append(reference)
+
+        interaction = self.semantic_context_builder.build(
+            payload.get("interaction_context") or payload.get("interactionContext"),
+            question=question,
+            has_history=has_history,
+        )
+        scope_resolution = self.scope_resolver.resolve(
+            question=question,
+            requested_scope_mode=payload.get("scope_mode") or payload.get("scopeMode"),
+            interaction_mode=interaction.mode,
+            reference_basis=interaction.basis,
+            proposed_target_ids=proposed,
+            explicit_paper_ids=explicit_ids,
+            candidate_sources=candidate_sources,
+        )
+        if scope_resolution.scope_mode == "corpus":
+            target_chunks = []
+            invalid_chunks = []
+        target_ids = scope_resolution.target_paper_ids
+        invalid_ids = scope_resolution.invalid_target_ids
         for reference in target_chunks:
             if reference["record_id"] not in target_ids:
                 target_ids.append(reference["record_id"])
@@ -141,6 +168,17 @@ class QuestionContractBuilder:
             question_type=question_type,
             facet_count=len(facets),
             requirement_count=len(core_requirements),
+            broad_evidence_required=(
+                str(payload.get("evidence_breadth") or payload.get("evidenceBreadth") or "")
+                .strip()
+                .casefold()
+                == "broad"
+            ),
+        )
+        evidence_breadth = (
+            "broad"
+            if complexity == "complex"
+            else "narrow"
         )
         is_complex = complexity == "complex"
         target_count = max(settings.orchestrator_min_evidence, settings.rag_complex_target_evidence) if is_complex else settings.orchestrator_min_evidence
@@ -163,6 +201,13 @@ class QuestionContractBuilder:
             candidateSourceCount=len(candidate_sources),
             invalidTargetIds=invalid_ids,
             invalidTargetChunks=invalid_chunks,
+            retrievalScopeMode=scope_resolution.scope_mode,
+            scopeExpandedFromHistory=scope_resolution.expanded_from_history,
+            evidenceBreadth=evidence_breadth,
+            interactionMode=interaction.mode,
+            interactionBasis=interaction.basis,
+            invalidInteractionBasis=interaction.invalid_basis,
+            interactionClassificationRepaired=interaction.repaired,
         )
 
 

@@ -37,6 +37,9 @@ class QueryPlanningAndRetrievalTest(unittest.TestCase):
                 "standalone_question": "目标论文如何实现隐私训练？",
                 "question_type": "mechanism",
                 "complexity": "complex",
+                "interaction_context": {"mode": "reference", "basis": ["它"]},
+                "scope_mode": "referenced",
+                "evidence_breadth": "broad",
                 "target_paper_ids": ["paper-1"],
                 "target_chunks": [],
                 "retrieval_facets": [
@@ -82,6 +85,9 @@ class QueryPlanningAndRetrievalTest(unittest.TestCase):
                 "standalone_question": "论文的创新点有哪些？",
                 "question_type": "synthesis",
                 "complexity": "simple",
+                "interaction_context": {"mode": "reference", "basis": ["创新点"]},
+                "scope_mode": "referenced",
+                "evidence_breadth": "broad",
                 "target_paper_ids": ["paper-1"],
                 "retrieval_facets": [
                     {
@@ -103,6 +109,7 @@ class QueryPlanningAndRetrievalTest(unittest.TestCase):
             normalized_question="创新点有哪些？",
             candidate_sources=[{"record_id": "paper-1", "chunk_index": 0}],
             explicit_paper_ids=[],
+            has_history=True,
         )
 
         self.assertEqual(plan["complexity"], "complex")

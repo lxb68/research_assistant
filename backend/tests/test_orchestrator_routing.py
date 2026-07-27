@@ -274,7 +274,8 @@ class OrchestratorRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(message["role"] == "assistant" for message in messages))
         self.assertEqual(messages[-2]["role"], "user")
         self.assertIn("未经核验的旧回答", messages[-2]["content"])
-        self.assertIn('"usageMode": "transform"', messages[-2]["content"])
+        self.assertIn('"historyAvailable": true', messages[-2]["content"])
+        self.assertNotIn('"usageMode"', messages[-2]["content"])
         self.assertIn('"priorAnswersAreEvidence": false', messages[-2]["content"])
 
     @patch("app.agents.orchestrator_agent.chat_completion")

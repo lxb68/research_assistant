@@ -43,6 +43,8 @@ class ResearchChatReferenceTest(unittest.TestCase):
         completion.return_value = json.dumps(
             {
                 "standalone_question": "Squirrel 论文实验部分的通信开销如何？",
+                "interaction_context": {"mode": "reference", "basis": ["这个片段"]},
+                "scope_mode": "referenced",
                 "target_paper_ids": ["paper-3"],
                 "target_chunks": [{"record_id": "paper-3", "chunk_index": 7}],
                 "needs_clarification": False,
@@ -90,7 +92,9 @@ class ResearchChatReferenceTest(unittest.TestCase):
         """模型编造的记录 ID 必须被白名单拒绝并转为澄清请求。"""
         build_model_payload.return_value = {"model": "test-model"}
         completion.return_value = (
-            '{"standalone_question":"追问","target_paper_ids":["invented"],'
+            '{"standalone_question":"追问","interaction_context":{"mode":"reference","basis":["它"]},'
+            '"scope_mode":"referenced",'
+            '"target_paper_ids":["invented"],'
             '"target_chunks":[],"needs_clarification":false,"clarification_question":""}'
         )
         history = [
@@ -128,6 +132,191 @@ class ResearchChatReferenceTest(unittest.TestCase):
 
         self.assertEqual(plan["standaloneQuestion"], "比较 RAG 与微调的适用场景")
         self.assertNotIn("你有哪些功能", plan["standaloneQuestion"])
+
+    @patch("app.agents.research_chat_agent.chat_completion")
+    @patch("app.agents.research_chat_agent.ModelConfigStore.build_model_payload")
+    def test_corpus_followup_cannot_be_narrowed_to_prior_answer_sources(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """询问当前文献库时，即使规划模型复用了旧引用，也必须恢复为项目级检索。"""
+        build_model_payload.return_value = {"model": "test-model"}
+        completion.return_value = json.dumps(
+            {
+                "standalone_question": "当前文献库如何体现同态加密领域的研究路线？",
+                "question_type": "synthesis",
+                "complexity": "complex",
+                "interaction_context": {"mode": "followup", "basis": []},
+                "scope_mode": "corpus",
+                "evidence_breadth": "broad",
+                "target_paper_ids": ["paper-1", "paper-2"],
+                "target_chunks": [],
+                "needs_clarification": False,
+            },
+            ensure_ascii=False,
+        )
+        history = [
+            {
+                "role": "assistant",
+                "content": "上一轮只引用了两篇论文 [1][2]。",
+                "sources": [
+                    {"index": 1, "record_id": "paper-1", "title": "Paper One", "chunk_index": 2},
+                    {"index": 2, "record_id": "paper-2", "title": "Paper Two", "chunk_index": 5},
+                ],
+            }
+        ]
+
+        plan, _ = self.agent.plan_retrieval(
+            "现在的文献库中可以体现学术界的研究路线是怎么样的",
+            history,
+        )
+
+        self.assertEqual(plan["targetPaperIds"], [])
+        self.assertEqual(plan["targetChunks"], [])
+        self.assertEqual(plan["retrievalScopeMode"], "corpus")
+        self.assertTrue(plan["scopeExpandedFromHistory"])
+        self.assertFalse(plan["needsClarification"])
+
+    @patch("app.agents.research_chat_agent.chat_completion")
+    @patch("app.agents.research_chat_agent.ModelConfigStore.build_model_payload")
+    def test_explicit_paper_selection_overrides_corpus_language(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """调用方明确选择论文时，不得因问题包含“知识库”而扩大检索范围。"""
+        build_model_payload.return_value = {"model": "test-model"}
+        completion.return_value = json.dumps(
+            {
+                "standalone_question": "所选论文在当前知识库研究路线中的位置是什么？",
+                "target_paper_ids": ["paper-1"],
+                "target_chunks": [],
+                "needs_clarification": False,
+            },
+            ensure_ascii=False,
+        )
+
+        plan, _ = self.agent.plan_retrieval(
+            "所选论文在当前知识库研究路线中的位置是什么？",
+            [],
+            explicit_paper_ids=["paper-1"],
+        )
+
+        self.assertEqual(plan["targetPaperIds"], ["paper-1"])
+        self.assertEqual(plan["retrievalScopeMode"], "explicit")
+
+    @patch("app.agents.research_chat_agent.chat_completion")
+    @patch("app.agents.research_chat_agent.ModelConfigStore.build_model_payload")
+    def test_corpus_followup_discards_stale_target_chunk(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """模型误带上一轮片段时，全库问题仍不得退化为单篇检索。"""
+        build_model_payload.return_value = {"model": "test-model"}
+        completion.return_value = json.dumps(
+            {
+                "standalone_question": "当前知识库整体有哪些研究趋势？",
+                "interaction_context": {"mode": "followup", "basis": []},
+                "scope_mode": "corpus",
+                "target_paper_ids": ["paper-1"],
+                "target_chunks": [{"record_id": "paper-1", "chunk_index": 2}],
+                "needs_clarification": False,
+            },
+            ensure_ascii=False,
+        )
+        history = [
+            {
+                "role": "assistant",
+                "content": "旧回答 [1]",
+                "sources": [{"index": 1, "record_id": "paper-1", "title": "Paper One", "chunk_index": 2}],
+            }
+        ]
+
+        plan, _ = self.agent.plan_retrieval("当前知识库整体有哪些研究趋势？", history)
+
+        self.assertEqual(plan["targetPaperIds"], [])
+        self.assertEqual(plan["targetChunks"], [])
+        self.assertEqual(plan["retrievalScopeMode"], "corpus")
+
+    @patch("app.agents.research_chat_agent.chat_completion")
+    @patch("app.agents.research_chat_agent.ModelConfigStore.build_model_payload")
+    def test_structured_breadth_requires_more_evidence_even_if_model_marks_simple(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """规划器声明 broad 后，契约必须提升证据容量而不依赖问题关键词。"""
+        build_model_payload.return_value = {"model": "test-model"}
+        completion.return_value = json.dumps(
+            {
+                "standalone_question": "同态加密有哪些技术？",
+                "question_type": "simple_fact",
+                "complexity": "simple",
+                "interaction_context": {"mode": "new_topic", "basis": []},
+                "scope_mode": "corpus",
+                "evidence_breadth": "broad",
+                "target_paper_ids": [],
+                "target_chunks": [],
+                "retrieval_facets": [
+                    {
+                        "id": "facet-1",
+                        "goal": "获取同态加密技术的主要类型和定义",
+                        "query": "同态加密技术 类型",
+                    }
+                ],
+                "core_requirements": ["列举同态加密的主要技术类型"],
+                "needs_clarification": False,
+            },
+            ensure_ascii=False,
+        )
+
+        plan, _ = self.agent.plan_retrieval("同态加密有哪些技术？", [])
+
+        self.assertEqual(plan["complexity"], "complex")
+        self.assertTrue(plan["requiresIterativeRetrieval"])
+        self.assertGreater(plan["targetEvidenceCount"], 2)
+        self.assertEqual(plan["evidenceBreadth"], "broad")
+
+    @patch("app.agents.research_chat_agent.chat_completion")
+    @patch("app.agents.research_chat_agent.ModelConfigStore.build_model_payload")
+    def test_referenced_scope_requires_basis_from_current_question(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """历史来源缺少当前问题原文依据时，不得成为检索硬过滤条件。"""
+        build_model_payload.return_value = {"model": "test-model"}
+        completion.return_value = json.dumps(
+            {
+                "standalone_question": "分析当前项目的研究路线",
+                "interaction_context": {"mode": "reference", "basis": ["上面两篇"]},
+                "scope_mode": "referenced",
+                "target_paper_ids": ["paper-1", "paper-2"],
+                "target_chunks": [],
+                "needs_clarification": False,
+            },
+            ensure_ascii=False,
+        )
+        history = [
+            {
+                "role": "assistant",
+                "content": "旧回答 [1][2]",
+                "sources": [
+                    {"index": 1, "record_id": "paper-1", "title": "Paper One", "chunk_index": 2},
+                    {"index": 2, "record_id": "paper-2", "title": "Paper Two", "chunk_index": 3},
+                ],
+            }
+        ]
+
+        plan, _ = self.agent.plan_retrieval("分析当前项目的研究路线", history)
+
+        self.assertEqual(plan["targetPaperIds"], [])
+        self.assertEqual(plan["retrievalScopeMode"], "corpus")
+        self.assertTrue(plan["scopeExpandedFromHistory"])
+        self.assertEqual(plan["invalidInteractionBasis"], ["上面两篇"])
+        self.assertTrue(plan["interactionClassificationRepaired"])
 
     def test_document_scope_uses_real_parsed_files_in_authorized_candidates(self) -> None:
         """能力约束必须依据真实文件，并且不能越过调用方给定的候选范围。"""

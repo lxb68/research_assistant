@@ -27,7 +27,7 @@ class ConversationContextProjectorTest(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(context.usage_mode, "correction")
+        self.assertTrue(context.for_query_planning()["history_available"])
         self.assertEqual(context.user_intents[0]["content"], "这篇论文准确率是多少？")
         self.assertEqual(context.prior_answers[0]["trust"], "unverified_prior_answer")
         self.assertFalse(context.prior_answers[0]["allowed_as_evidence"])
@@ -43,6 +43,7 @@ class ConversationContextProjectorTest(unittest.TestCase):
 
         self.assertEqual(view["priorAnswers"][0]["content"], "旧结论")
         self.assertFalse(view["contextPolicy"]["priorAnswersAreEvidence"])
+        self.assertTrue(view["historyAvailable"])
         self.assertNotIn("role", view["priorAnswers"][0])
 
     def test_removes_failed_turn_before_projection(self) -> None:
