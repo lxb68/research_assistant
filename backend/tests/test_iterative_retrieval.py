@@ -521,7 +521,12 @@ class IterativeOrchestratorTest(unittest.IsolatedAsyncioTestCase):
         research_agent.run.return_value = {"answer": "完整回答", "sources": []}
         agent = OrchestratorAgent()
         agent.run_logger = Mock()
-        agent.recovery.execute = AsyncMock(return_value=(research_agent.run.return_value, []))
+        agent.recovery.execute = AsyncMock(
+            side_effect=[
+                ((plan, "{}"), []),
+                (research_agent.run.return_value, []),
+            ]
+        )
         agent._evaluate_retrieved_evidence = AsyncMock(
             side_effect=[
                 {

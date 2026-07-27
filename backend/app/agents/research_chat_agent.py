@@ -27,6 +27,7 @@ from app.services.rag_factory import build_default_rag_retriever
 from app.services.rag_retriever import EvidenceChunk, RAGRetriever
 from app.services.retrieval_contracts import compile_tfidf_query, normalize_section_types
 from app.services.document_capabilities import filter_papers_by_requirements
+from app.services.evidence_availability import EvidenceAvailabilityEvaluator
 
 
 LogCallback = Callable[[str], None]
@@ -245,6 +246,13 @@ class ResearchChatAgent:
                 minimum_evidence_count=settings.orchestrator_min_evidence,
             )
             retrieval_diagnostics = dict(self.retriever.last_diagnostics)
+        if existing_evidence:
+            # 工具命中只作为候选种子；本轮重新检索的完整证据优先保留正文与结构元数据。
+            evidence = self.graph_retriever.merge_evidence(
+                [*evidence, *[dict(item) for item in existing_evidence if isinstance(item, dict)]],
+                [],
+                limit=desired_count,
+            )
         text_evidence_count = len(evidence)
         try:
             graph_evidence, graph_diagnostics = self.graph_retriever.retrieve(
@@ -283,12 +291,14 @@ class ResearchChatAgent:
                 merged.append(item)
             # max_sources 约束逻辑证据数量；连续结构的成员不能在这里被再次截断。
             evidence = limit_evidence_groups(merged, max_groups=self.config.max_sources)
-        full_text_paper_count = sum(bool(self.retriever._read_markdown(paper)) for paper in papers)
+        availability = EvidenceAvailabilityEvaluator().evaluate(
+            papers,
+            evidence,
+            read_full_text=self.retriever._read_markdown,
+        )
         diagnostics = {
-            "paperCount": len(papers),
-            "fullTextPaperCount": full_text_paper_count,
-            "fullTextAvailable": bool(papers) and full_text_paper_count == len(papers),
             **retrieval_diagnostics,
+            **availability,
             "hybridRetrieval": {
                 "textEvidenceCount": text_evidence_count,
                 "graphEvidenceCount": len(graph_evidence),

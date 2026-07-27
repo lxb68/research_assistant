@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import Mock
 
+from app.agents.evidence_evaluator import EvidenceEvaluator
 from app.services.answer_composer import AnswerComposer
 from app.services.answer_policy import AnswerPolicy
 from app.services.candidate_retriever import CandidateRetriever
@@ -11,6 +13,8 @@ from app.services.context_resolver import ContextResolver
 from app.services.document_structure_indexer import DocumentStructureIndexer
 from app.services.document_capabilities import normalize_document_requirements
 from app.services.grounding_validator import GroundingValidator
+from app.services.evidence_availability import EvidenceAvailabilityEvaluator
+from app.services.material_request_policy import MaterialRequestPolicy
 from app.services.question_contract_builder import QuestionContractBuilder
 from app.services.retrieval_refiner import RetrievalRefiner
 from app.services.semantic_context_contract import SemanticContextContractBuilder
@@ -57,6 +61,106 @@ def test_question_contract_builder_rejects_unknown_scope() -> None:
     assert contract.invalidTargetIds == ["invented"]
     assert contract.retrievalFacets[0]["preferredSectionTypes"] == ["method"]
     assert contract.requirementSpecs[0]["evidenceIntent"] == "mechanism"
+
+
+def test_question_contract_structurally_binds_facets_to_core_requirements() -> None:
+    contract = QuestionContractBuilder().build(
+        {
+            "standalone_question": "概括主要类别",
+            "question_type": "synthesis",
+            "retrieval_facets": [
+                {"id": "taxonomy", "query": "main categories", "requirement_ids": ["req-1"]},
+                {"id": "implementation", "query": "implementation details"},
+                {"id": "invalid", "query": "invalid binding", "requirement_ids": ["unknown"]},
+            ],
+            "core_requirements": [{"id": "req-1", "description": "说明主要类别"}],
+        },
+        question="概括主要类别",
+        candidate_sources=[],
+    )
+
+    facets = {item["id"]: item for item in contract.retrievalFacets}
+    assert facets["taxonomy"]["role"] == "required"
+    assert facets["taxonomy"]["requirementIds"] == ["req-1"]
+    assert facets["implementation"]["role"] == "exploratory"
+    assert facets["invalid"]["role"] == "exploratory"
+    assert contract.invalidFacetRequirementIds == {"invalid": ["unknown"]}
+
+
+def test_selected_full_text_availability_is_independent_of_corpus_completeness() -> None:
+    diagnostics = EvidenceAvailabilityEvaluator().evaluate(
+        [
+            {"id": "selected", "content": "full text"},
+            {"id": "unparsed", "content": ""},
+        ],
+        [{"record_id": "selected", "chunk_index": 1}],
+        read_full_text=lambda paper: str(paper.get("content") or ""),
+    )
+
+    assert diagnostics["corpusFullTextComplete"] is False
+    assert diagnostics["relevantFullTextAvailable"] is True
+    assert diagnostics["fullTextAvailable"] is True
+
+
+def test_material_request_policy_uses_structured_core_gaps() -> None:
+    policy = MaterialRequestPolicy()
+    bounded = policy.decide(
+        plan={"requirementSpecs": [{"id": "req-1", "description": "说明主要类别"}]},
+        evaluation={
+            "answerable": False,
+            "requirementAssessments": [{"id": "req-1", "status": "partial"}],
+        },
+        diagnostics={"evidenceCount": 3, "relevantFullTextAvailable": True},
+    )
+    requested = policy.decide(
+        plan={"requirementSpecs": [{"id": "req-1", "description": "说明主要类别"}]},
+        evaluation={
+            "answerable": False,
+            "requirementAssessments": [
+                {"id": "req-1", "status": "unsupported", "missingDetail": "缺少直接分类证据"}
+            ],
+        },
+        diagnostics={"evidenceCount": 0, "relevantFullTextAvailable": False},
+    )
+
+    assert bounded.action == "bounded_answer"
+    assert requested.action == "request_materials"
+    assert requested.required_materials[0]["requirementId"] == "req-1"
+    assert "说明主要类别" in requested.required_materials[0]["description"]
+    assert "实验设置" not in requested.required_materials[0]["description"]
+
+
+def test_supported_core_requirement_is_answerable_with_exploratory_gap() -> None:
+    completion = Mock(return_value=json.dumps({
+        "facets": [
+            {"id": "core", "status": "supported", "supporting_refs": ["paper-1:1"]},
+            {"id": "extra", "status": "partial", "supporting_refs": ["paper-1:1"]},
+        ],
+        "requirements": [
+            {"id": "req-1", "status": "supported", "supporting_refs": ["paper-1:1"]}
+        ],
+        "optional_details": [],
+    }))
+    evaluation, _ = EvidenceEvaluator().evaluate_semantic(
+        [{"record_id": "paper-1", "chunk_index": 1, "title": "A", "section": "Overview", "text": "direct evidence"}],
+        {
+            "standaloneQuestion": "概括主要类别",
+            "questionType": "synthesis",
+            "retrievalFacets": [
+                {"id": "core", "goal": "主要类别", "query": "categories", "role": "required", "requirementIds": ["req-1"]},
+                {"id": "extra", "goal": "扩展实现", "query": "implementation", "role": "exploratory", "requirementIds": []},
+            ],
+            "requirementSpecs": [{"id": "req-1", "description": "说明主要类别", "minimumDirectEvidence": 1}],
+        },
+        completion=completion,
+        model={"model": "test"},
+        timeout=30,
+    )
+
+    assert evaluation["answerable"] is True
+    assert evaluation["blockingMissingFacetIds"] == []
+    assert evaluation["exploratoryMissingFacetIds"] == ["extra"]
+    assert evaluation["refinementFacets"] == []
 
 
 def test_semantic_context_contract_validates_mode_and_current_question_basis() -> None:

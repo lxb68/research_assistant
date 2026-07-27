@@ -73,6 +73,16 @@ class ResearchReadOnlyToolsTest(unittest.TestCase):
             },
         )
 
+    def test_full_text_search_declares_non_terminal_evidence_capability(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            registry = self._build_tools(
+                PaperRepository(Path(temp_dir) / "papers.sqlite3")
+            ).build_registry()
+
+        contract = registry.result_contract("search_knowledge_base")
+        self.assertEqual(contract["resultCapability"], "content_excerpt")
+        self.assertTrue(contract["requiresSemanticValidation"])
+
     def test_list_and_get_papers_use_repository_truth(self) -> None:
         with TemporaryDirectory() as temp_dir:
             repository = PaperRepository(Path(temp_dir) / "papers.sqlite3")

@@ -21,6 +21,11 @@ from app.services.run_logger import RunLogger
 from app.services.task_control import TaskCancelled, raise_if_task_cancelled
 from app.services.retrieval_contracts import requires_semantic_validation
 from app.services.retrieval_refiner import RetrievalRefiner
+from app.services.material_request_policy import MaterialRequestPolicy
+from app.services.answer_capability_contract import (
+    AnswerCapabilityContract,
+    FinalizationPolicy,
+)
 from app.tools import ToolRegistry, build_research_tool_registry
 
 
@@ -59,13 +64,15 @@ class OrchestratorAgent:
 - 工具目录中的名称、描述和参数 Schema 是选择工具的唯一依据；比较各工具的适用与不适用场景后，选择最匹配的一项。
 - 参数应忠实保留用户意图，不得为了凑关键词而把概览请求改写成虚构的具体检索词，也不得擅自扩大操作范围。
 - 没有合适的已注册工具时，选择其他允许的动作，不得编造工具名或参数。
+- 每轮必须返回稳定的 answerContract。mode 只能是 conversation、catalog、document_summary、research_synthesis；
+  requiredCapability 只能是 none、metadata、content_excerpt、semantic_validation。后续轮次不得降低证据要求。
 
 你只负责选择动作；每轮只选择下一步动作，不负责回答用户问题，也不要复述、解释或执行用户请求。
 只输出一个 JSON 对象，不要输出 Markdown 或额外文字：
-普通动作：{"action":"direct|chat|search|domain_tree","arguments":{}}
-工具动作：{"action":"tool","toolName":"已注册工具名","arguments":{}}
-Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{}}
-结束动作：{"action":"final","answer":"严格依据已有观察的回答","limitations":[]}
+普通动作：{"action":"direct|chat|search|domain_tree","arguments":{},"answerContract":{"mode":"...","requiredCapability":"..."}}
+工具动作：{"action":"tool","toolName":"已注册工具名","arguments":{},"answerContract":{"mode":"...","requiredCapability":"..."}}
+Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{},"answerContract":{"mode":"...","requiredCapability":"..."}}
+结束动作：{"action":"final","answer":"严格依据已有观察的回答","limitations":[],"answerContract":{"mode":"...","requiredCapability":"..."}}
 """
 
     def __init__(
@@ -88,6 +95,8 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         )
         self.evidence_evaluator = EvidenceEvaluator()
         self.retrieval_refiner = RetrievalRefiner()
+        self.material_request_policy = MaterialRequestPolicy()
+        self.finalization_policy = FinalizationPolicy()
 
     async def run(
         self,
@@ -201,12 +210,56 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
 
         return await self._run_research_pipeline(normalized_task, args, cancel_event=cancel_event)
 
+    async def _complete_with_recovery(
+        self,
+        operation_name: str,
+        completion: Callable[..., str],
+        *completion_args: Any,
+        cancel_event: threading.Event | None = None,
+        **completion_kwargs: Any,
+    ) -> str:
+        """复用统一恢复器执行无副作用的模型推理调用。"""
+        try:
+            result, recovery_trace = await self.recovery.execute(
+                operation_name,
+                lambda: asyncio.to_thread(
+                    completion,
+                    *completion_args,
+                    **completion_kwargs,
+                ),
+                cancel_event=cancel_event,
+            )
+        except RecoveryExhaustedError as error:
+            self.run_logger.log(
+                "ErrorRecoveryAgent",
+                f"{operation_name}恢复失败",
+                event="model_call_recovery_exhausted",
+                data={
+                    "category": error.decision.category,
+                    "recoverable": error.decision.recoverable,
+                    "action": error.decision.action,
+                    "trace": error.trace,
+                },
+            )
+            # 非传输类错误继续交给原有的空响应与格式修复逻辑处理。
+            if not error.decision.recoverable and isinstance(error.__cause__, Exception):
+                raise error.__cause__
+            raise
+        self.run_logger.log(
+            "ErrorRecoveryAgent",
+            f"{operation_name}完成",
+            event="model_call_recovery",
+            data={"trace": recovery_trace},
+        )
+        return str(result or "")
+
     async def _route_task(
         self,
         task: str,
         args: dict[str, Any],
         *,
         observations: list[dict[str, Any]] | None = None,
+        answer_contract: AnswerCapabilityContract | None = None,
         cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         """使用已配置模型判断是否需要研究 Agent，并在无需工具时直接作答。"""
@@ -253,6 +306,16 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                     ),
                 }
             )
+        if answer_contract is not None:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "本轮回答能力契约已经建立，后续动作不得降低证据要求：\n"
+                        + json.dumps(answer_contract.to_dict(), ensure_ascii=False)
+                    ),
+                }
+            )
         if reduced_observations:
             messages.append(
                 {
@@ -267,13 +330,15 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
 
         try:
             raise_if_task_cancelled(cancel_event)
-            raw_decision = await asyncio.to_thread(
+            raw_decision = await self._complete_with_recovery(
+                "意图路由模型调用",
                 chat_completion,
                 model,
                 messages,
                 temperature=0,
                 timeout=settings.research_agent_request_timeout,
                 response_format={"type": "json_object"},
+                cancel_event=cancel_event,
             )
             raise_if_task_cancelled(cancel_event)
         except RuntimeError as call_error:
@@ -298,7 +363,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             },
         )
         try:
-            decision = self._parse_route_decision(raw_decision)
+            decision = self._parse_route_decision(raw_decision, fallback_contract=answer_contract)
         except Exception as error:
             self.run_logger.log(
                 "OrchestratorAgent",
@@ -344,13 +409,15 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             ]
             try:
                 raise_if_task_cancelled(cancel_event)
-                repaired_raw = await asyncio.to_thread(
+                repaired_raw = await self._complete_with_recovery(
+                    "意图路由格式修复模型调用",
                     chat_completion,
                     model,
                     repair_messages,
                     temperature=0,
                     timeout=settings.research_agent_request_timeout,
                     response_format={"type": "json_object"},
+                    cancel_event=cancel_event,
                 )
                 raise_if_task_cancelled(cancel_event)
             except TaskCancelled:
@@ -378,7 +445,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 },
             )
             try:
-                decision = self._parse_route_decision(repaired_raw)
+                decision = self._parse_route_decision(repaired_raw, fallback_contract=answer_contract)
             except Exception as repair_error:
                 self.run_logger.log(
                     "OrchestratorAgent",
@@ -412,6 +479,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         observations: list[dict[str, Any]] = []
         seen_tool_actions: set[str] = set()
         seen_agent_actions: set[str] = set()
+        answer_contract: AnswerCapabilityContract | None = None
         max_rounds = max(2, min(int(settings.orchestrator_max_action_rounds), 8))
 
         for round_index in range(1, max_rounds + 1):
@@ -420,7 +488,12 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 task,
                 args,
                 observations=observations,
+                answer_contract=answer_contract,
                 cancel_event=cancel_event,
+            )
+            answer_contract = AnswerCapabilityContract.from_payload(
+                decision.get("answerContract"),
+                fallback=answer_contract,
             )
             selected = str(decision["action"])
             self._log(f"编排循环第 {round_index} 轮选择：{selected}")
@@ -441,6 +514,12 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
 
             if selected == "tool":
                 tool_name = str(decision.get("toolName") or "")
+                tool_contract = self.tool_registry.result_contract(tool_name)
+                if tool_contract.get("requiresSemanticValidation"):
+                    answer_contract = answer_contract.elevate(
+                        "semantic_validation",
+                        mode="research_synthesis",
+                    )
                 tool_arguments = dict(decision.get("arguments") or {})
                 signature = json.dumps(
                     {"toolName": tool_name, "arguments": tool_arguments},
@@ -517,6 +596,37 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             if selected == "chat":
                 return await self._run_research_pipeline(task, merged_args, cancel_event=cancel_event)
 
+            if selected in {"direct", "final"}:
+                finalization = self.finalization_policy.decide(
+                    answer_contract or AnswerCapabilityContract(),
+                    observations,
+                )
+                if not finalization.allowed and finalization.required_action == "research_chat":
+                    seeded_args = {
+                        **args,
+                        **self._research_seed_arguments(observations),
+                    }
+                    self.run_logger.log(
+                        "OrchestratorAgent",
+                        "终态能力不足，转交研究证据管线",
+                        event="finalization_guard_redirect",
+                        data={
+                            "selectedAction": selected,
+                            "reasonCode": finalization.reason_code,
+                            "availableCapability": finalization.available_capability,
+                            "requiredCapability": (
+                                answer_contract.required_capability
+                                if answer_contract
+                                else "semantic_validation"
+                            ),
+                        },
+                    )
+                    return await self._run_research_pipeline(
+                        task,
+                        seeded_args,
+                        cancel_event=cancel_event,
+                    )
+
             if selected == "direct":
                 answer = (
                     await self._answer_from_observations(task, observations, cancel_event=cancel_event)
@@ -568,6 +678,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         try:
             result = await asyncio.to_thread(self.tool_registry.execute, tool_name, tool_arguments)
             raise_if_task_cancelled(cancel_event)
+            result_contract = self.tool_registry.result_contract(tool_name)
             observation = {
                 "round": round_index,
                 "kind": "tool",
@@ -575,6 +686,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 "arguments": tool_arguments,
                 "ok": True,
                 "result": result,
+                **result_contract,
             }
         except TaskCancelled:
             raise
@@ -688,12 +800,14 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             },
         ]
         raise_if_task_cancelled(cancel_event)
-        answer = await asyncio.to_thread(
+        answer = await self._complete_with_recovery(
+            "工具观察回答模型调用",
             chat_completion,
             model,
             messages,
             temperature=0.1,
             timeout=settings.research_agent_request_timeout,
+            cancel_event=cancel_event,
         )
         raise_if_task_cancelled(cancel_event)
         return answer
@@ -768,6 +882,41 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             if item.get("kind") == "tool"
         ]
         return self._tool_sources_from_observations(legacy)
+
+    @staticmethod
+    def _research_seed_arguments(observations: list[dict[str, Any]]) -> dict[str, Any]:
+        """把全文检索工具命中转换为非强制性的研究检索种子。"""
+        seeds: list[dict[str, Any]] = []
+        seen: set[tuple[str, int]] = set()
+        for observation in observations:
+            if not observation.get("ok") or not observation.get("requiresSemanticValidation"):
+                continue
+            result = observation.get("result")
+            if not isinstance(result, dict):
+                continue
+            for item in result.get("results") or []:
+                if not isinstance(item, dict):
+                    continue
+                record_id = str(item.get("recordId") or item.get("record_id") or "")
+                chunk_index = int(item.get("chunkIndex") or item.get("chunk_index") or 0)
+                key = (record_id, chunk_index)
+                if not record_id or key in seen:
+                    continue
+                seen.add(key)
+                seeds.append(
+                    {
+                        "record_id": record_id,
+                        "chunk_index": chunk_index,
+                        "title": str(item.get("title") or ""),
+                        "section": str(item.get("section") or ""),
+                        "text": str(item.get("excerpt") or item.get("text") or ""),
+                        "score": float(item.get("score") or 0),
+                        "source": str(item.get("source") or ""),
+                        "url": str(item.get("url") or ""),
+                        "retrieval_channels": ["tool_seed"],
+                    }
+                )
+        return {"retrieval_seed_evidence": seeds} if seeds else {}
 
     async def _run_read_only_tool(
         self,
@@ -951,17 +1100,24 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             )
         messages.append({"role": "user", "content": task})
         raise_if_task_cancelled(cancel_event)
-        answer = await asyncio.to_thread(
+        answer = await self._complete_with_recovery(
+            "直接回答模型调用",
             chat_completion,
             model,
             messages,
             temperature=0.2,
             timeout=settings.research_agent_request_timeout,
+            cancel_event=cancel_event,
         )
         raise_if_task_cancelled(cancel_event)
         return answer
 
-    def _parse_route_decision(self, raw_decision: str) -> dict[str, Any]:
+    def _parse_route_decision(
+        self,
+        raw_decision: str,
+        *,
+        fallback_contract: AnswerCapabilityContract | None = None,
+    ) -> dict[str, Any]:
         """解析并校验模型路由结果，拒绝执行未注册动作。"""
         text = str(raw_decision or "").strip()
         if text.startswith("```"):
@@ -982,7 +1138,25 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         action = str(payload.get("action") or "").strip().lower()
         if action not in self.ALLOWED_ACTIONS - {"auto"}:
             raise ValueError(f"模型选择了未注册的编排动作：{action or '空'}")
-        decision: dict[str, Any] = {"action": action, "source": "model"}
+        answer_contract = AnswerCapabilityContract.from_payload(
+            payload.get("answerContract") or payload.get("answer_contract"),
+            fallback=fallback_contract,
+        )
+        if (
+            action == "final"
+            and fallback_contract is None
+            and not isinstance(payload.get("answerContract") or payload.get("answer_contract"), dict)
+        ):
+            # final 按协议只能消费既有观察；首轮裸 final 不能默认为无需证据。
+            answer_contract = answer_contract.elevate(
+                "semantic_validation",
+                mode="research_synthesis",
+            )
+        decision: dict[str, Any] = {
+            "action": action,
+            "source": "model",
+            "answerContract": answer_contract.to_dict(),
+        }
         if action == "final":
             answer = str(payload.get("answer") or "").strip()
             if not answer:
@@ -1071,12 +1245,17 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
 
         try:
             raise_if_task_cancelled(cancel_event)
-            plan, raw_plan = await asyncio.to_thread(
-                research_agent.plan_retrieval,
-                task,
-                history,
-                explicit_paper_ids=explicit_paper_ids or None,
+            planning_result, planning_recovery_trace = await self.recovery.execute(
+                "上下文查询规划",
+                lambda: asyncio.to_thread(
+                    research_agent.plan_retrieval,
+                    task,
+                    history,
+                    explicit_paper_ids=explicit_paper_ids or None,
+                ),
+                cancel_event=cancel_event,
             )
+            plan, raw_plan = planning_result
             raise_if_task_cancelled(cancel_event)
             self.run_logger.log(
                 "OrchestratorAgent",
@@ -1086,6 +1265,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                     "rawResponsePreview": raw_plan[: self.ROUTER_RAW_LOG_LIMIT],
                     "responseLength": len(raw_plan),
                     "truncated": len(raw_plan) > self.ROUTER_RAW_LOG_LIMIT,
+                    "recoveryTrace": planning_recovery_trace,
                 },
             )
         except TaskCancelled:
@@ -1265,21 +1445,31 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         target_evidence_count = int(plan.get("targetEvidenceCount") or settings.orchestrator_min_evidence)
         allow_search = bool(args.get("allow_external_search", True)) and not retrieval_paper_ids and not target_chunks
         retrieval_query = str(plan.get("standaloneQuestion") or task).strip()
+        retrieval_seed_evidence = [
+            dict(item)
+            for item in args.get("retrieval_seed_evidence") or []
+            if isinstance(item, dict)
+        ]
 
         self._log("正在判断本地知识库证据是否充分")
         self._progress(38, "retrieving", "正在检索所选知识库")
         raise_if_task_cancelled(cancel_event)
+        retrieval_kwargs: dict[str, Any] = {
+            "history": history,
+            "paper_ids": retrieval_paper_ids,
+            "retrieval_query": retrieval_query,
+            "target_chunks": target_chunks,
+            "retrieval_facets": retrieval_facets,
+            "question_type": question_type,
+            "target_evidence_count": target_evidence_count,
+            **({"graph_project_id": graph_project_id} if graph_project_id else {}),
+        }
+        if retrieval_seed_evidence:
+            retrieval_kwargs["existing_evidence"] = retrieval_seed_evidence
         evidence, diagnostics = await asyncio.to_thread(
             research_agent.retrieve_evidence,
             task,
-            history=history,
-            paper_ids=retrieval_paper_ids,
-            retrieval_query=retrieval_query,
-            target_chunks=target_chunks,
-            retrieval_facets=retrieval_facets,
-            question_type=question_type,
-            target_evidence_count=target_evidence_count,
-            **({"graph_project_id": graph_project_id} if graph_project_id else {}),
+            **retrieval_kwargs,
         )
         raise_if_task_cancelled(cancel_event)
         self._progress(58, "validating", "正在交叉验证检索证据")
@@ -1479,20 +1669,29 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 }
             )
 
-        full_text_available = bool(diagnostics.get("fullTextAvailable"))
-        if not sufficient and full_text_available and retrieval_paper_ids:
+        material_decision = self.material_request_policy.decide(
+            plan=plan,
+            evaluation=evaluation,
+            diagnostics=diagnostics,
+            required_paper_ids=required_paper_ids,
+        )
+        diagnostics["materialRequestDecision"] = {
+            "action": material_decision.action,
+            "reasonCodes": material_decision.reason_codes,
+        }
+        if not sufficient and material_decision.action == "bounded_answer":
             self._log("本地全文已存在但部分深层细节仍未完全覆盖，将基于现有证据生成有边界的回答")
             trace.append(
                 {
                     "step": "evidence_fallback",
                     "agent": "orchestrator",
                     "status": "best_effort",
-                    "reason": "full_text_available",
+                    "reason": "bounded_answer",
+                    "reasonCodes": material_decision.reason_codes,
                     "missingFacetIds": evaluation.get("missingFacetIds", []),
                 }
             )
-        elif not sufficient:
-            required_materials = self._required_materials(task, diagnostics, search_result, search_error)
+        elif not sufficient and material_decision.action == "request_materials":
             self._log("仍缺少足够证据，需要用户补充 PDF 材料")
             return {
                 "agent": "orchestrator",
@@ -1500,7 +1699,8 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 "result": {
                     "status": "needs_materials",
                     "message": "当前知识库和自动检索结果不足以可靠回答该问题，请补充相关 PDF 后重试。",
-                    "requiredMaterials": required_materials,
+                    "requiredMaterials": material_decision.required_materials,
+                    "reasonCodes": material_decision.reason_codes,
                     "retrievalDiagnostics": diagnostics,
                     "evidencePreview": self._evidence_preview(evidence),
                     "trace": trace,
@@ -1734,38 +1934,6 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             "sufficient": not reasons and bool(semantic.get("answerable")),
             "reasons": reasons,
         }
-
-    def _required_materials(
-        self,
-        task: str,
-        diagnostics: dict[str, Any],
-        search_result: dict[str, Any] | None,
-        search_error: str,
-    ) -> list[dict[str, str]]:
-        """根据证据缺口生成需要用户补充的材料清单。"""
-        materials = [
-            {
-                "type": "core_papers",
-                "description": f"与“{task[:120]}”直接相关的核心论文全文 PDF，建议至少 2–3 篇。",
-            },
-            {
-                "type": "methods_or_results",
-                "description": "包含研究方法、实验设置、数据集与结果分析的论文 PDF，而不只是摘要或元数据。",
-            },
-        ]
-        if search_error or (search_result and search_result.get("errors")):
-            materials.append(
-                {
-                    "type": "unavailable_sources",
-                    "description": "自动检索或下载未成功的目标论文 PDF；可在“浏览数据集”中手动导入。",
-                }
-            )
-        if int(diagnostics.get("paperCount") or 0) == 0:
-            materials.insert(
-                0,
-                {"type": "knowledge_base", "description": "当前知识库没有可检索论文，请先导入并完成 PDF 解析。"},
-            )
-        return materials
 
     def _evidence_preview(self, evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """整理可安全返回前端的证据摘要。"""

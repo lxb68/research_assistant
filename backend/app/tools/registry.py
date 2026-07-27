@@ -18,9 +18,17 @@ class ToolDefinition:
     description: str
     parameters: dict[str, Any]
     handler: ToolHandler
+    result_capability: str = "none"
+    requires_semantic_validation: bool = False
 
     def public_schema(self) -> dict[str, Any]:
-        return {"name": self.name, "description": self.description, "parameters": self.parameters}
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+            "resultCapability": self.result_capability,
+            "requiresSemanticValidation": self.requires_semantic_validation,
+        }
 
 
 class ToolRegistry:
@@ -45,6 +53,16 @@ class ToolRegistry:
 
     def has(self, name: str) -> bool:
         return str(name).strip() in self._tools
+
+    def result_contract(self, name: str) -> dict[str, Any]:
+        """返回工具结果能够支持的回答能力。"""
+        definition = self._tools.get(str(name).strip())
+        if definition is None:
+            return {"resultCapability": "none", "requiresSemanticValidation": False}
+        return {
+            "resultCapability": definition.result_capability,
+            "requiresSemanticValidation": definition.requires_semantic_validation,
+        }
 
     def execute(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         normalized_name = str(name).strip()

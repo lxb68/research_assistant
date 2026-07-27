@@ -88,6 +88,7 @@ class ResearchReadOnlyTools:
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100},
                 }),
                 self.list_knowledge_base_papers,
+                result_capability="metadata",
             ),
             ToolDefinition(
                 "get_knowledge_base_paper",
@@ -98,6 +99,7 @@ class ResearchReadOnlyTools:
                 ),
                 self._schema({"record_id": {"type": "string"}}, required=["record_id"]),
                 self.get_knowledge_base_paper,
+                result_capability="content_excerpt",
             ),
             ToolDefinition(
                 "search_knowledge_base",
@@ -111,6 +113,8 @@ class ResearchReadOnlyTools:
                     "limit": {"type": "integer", "minimum": 1, "maximum": 10},
                 }, required=["query"]),
                 self.search_knowledge_base,
+                result_capability="content_excerpt",
+                requires_semantic_validation=True,
             ),
             ToolDefinition(
                 "search_external_papers",
@@ -121,6 +125,7 @@ class ResearchReadOnlyTools:
                     "limit_per_source": {"type": "integer", "minimum": 1, "maximum": 20},
                 }, required=["query"]),
                 self.search_external_papers,
+                result_capability="metadata",
             ),
             ToolDefinition(
                 "get_domain_tree",

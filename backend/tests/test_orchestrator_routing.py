@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+import requests
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, Mock, patch
@@ -13,6 +14,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.agents.orchestrator_agent import OrchestratorAgent
+from app.services.model_client import ModelCallError
 from app.services.run_logger import RunLogger
 from app.tools.registry import ToolDefinition, ToolRegistry
 
@@ -71,6 +73,146 @@ class OrchestratorRoutingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["action"], "chat")
         agent._run_research_pipeline.assert_awaited_once()
+
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_router_reuses_recovery_backoff_for_premature_response(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """模型响应体提前结束时应复用统一恢复器重试路由调用。"""
+        build_model_payload.return_value = self.model
+        completion.side_effect = [
+            requests.exceptions.ChunkedEncodingError("Response ended prematurely"),
+            '{"action":"chat","answerContract":{"mode":"research_synthesis",'
+            '"requiredCapability":"semantic_validation"}}',
+        ]
+        agent = OrchestratorAgent()
+        agent.recovery.base_delay_seconds = 0
+        agent.run_logger = Mock()
+
+        decision = await agent._route_task("研究问题", {})
+
+        self.assertEqual(decision["action"], "chat")
+        self.assertEqual(completion.call_count, 2)
+        recovery_log = next(
+            call
+            for call in agent.run_logger.log.call_args_list
+            if call.kwargs.get("event") == "model_call_recovery"
+        )
+        self.assertEqual(recovery_log.kwargs["data"]["trace"][0]["category"], "transport_interrupted")
+
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_router_does_not_retry_rejected_model_request(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """明确的请求参数错误不能按传输瞬断重试。"""
+        build_model_payload.return_value = self.model
+        completion.side_effect = ModelCallError(
+            "模型服务返回 HTTP 400",
+            category="request_rejected",
+            http_status=400,
+            retryable=False,
+            request_accepted=False,
+        )
+        agent = OrchestratorAgent()
+        agent.recovery.base_delay_seconds = 0
+        agent.run_logger = Mock()
+
+        with self.assertRaises(ModelCallError):
+            await agent._route_task("研究问题", {})
+
+        self.assertEqual(completion.call_count, 1)
+
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_content_search_final_is_redirected_to_research_pipeline(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """候选全文片段没有经过语义验证时，模型的 final 选择必须被确定性门禁拒绝。"""
+        build_model_payload.return_value = self.model
+        completion.side_effect = [
+            '{"action":"tool","toolName":"content_search","arguments":{"query":"overview"}}',
+            '{"action":"final","answer":"未经验证的综合回答","limitations":[]}',
+        ]
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                "content_search",
+                "返回候选正文证据。",
+                {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                Mock(return_value={
+                    "results": [{
+                        "recordId": "paper-1",
+                        "chunkIndex": 4,
+                        "title": "Paper",
+                        "section": "Overview",
+                        "excerpt": "candidate evidence",
+                        "score": 0.9,
+                    }]
+                }),
+                result_capability="content_excerpt",
+                requires_semantic_validation=True,
+            )
+        )
+        agent = OrchestratorAgent(tool_registry=registry)
+        agent._run_research_pipeline = AsyncMock(
+            return_value={"action": "chat", "result": {"answer": "有引用的研究回答 [1]"}}
+        )
+
+        result = await agent.run("概括主要技术路线", action="auto")
+
+        self.assertEqual(result["action"], "chat")
+        pipeline_args = agent._run_research_pipeline.await_args.args[1]
+        self.assertNotIn("paper_ids", pipeline_args)
+        self.assertEqual(
+            pipeline_args["retrieval_seed_evidence"][0]["record_id"],
+            "paper-1",
+        )
+
+    @patch("app.agents.orchestrator_agent.chat_completion")
+    @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")
+    async def test_metadata_catalog_observation_can_finalize(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """目录查询达到 metadata 能力后不应被错误转入全文研究管线。"""
+        build_model_payload.return_value = self.model
+        completion.side_effect = [
+            '{"action":"tool","toolName":"catalog","arguments":{},'
+            '"answerContract":{"mode":"catalog","requiredCapability":"metadata"}}',
+            '{"action":"final","answer":"知识库有 1 篇论文。","limitations":[],'
+            '"answerContract":{"mode":"catalog","requiredCapability":"metadata"}}',
+        ]
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                "catalog",
+                "读取目录。",
+                {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                Mock(return_value={"total": 1, "items": [{"recordId": "paper-1", "title": "Paper"}]}),
+                result_capability="metadata",
+            )
+        )
+        agent = OrchestratorAgent(tool_registry=registry)
+        agent._run_research_pipeline = AsyncMock()
+
+        result = await agent.run("知识库有多少篇论文", action="auto")
+
+        self.assertEqual(result["result"]["answer"], "知识库有 1 篇论文。")
+        agent._run_research_pipeline.assert_not_awaited()
 
     @patch("app.agents.orchestrator_agent.chat_completion")
     @patch("app.agents.orchestrator_agent.ModelConfigStore.build_model_payload")

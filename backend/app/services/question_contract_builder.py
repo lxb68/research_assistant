@@ -12,6 +12,7 @@ from app.services.retrieval_contracts import (
     normalize_section_types,
 )
 from app.services.document_capabilities import normalize_document_requirements
+from app.services.facet_requirement_binder import FacetRequirementBinder
 from app.services.retrieval_scope_resolver import RetrievalScopeResolver
 from app.services.semantic_context_contract import SemanticContextContractBuilder
 
@@ -45,6 +46,7 @@ class QuestionContract:
     interactionBasis: list[str] = field(default_factory=list)
     invalidInteractionBasis: list[str] = field(default_factory=list)
     interactionClassificationRepaired: bool = False
+    invalidFacetRequirementIds: dict[str, list[str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -60,6 +62,7 @@ class QuestionContractBuilder:
         self.max_facets = max(1, min(int(max_facets or settings.query_planner_max_facets), 8))
         self.scope_resolver = RetrievalScopeResolver()
         self.semantic_context_builder = SemanticContextContractBuilder()
+        self.facet_requirement_binder = FacetRequirementBinder()
 
     def build(
         self,
@@ -141,6 +144,11 @@ class QuestionContractBuilder:
                 "concepts": [str(v).strip()[:200] for v in item.get("concepts") or [] if str(v).strip()][:16],
                 "phrases": [str(v).strip()[:300] for v in item.get("phrases") or [] if str(v).strip()][:12],
                 "preferredSectionTypes": normalize_section_types(item.get("preferred_section_types") or item.get("preferredSectionTypes") or []),
+                "requirementIds": [
+                    str(value).strip()[:80]
+                    for value in item.get("requirement_ids") or item.get("requirementIds") or []
+                    if str(value).strip()
+                ][:8],
             })
         if not facets:
             facets = [{"id": "facet-1", "goal": standalone, "query": standalone, "preferredSectionTypes": []}]
@@ -153,6 +161,8 @@ class QuestionContractBuilder:
             for index, value in enumerate((raw_requirements if isinstance(raw_requirements, list) else [])[:8], 1)
             if (normalized := normalize_requirement(value, index, question_type=question_type)) is not None
         ]
+        binding = self.facet_requirement_binder.bind(facets, requirement_specs)
+        facets = binding.facets
         core_requirements = [item["description"] for item in requirement_specs if item.get("required")]
         raw_optional = payload.get("optional_details")
         optional_details = [str(v).strip()[:500] for v in raw_optional if str(v).strip()][:8] if isinstance(raw_optional, list) else []
@@ -208,6 +218,7 @@ class QuestionContractBuilder:
             interactionBasis=interaction.basis,
             invalidInteractionBasis=interaction.invalid_basis,
             interactionClassificationRepaired=interaction.repaired,
+            invalidFacetRequirementIds=binding.invalid_requirement_ids,
         )
 
 

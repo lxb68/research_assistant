@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass
 from threading import Event
 from typing import Any, Awaitable, Callable, TypeVar
@@ -42,11 +43,13 @@ class ErrorRecoveryAgent:
         *,
         max_cycles: int = 3,
         base_delay_seconds: float = 0.5,
+        jitter_ratio: float = 0.2,
         log_callback: Callable[[str], None] | None = None,
     ) -> None:
         """初始化当前对象所需的配置与运行状态。"""
         self.max_cycles = max(1, min(max_cycles, 8))
         self.base_delay_seconds = max(0.0, min(base_delay_seconds, 10.0))
+        self.jitter_ratio = max(0.0, min(jitter_ratio, 0.5))
         self.log_callback = log_callback
 
     async def execute(
@@ -90,7 +93,11 @@ class ErrorRecoveryAgent:
                         decision=decision,
                         trace=trace,
                     ) from error
-                delay = min(self.base_delay_seconds * (2 ** (cycle - 1)), 4.0)
+                base_delay = min(self.base_delay_seconds * (2 ** (cycle - 1)), 4.0)
+                delay = base_delay * random.uniform(
+                    1.0 - self.jitter_ratio,
+                    1.0 + self.jitter_ratio,
+                )
                 if delay:
                     deadline = asyncio.get_running_loop().time() + delay
                     while True:
@@ -105,12 +112,36 @@ class ErrorRecoveryAgent:
         """按 HTTP 状态和异常类型判断安全恢复策略。"""
         message = str(error).lower()
         status_code = self._status_code(error)
+        if bool(getattr(error, "retryable", False)):
+            category = str(getattr(error, "category", "") or "retryable_upstream")
+            return RecoveryDecision(category, True, "退避等待后重试", "模型或上游服务持续异常，请稍后重试。")
         if isinstance(error, (requests.Timeout, TimeoutError, asyncio.TimeoutError)) or "timeout" in message or "超时" in message:
             return RecoveryDecision("timeout", True, "等待后重试", "服务响应超时，已达到最大重试次数。")
-        if isinstance(error, requests.ConnectionError) or any(
-            token in message for token in ("connection reset", "connection refused", "network", "连接失败", "网络")
+        if isinstance(
+            error,
+            (
+                requests.ConnectionError,
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ContentDecodingError,
+            ),
+        ) or any(
+            token in message
+            for token in (
+                "connection reset",
+                "connection refused",
+                "network",
+                "response ended prematurely",
+                "incomplete read",
+                "连接失败",
+                "网络",
+            )
         ):
-            return RecoveryDecision("network", True, "重新建立连接并重试", "网络连接失败，请检查后端网络后重试。")
+            return RecoveryDecision(
+                "transport_interrupted",
+                True,
+                "重新建立连接并重试",
+                "模型服务在传输响应时持续中断，请检查模型服务或网络代理后重试。",
+            )
         if status_code == 429 or "rate limit" in message or "too many requests" in message:
             return RecoveryDecision("rate_limit", True, "退避等待后重试", "模型或检索服务请求过于频繁，请稍后重试。")
         if status_code is not None and 500 <= status_code <= 599:

@@ -131,6 +131,12 @@ class EvidenceEvaluator:
                 "id": str(item.get("id") or ""),
                 "goal": str(item.get("goal") or "")[:800],
                 "query": str(item.get("query") or "")[:1200],
+                "role": str(item.get("role") or "required"),
+                "requirementIds": [
+                    str(value)
+                    for value in item.get("requirementIds") or []
+                    if str(value)
+                ],
             }
             for item in plan.get("retrievalFacets") or []
             if isinstance(item, dict) and str(item.get("id") or "")
@@ -229,9 +235,29 @@ class EvidenceEvaluator:
         facet_assessments = list(facet_status.values())
         requirement_assessments = list(requirement_status.values())
         missing_facets = [item["id"] for item in facet_assessments if item["status"] != "supported"]
+        facet_specs = {item["id"]: item for item in facets}
+        has_core_requirements = bool(core_requirements)
+        # 核心要求是可回答性的唯一语义门槛。检索分面用于组织检索与诊断；
+        # 只有旧计划没有核心要求时，required 分面才作为兼容性的阻断条件。
+        blocking_missing_facets = (
+            []
+            if has_core_requirements
+            else [
+                item_id
+                for item_id in missing_facets
+                if facet_specs.get(item_id, {}).get("role", "required") == "required"
+            ]
+        )
+        exploratory_missing_facets = [
+            item_id for item_id in missing_facets if item_id not in blocking_missing_facets
+        ]
         unsupported_requirements = [item for item in requirement_assessments if item["status"] == "unsupported"]
         partial_requirements = [item for item in requirement_assessments if item["status"] == "partial"]
-        answerable = not missing_facets and not unsupported_requirements and not partial_requirements
+        answerable = (
+            not blocking_missing_facets
+            and not unsupported_requirements
+            and not partial_requirements
+        )
         # 兼容旧返回字段，但补偿查询的构造算法由 RetrievalRefiner 独立维护。
         refinement_facets = RetrievalRefiner().refine(
             plan,
@@ -239,6 +265,7 @@ class EvidenceEvaluator:
                 "facetAssessments": facet_assessments,
                 "requirementAssessments": requirement_assessments,
                 "missingFacetIds": missing_facets,
+                "blockingMissingFacetIds": blocking_missing_facets,
             },
         )
         return (
@@ -249,6 +276,8 @@ class EvidenceEvaluator:
                 "requirementAssessments": requirement_assessments,
                 "optionalAssessments": optional_assessments,
                 "missingFacetIds": missing_facets,
+                "blockingMissingFacetIds": blocking_missing_facets,
+                "exploratoryMissingFacetIds": exploratory_missing_facets,
                 "missingRequirementIds": [
                     item["id"] for item in requirement_assessments if item["status"] != "supported"
                 ],
