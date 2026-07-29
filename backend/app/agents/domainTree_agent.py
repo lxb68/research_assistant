@@ -19,7 +19,7 @@ from typing import Any, Callable
 from app.core.config import settings
 from app.prompt_loader import PROMPT_ROOT, render_prompt
 from app.services.model_client import ModelCallError, ModelCallResult, ModelUsage, chat_completion_result
-from app.services.model_config import ModelConfigStore
+from app.services.model_config import ModelConfigStore, get_system_security_constraint
 from app.services.domain_tree_store import DomainTreeStore
 from app.services.project_repository import DEFAULT_PROJECT_ID, ProjectRepository
 from app.services.semantic_graph import SemanticGraphExtractor, SemanticSourceDocument
@@ -1062,17 +1062,24 @@ class DomainTreeAgent:
         runtime = self._resolve_model_runtime(model)
         if not runtime:
             raise DomainTreeModelGenerationError("模型配置不可用", reason="model_not_configured")
-        system_constraint = str(runtime.get("system_constraint") or "").strip()
+        is_chinese = self._is_chinese_language(language)
+        language_code = "zh" if is_chinese else "en"
+        configured_constraints = runtime.get("system_constraints")
+        system_constraint = (
+            str(configured_constraints.get(language_code) or "").strip()
+            if isinstance(configured_constraints, dict)
+            else ""
+        ) or get_system_security_constraint(language)
         output_language_constraint = (
-            "Return all domain and subdomain labels in Chinese."
-            if self._is_chinese_language(language)
-            else "Return all domain and subdomain labels in English."
+            "所有一级、二级领域标签必须使用中文。"
+            if is_chinese
+            else "Return all primary and secondary domain labels in English."
         )
         messages = [
             {
                 "role": "system",
                 "content": render_prompt(
-                    "domain_tree/system.en.md",
+                    f"domain_tree/system.{language_code}.md",
                     output_language_constraint=output_language_constraint,
                     system_constraint=system_constraint,
                 ),

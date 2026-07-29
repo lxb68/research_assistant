@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from app.core.config import settings
 from app.prompt_loader import load_prompt
-from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT
+from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT_ZH
 from app.services.retrieval_contracts import (
     flatten_requirement_slots,
     normalize_requirement,
@@ -155,7 +155,10 @@ class EvidenceEvaluator:
         raw_response = completion(
             model,
             [
-                {"role": "system", "content": f"{self.SEMANTIC_PROMPT}\n\n{SYSTEM_SECURITY_CONSTRAINT}"},
+                {
+                    "role": "system",
+                    "content": f"{self.SEMANTIC_PROMPT}\n\n{SYSTEM_SECURITY_CONSTRAINT_ZH}",
+                },
                 {
                     "role": "user",
                     "content": json.dumps(

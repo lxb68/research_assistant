@@ -16,7 +16,7 @@ from app.services.literature_map.models import (
 )
 from app.services.literature_map.policy import LiteratureMapExtractionPolicy
 from app.services.literature_map.versioning import stable_map_id
-from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT
+from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT_ZH
 
 
 CompletionCallable = Callable[..., str]
@@ -67,7 +67,7 @@ class LiteratureMapExtractor:
             [
                 {
                     "role": "system",
-                    "content": f"{self.system_prompt}\n\n{SYSTEM_SECURITY_CONSTRAINT}",
+                    "content": f"{self.system_prompt}\n\n{SYSTEM_SECURITY_CONSTRAINT_ZH}",
                 },
                 {
                     "role": "user",

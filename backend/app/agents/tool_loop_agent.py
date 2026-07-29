@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.prompt_loader import load_prompt, render_prompt
 from app.services.conversation_context import ConversationContextProjector
 from app.services.model_client import chat_completion
-from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT
+from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT_ZH
 from app.services.task_control import TaskCancelled, raise_if_task_cancelled
 from app.tools.registry import ToolRegistry
 
@@ -263,7 +263,7 @@ class ToolLoopAgent:
                     loop_prompt=self.SYSTEM_PROMPT,
                     tool_catalog=self.registry.prompt_catalog(),
                     mode_instruction=mode_instruction,
-                    security_constraint=SYSTEM_SECURITY_CONSTRAINT,
+                    security_constraint=SYSTEM_SECURITY_CONSTRAINT_ZH,
                 ),
             }
         ]
@@ -312,7 +312,7 @@ class ToolLoopAgent:
                             else "tools/decision_continue.zh.md"
                         ),
                         tool_catalog=self.registry.prompt_catalog(),
-                        security_constraint=SYSTEM_SECURITY_CONSTRAINT,
+                        security_constraint=SYSTEM_SECURITY_CONSTRAINT_ZH,
                     ),
                 },
                 {

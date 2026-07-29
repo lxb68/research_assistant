@@ -8,7 +8,7 @@ from typing import Any, Callable
 from app.core.config import settings
 from app.prompt_loader import load_prompt
 from app.services.context_resolver import ContextResolver
-from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT
+from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT_ZH
 from app.services.question_contract_builder import QuestionContractBuilder
 from app.services.retrieval_contracts import (
     SECTION_TYPES,
@@ -74,7 +74,10 @@ class QueryPlanningAgent:
         raw_response = self.completion(
             self.model,
             [
-                {"role": "system", "content": f"{self.SYSTEM_PROMPT}\n\n{SYSTEM_SECURITY_CONSTRAINT}"},
+                {
+                    "role": "system",
+                    "content": f"{self.SYSTEM_PROMPT}\n\n{SYSTEM_SECURITY_CONSTRAINT_ZH}",
+                },
                 {"role": "user", "content": json.dumps(planner_input, ensure_ascii=False)},
             ],
             temperature=0,

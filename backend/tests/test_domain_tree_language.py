@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from app.agents.domainTree_agent import DomainTreeAgent, SourceDocument
 from app.schemas.api import DomainTreeGenerateOptions
+from app.services.model_client import ModelCallResult, ModelUsage
 
 
 class DomainTreeLanguageTest(unittest.TestCase):
@@ -40,6 +42,33 @@ class DomainTreeLanguageTest(unittest.TestCase):
     def test_explicit_language_overrides_source_language(self) -> None:
         self.assertEqual(self.agent._resolve_analysis_language("中文", "English paper"), "中文")
         self.assertEqual(self.agent._resolve_analysis_language("English", "中文文献"), "English")
+
+    def test_model_call_instructions_use_one_language(self) -> None:
+        """单次领域树调用的 system 与任务提示词应使用同一种指令语言。"""
+        result = ModelCallResult(
+            content='{"domainTree":[]}',
+            usage=ModelUsage(),
+        )
+        runtime = {"provider": "test", "model": "test-model"}
+        with patch.object(self.agent, "_resolve_model_runtime", return_value=runtime), patch(
+            "app.agents.domainTree_agent.chat_completion_result",
+            return_value=result,
+        ) as completion:
+            self.agent._call_llm("生成领域树", language="中文", model=None)
+            chinese_messages = completion.call_args.args[1]
+
+            self.assertIn("你是严谨的知识分类助手", chinese_messages[0]["content"])
+            self.assertIn("安全边界", chinese_messages[0]["content"])
+            self.assertNotIn("You are a precise", chinese_messages[0]["content"])
+            self.assertNotIn("Security boundary", chinese_messages[0]["content"])
+
+            self.agent._call_llm("Create a domain tree", language="English", model=None)
+            english_messages = completion.call_args.args[1]
+
+            self.assertIn("You are a precise knowledge-classification assistant", english_messages[0]["content"])
+            self.assertIn("Security boundary", english_messages[0]["content"])
+            self.assertNotIn("你是严谨的知识分类助手", english_messages[0]["content"])
+            self.assertNotIn("安全边界", english_messages[0]["content"])
 
     def test_heading_counts_trim_and_renumber_generated_tree(self) -> None:
         generated = [

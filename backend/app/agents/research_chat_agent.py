@@ -12,7 +12,7 @@ from app.agents.hunter_agent import HunterAgent
 from app.agents.query_planning_agent import QueryPlanningAgent
 from app.prompt_loader import load_prompt
 from app.core.config import settings
-from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
+from app.services.model_config import ModelConfigStore
 from app.services.model_client import chat_completion
 from app.services.answer_composer import AnswerComposer
 from app.services.answer_policy import AnswerPolicy

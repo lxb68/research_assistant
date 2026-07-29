@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from app.prompt_loader import load_prompt, render_prompt
-from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT
+from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT_ZH
 
 
 class AnswerPolicy:
@@ -61,7 +61,7 @@ class AnswerPolicy:
                 "research/revision.zh.md",
                 instruction=revision_instruction,
             )
-        return f"{prompt}\n\n{SYSTEM_SECURITY_CONSTRAINT}"
+        return f"{prompt}\n\n{SYSTEM_SECURITY_CONSTRAINT_ZH}"
 
 
 __all__ = ["AnswerPolicy"]

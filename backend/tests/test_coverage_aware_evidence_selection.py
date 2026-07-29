@@ -155,6 +155,8 @@ class CandidateCoverageEvaluatorTest(unittest.TestCase):
         )
 
         self.assertIn("不得声称已经形成完整脉络", prompt)
+        self.assertIn("安全边界", prompt)
+        self.assertNotIn("Security boundary", prompt)
 
     def test_coverage_evaluator_keeps_direct_and_partial_separate(self) -> None:
         completion = Mock(

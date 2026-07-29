@@ -19,7 +19,18 @@ from app.services.model_client import (
 from app.services.secret_store import WindowsDpapiProtector
 
 
-SYSTEM_SECURITY_CONSTRAINT = load_prompt("common/security.en.md")
+SYSTEM_SECURITY_CONSTRAINT_EN = load_prompt("common/security.en.md")
+SYSTEM_SECURITY_CONSTRAINT_ZH = load_prompt("common/security.zh.md")
+# 兼容既有中文研究工作流；双语调用应显式使用 get_system_security_constraint。
+SYSTEM_SECURITY_CONSTRAINT = SYSTEM_SECURITY_CONSTRAINT_ZH
+
+
+def get_system_security_constraint(language: str) -> str:
+    """根据单次模型调用的指令语言选择安全约束。"""
+    normalized = str(language or "").strip().lower()
+    if normalized in {"zh", "zh-cn", "chinese", "中文"} or "中文" in normalized:
+        return SYSTEM_SECURITY_CONSTRAINT_ZH
+    return SYSTEM_SECURITY_CONSTRAINT_EN
 
 
 class ModelConfigStore:
@@ -83,6 +94,10 @@ class ModelConfigStore:
             "allow_heuristic_fallback": allow_heuristic_fallback,
             "max_output_tokens": settings.model_max_output_tokens,
             "system_constraint": SYSTEM_SECURITY_CONSTRAINT,
+            "system_constraints": {
+                "en": SYSTEM_SECURITY_CONSTRAINT_EN,
+                "zh": SYSTEM_SECURITY_CONSTRAINT_ZH,
+            },
         }
 
     def is_configured(self) -> bool:
@@ -221,6 +236,10 @@ class ModelConfigStore:
             "model": str(model or "").strip(),
             "max_output_tokens": settings.model_max_output_tokens,
             "system_constraint": SYSTEM_SECURITY_CONSTRAINT,
+            "system_constraints": {
+                "en": SYSTEM_SECURITY_CONSTRAINT_EN,
+                "zh": SYSTEM_SECURITY_CONSTRAINT_ZH,
+            },
         }
 
     def get_provider_catalog(self) -> list[dict[str, Any]]:
@@ -237,4 +256,10 @@ class ModelConfigStore:
         return f"{secret[:4]}***{secret[-4:]}"
 
 
-__all__ = ["ModelConfigStore", "SYSTEM_SECURITY_CONSTRAINT"]
+__all__ = [
+    "ModelConfigStore",
+    "SYSTEM_SECURITY_CONSTRAINT",
+    "SYSTEM_SECURITY_CONSTRAINT_EN",
+    "SYSTEM_SECURITY_CONSTRAINT_ZH",
+    "get_system_security_constraint",
+]

@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from app.services.evidence_groups import evidence_group_key, group_evidence
 from app.prompt_loader import load_prompt
-from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT
+from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT_ZH
 from app.services.retrieval_contracts import (
     flatten_requirement_slots,
     normalize_requirement,
@@ -163,7 +163,7 @@ class CandidateCoverageEvaluator:
             [
                 {
                     "role": "system",
-                    "content": f"{self.SYSTEM_PROMPT}\n\n{SYSTEM_SECURITY_CONSTRAINT}",
+                    "content": f"{self.SYSTEM_PROMPT}\n\n{SYSTEM_SECURITY_CONSTRAINT_ZH}",
                 },
                 {
                     "role": "user",
@@ -190,7 +190,7 @@ class CandidateCoverageEvaluator:
                 [
                     {
                         "role": "system",
-                        "content": f"{self.REPAIR_PROMPT}\n\n{SYSTEM_SECURITY_CONSTRAINT}",
+                        "content": f"{self.REPAIR_PROMPT}\n\n{SYSTEM_SECURITY_CONSTRAINT_ZH}",
                     },
                     {
                         "role": "user",

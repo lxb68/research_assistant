@@ -17,7 +17,7 @@ from app.core.config import settings
 from app.prompt_loader import load_prompt, render_prompt
 from app.services.conversation_context import ConversationContextProjector
 from app.services.model_client import chat_completion
-from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
+from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT_ZH
 from app.services.run_logger import RunLogger
 from app.services.task_control import TaskCancelled, raise_if_task_cancelled
 from app.services.retrieval_contracts import (
@@ -252,7 +252,7 @@ class OrchestratorAgent:
                     router_prompt=self.ROUTER_SYSTEM_PROMPT,
                     tool_catalog=self.tool_registry.prompt_catalog(),
                     agent_catalog=json.dumps(self.AGENT_CAPABILITIES, ensure_ascii=False),
-                    security_constraint=SYSTEM_SECURITY_CONSTRAINT,
+                    security_constraint=SYSTEM_SECURITY_CONSTRAINT_ZH,
                 ),
             }
         ]
@@ -359,7 +359,7 @@ class OrchestratorAgent:
                         "orchestrator/router_repair.zh.md",
                         tool_catalog=self.tool_registry.prompt_catalog(),
                         agent_catalog=json.dumps(self.AGENT_CAPABILITIES, ensure_ascii=False),
-                        security_constraint=SYSTEM_SECURITY_CONSTRAINT,
+                        security_constraint=SYSTEM_SECURITY_CONSTRAINT_ZH,
                     ),
                 },
                 {
@@ -757,7 +757,7 @@ class OrchestratorAgent:
                 "content": render_prompt(
                     "orchestrator/final_answer.zh.md",
                     limit_instruction=("编排循环已达到轮数上限，必须给出有边界的结果。" if reached_limit else ""),
-                    security_constraint=SYSTEM_SECURITY_CONSTRAINT,
+                    security_constraint=SYSTEM_SECURITY_CONSTRAINT_ZH,
                 ),
             },
             {
@@ -1030,7 +1030,7 @@ class OrchestratorAgent:
                 "role": "system",
                 "content": render_prompt(
                     "orchestrator/direct_answer.zh.md",
-                    security_constraint=SYSTEM_SECURITY_CONSTRAINT,
+                    security_constraint=SYSTEM_SECURITY_CONSTRAINT_ZH,
                 ),
             }
         ]
