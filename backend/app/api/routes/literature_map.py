@@ -13,6 +13,7 @@ from app.services.background_jobs import (
 from app.services.literature_map import (
     LiteratureMapProjectService,
     LiteratureMapRepository,
+    VocabularyNormalizer,
 )
 from app.services.model_config import ModelConfigStore
 from app.services.paper_repository import PaperRepository
@@ -28,6 +29,9 @@ def _service() -> LiteratureMapProjectService:
         papers=PaperRepository(settings.hunter_metadata_db),
         repository=LiteratureMapRepository(settings.literature_map_db),
         extractor_version=settings.literature_map_extractor_version,
+        normalizer=VocabularyNormalizer.from_file(
+            settings.literature_map_normalization_config
+        ),
     )
 
 

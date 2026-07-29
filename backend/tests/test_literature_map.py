@@ -6,11 +6,16 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock
 
 from app.services.literature_map import (
+    EvidenceReference,
     LiteratureMapBuilder,
     LiteratureMapExtractionPolicy,
     LiteratureMapExtractor,
     LiteratureMapProjectService,
     LiteratureMapRepository,
+    PaperEntityResolver,
+    RelationCandidate,
+    RelationMerger,
+    VocabularyNormalizer,
     compute_document_version,
 )
 from app.services.paper_repository import PaperRepository
@@ -100,6 +105,102 @@ def _extractor_response() -> str:
             ],
         }
     )
+
+
+class _FailOnceRepository(LiteratureMapRepository):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.should_fail = True
+
+    def save_card(self, *args, **kwargs) -> None:
+        if self.should_fail:
+            self.should_fail = False
+            raise RuntimeError("模拟卡片事务失败")
+        super().save_card(*args, **kwargs)
+
+
+def test_builder_replays_staged_extraction_after_database_failure() -> None:
+    with TemporaryDirectory() as directory:
+        repository = _FailOnceRepository(Path(directory) / "literature-map.sqlite3")
+        completion = Mock(return_value=_extractor_response())
+        extractor = LiteratureMapExtractor(
+            completion=completion,
+            model={"model": "test"},
+            extractor_version="extractor-v1",
+            timeout=30,
+        )
+        builder = LiteratureMapBuilder(repository=repository, extractor=extractor)
+
+        try:
+            builder.build_paper(_paper(), _chunks())
+        except RuntimeError as error:
+            assert str(error) == "模拟卡片事务失败"
+        else:
+            raise AssertionError("首次写卡应触发模拟故障")
+
+        result = builder.build_paper(_paper(), _chunks())
+
+        assert completion.call_count == 1
+        assert result.status == "built"
+        assert result.diagnostics["extractionReplayed"] is True
+
+
+def test_relation_merger_deduplicates_and_rejects_false_resolved_targets() -> None:
+    normalizer = VocabularyNormalizer()
+    merger = RelationMerger(
+        resolver=PaperEntityResolver(
+            [
+                {"id": "paper-1", "title": "Source"},
+                {"id": "paper-2", "title": "PriorMap"},
+            ]
+        ),
+        normalizer=normalizer,
+    )
+    evidence = EvidenceReference(
+        record_id="paper-1",
+        chunk_index=3,
+        quote="We use PriorMap.",
+    )
+    relations = merger.merge(
+        project_id="",
+        source_paper_id="paper-1",
+        extractor_version="extractor-v1",
+        candidates=[
+            RelationCandidate(
+                relation_type="Uses",
+                target_label="PriorMap",
+                target_paper_id="paper-2",
+                evidence_refs=[evidence],
+                confidence=0.9,
+            ),
+            RelationCandidate(
+                relation_type="uses",
+                target_label="PriorMap",
+                target_paper_id="paper-2",
+                evidence_refs=[evidence],
+                confidence=0.8,
+            ),
+            RelationCandidate(
+                relation_type="uses",
+                target_label="Source",
+                target_paper_id="paper-1",
+            ),
+            RelationCandidate(
+                relation_type="uses",
+                target_label="不存在的论文",
+                target_paper_id="chunk:3",
+            ),
+        ],
+    )
+
+    assert len(relations) == 2
+    resolved = next(item for item in relations if item.status == "resolved")
+    candidate = next(item for item in relations if item.status == "candidate")
+    assert resolved.target_id == "paper-2"
+    assert resolved.canonical_relation_type == "uses"
+    assert len(resolved.evidence_refs) == 1
+    assert candidate.target_id == "不存在的论文"
+    assert candidate.resolution_method == "unresolved"
 
 
 def test_document_version_is_stable_and_content_addressed() -> None:

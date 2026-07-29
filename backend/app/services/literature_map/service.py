@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
 from app.services.literature_map.builder import LiteratureMapBuilder, PaperCardExtractor
+from app.services.literature_map.metadata_quality import PaperMetadataValidator
+from app.services.literature_map.models import RelationCandidate
+from app.services.literature_map.normalization import VocabularyNormalizer
 from app.services.literature_map.repository import LiteratureMapRepository
+from app.services.literature_map.resolution import PaperEntityResolver, RelationMerger
 from app.services.literature_map.versioning import compute_document_version
 from app.services.paper_repository import PaperRepository
 from app.services.project_repository import ProjectRepository
@@ -123,6 +127,8 @@ class LiteratureMapProjectService:
         extractor_version: str,
         schema_version: int = LiteratureMapBuilder.SCHEMA_VERSION,
         evidence_adapter: PaperEvidenceAdapter | None = None,
+        normalizer: VocabularyNormalizer | None = None,
+        metadata_validator: PaperMetadataValidator | None = None,
     ) -> None:
         self.projects = projects
         self.papers = papers
@@ -130,6 +136,8 @@ class LiteratureMapProjectService:
         self.extractor_version = str(extractor_version or "").strip()
         self.schema_version = int(schema_version)
         self.evidence_adapter = evidence_adapter or PaperEvidenceAdapter()
+        self.normalizer = normalizer or VocabularyNormalizer()
+        self.metadata_validator = metadata_validator or PaperMetadataValidator()
         if not self.extractor_version:
             raise ValueError("extractor_version 不能为空")
 
@@ -158,11 +166,25 @@ class LiteratureMapProjectService:
                 )
             )
         ]
+        build_statuses = self.repository.get_build_statuses(paper_ids)
+        failed_paper_ids = [
+            paper_id
+            for paper_id in stale_paper_ids
+            if build_statuses.get(paper_id, {}).get("status") == "failed"
+        ]
         relations = self.repository.list_relations_for_sources(
             paper_ids,
             project_id="",
         )
-        status = "empty" if not cards else ("stale" if stale_paper_ids else "ready")
+        status = (
+            "empty"
+            if not cards
+            else (
+                "partial"
+                if failed_paper_ids
+                else ("stale" if stale_paper_ids else "ready")
+            )
+        )
         return {
             "projectId": project_id,
             "status": status,
@@ -171,6 +193,15 @@ class LiteratureMapProjectService:
             "claimCount": sum(len(card.claims) for card in cards),
             "relationCount": len(relations),
             "pendingPaperCount": len(stale_paper_ids),
+            "failedPaperCount": len(failed_paper_ids),
+            "failedPaperIds": failed_paper_ids,
+            "failures": [
+                {
+                    "paperId": paper_id,
+                    "error": build_statuses[paper_id].get("error", ""),
+                }
+                for paper_id in failed_paper_ids
+            ],
             "stalePaperIds": stale_paper_ids,
             "cards": [cards_by_id[paper_id].to_dict() for paper_id in paper_ids if paper_id in cards_by_id],
             "relations": [relation.to_dict() for relation in relations],
@@ -188,11 +219,28 @@ class LiteratureMapProjectService:
         prepared = self._prepared_project_papers(project_id)
         if not prepared:
             raise ValueError("当前项目没有可用于构建文献地图的 Markdown 文献")
+        library_papers = self.papers.list(limit=500)
+        normalized_card_count = self.repair_project_cards(
+            project_id,
+            papers=[paper for paper, _chunks in prepared],
+        )
+        relation_merger = RelationMerger(
+            resolver=PaperEntityResolver(library_papers),
+            normalizer=self.normalizer,
+        )
+        repaired_relation_count = self.repair_project_relations(
+            project_id,
+            paper_ids=[str(paper["id"]) for paper, _chunks in prepared],
+            relation_merger=relation_merger,
+        )
         builder = LiteratureMapBuilder(
             repository=self.repository,
             extractor=extractor,
             project_id="",
             schema_version=self.schema_version,
+            normalizer=self.normalizer,
+            relation_merger=relation_merger,
+            metadata_validator=self.metadata_validator,
         )
         counts = {"built": 0, "reused": 0, "failed": 0}
         failures: list[dict[str, str]] = []
@@ -218,9 +266,110 @@ class LiteratureMapProjectService:
             "builtPaperCount": counts["built"],
             "reusedPaperCount": counts["reused"],
             "failedPaperCount": counts["failed"],
+            "repairedRelationCount": repaired_relation_count,
+            "normalizedCardCount": normalized_card_count,
             "failures": failures,
             "snapshot": self.snapshot(project_id),
         }
+
+    def repair_project_relations(
+        self,
+        project_id: str,
+        *,
+        paper_ids: list[str] | None = None,
+        relation_merger: RelationMerger | None = None,
+    ) -> int:
+        """用真实文献库重新解析已有关系；不调用模型，可安全重复执行。"""
+        source_ids = paper_ids or [
+            str(paper["id"]) for paper in self.project_papers(project_id)
+        ]
+        existing = self.repository.list_relations_for_sources(
+            source_ids,
+            project_id="",
+        )
+        if not existing:
+            return 0
+        merger = relation_merger or RelationMerger(
+            resolver=PaperEntityResolver(self.papers.list(limit=500)),
+            normalizer=self.normalizer,
+        )
+        by_source: dict[str, list[RelationCandidate]] = {}
+        for relation in existing:
+            target_label = str(
+                relation.qualifiers.get("targetLabel") or relation.target_id
+            ).strip()
+            by_source.setdefault(relation.source_paper_id, []).append(
+                RelationCandidate(
+                    relation_type=(
+                        relation.raw_relation_type or relation.relation_type
+                    ),
+                    target_label=target_label,
+                    target_paper_id=(
+                        relation.target_id
+                        if relation.target_type == "paper"
+                        else str(
+                            relation.qualifiers.get("proposedTargetPaperId") or ""
+                        )
+                    ),
+                    target_type=relation.target_type,
+                    qualifiers=relation.qualifiers,
+                    confidence=relation.confidence,
+                    evidence_refs=relation.evidence_refs,
+                )
+            )
+        repaired = []
+        for source_id, candidates in by_source.items():
+            repaired.extend(
+                merger.merge(
+                    project_id="",
+                    source_paper_id=source_id,
+                    extractor_version=self.extractor_version,
+                    candidates=candidates,
+                )
+            )
+        self.repository.rewrite_relations(
+            source_paper_ids=list(by_source),
+            relations=repaired,
+            project_id="",
+        )
+        return len(repaired)
+
+    def repair_project_cards(
+        self,
+        project_id: str,
+        *,
+        papers: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """回填旧卡片的规范词表和元数据质量字段，不重新抽取正文。"""
+        project_papers = papers or self.project_papers(project_id)
+        papers_by_id = {
+            str(paper.get("id") or ""): paper
+            for paper in project_papers
+            if str(paper.get("id") or "")
+        }
+        cards = self.repository.list_cards_by_ids(list(papers_by_id))
+        updated = 0
+        for card in cards:
+            paper = papers_by_id[card.paper_id]
+            normalized = replace(
+                card,
+                canonical_facets=self.normalizer.normalize_facets(card.facets),
+                claims=[
+                    self.normalizer.normalize_claim(claim)
+                    for claim in card.claims
+                ],
+                metadata_warnings=self.metadata_validator.validate(paper),
+                metadata_provenance={
+                    **card.metadata_provenance,
+                    "source": str(paper.get("source") or "library"),
+                    "validatorVersion": self.metadata_validator.version,
+                },
+            )
+            if normalized == card:
+                continue
+            self.repository.save_card(normalized, relations=None)
+            updated += 1
+        return updated
 
     def _prepared_project_papers(
         self,

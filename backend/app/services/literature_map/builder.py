@@ -5,16 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from app.services.literature_map.metadata_quality import PaperMetadataValidator
 from app.services.literature_map.models import (
-    LiteratureRelation,
     PaperCard,
     PaperCardDraft,
+    PaperExtractionResult,
 )
+from app.services.literature_map.normalization import VocabularyNormalizer
 from app.services.literature_map.repository import LiteratureMapRepository
-from app.services.literature_map.versioning import (
-    compute_document_version,
-    stable_map_id,
-)
+from app.services.literature_map.resolution import PaperEntityResolver, RelationMerger
+from app.services.literature_map.versioning import compute_document_version
 
 
 class PaperCardExtractor(Protocol):
@@ -24,7 +24,7 @@ class PaperCardExtractor(Protocol):
         self,
         paper: dict[str, Any],
         evidence_chunks: list[dict[str, Any]],
-    ) -> tuple[PaperCardDraft, dict[str, Any]]: ...
+    ) -> PaperExtractionResult: ...
 
 
 @dataclass(slots=True)
@@ -49,11 +49,20 @@ class LiteratureMapBuilder:
         extractor: PaperCardExtractor,
         project_id: str = "",
         schema_version: int | None = None,
+        normalizer: VocabularyNormalizer | None = None,
+        relation_merger: RelationMerger | None = None,
+        metadata_validator: PaperMetadataValidator | None = None,
     ) -> None:
         self.repository = repository
         self.extractor = extractor
         self.project_id = str(project_id or "").strip()
         self.schema_version = int(schema_version or self.SCHEMA_VERSION)
+        self.normalizer = normalizer or VocabularyNormalizer()
+        self.relation_merger = relation_merger or RelationMerger(
+            resolver=PaperEntityResolver([]),
+            normalizer=self.normalizer,
+        )
+        self.metadata_validator = metadata_validator or PaperMetadataValidator()
 
     def build_paper(
         self,
@@ -97,7 +106,30 @@ class LiteratureMapBuilder:
             extractor_version=self.extractor.extractor_version,
         )
         try:
-            draft, diagnostics = self.extractor.extract(paper, evidence_chunks)
+            extraction = None if force else self.repository.get_extraction(
+                paper_id,
+                document_version=document_version,
+                extractor_version=self.extractor.extractor_version,
+                schema_version=self.schema_version,
+            )
+            replayed = extraction is not None
+            if extraction is None:
+                extraction = self._coerce_extraction(
+                    self.extractor.extract(paper, evidence_chunks)
+                )
+                # 模型输出先独立暂存；即使后续 SQL 提交失败，重试也不会再次调用模型。
+                self.repository.save_extraction(
+                    paper_id,
+                    document_version=document_version,
+                    extractor_version=self.extractor.extractor_version,
+                    schema_version=self.schema_version,
+                    result=extraction,
+                )
+
+            draft = extraction.draft
+            claims = [self.normalizer.normalize_claim(claim) for claim in draft.claims]
+            canonical_facets = self.normalizer.normalize_facets(draft.facets)
+            metadata_warnings = self.metadata_validator.validate(paper)
             card = PaperCard(
                 paper_id=paper_id,
                 title=str(paper.get("title") or "未命名文献").strip(),
@@ -108,54 +140,38 @@ class LiteratureMapBuilder:
                 summary=draft.summary,
                 source_language=draft.source_language,
                 facets=draft.facets,
-                claims=draft.claims,
+                canonical_facets=canonical_facets,
+                claims=claims,
+                metadata_warnings=metadata_warnings,
+                metadata_provenance={
+                    "source": str(paper.get("source") or "library"),
+                    "validatorVersion": self.metadata_validator.version,
+                },
             )
-            relations = [
-                LiteratureRelation(
-                    id=stable_map_id(
-                        "relation",
-                        self.project_id,
-                        paper_id,
-                        candidate.relation_type,
-                        candidate.target_paper_id or candidate.target_label,
-                    ),
-                    project_id=self.project_id,
-                    source_paper_id=paper_id,
-                    relation_type=candidate.relation_type,
-                    target_id=candidate.target_paper_id or candidate.target_label,
-                    target_type=(
-                        "paper"
-                        if candidate.target_paper_id
-                        else candidate.target_type or "unresolved_label"
-                    ),
-                    qualifiers={
-                        **candidate.qualifiers,
-                        **(
-                            {"targetLabel": candidate.target_label}
-                            if candidate.target_paper_id
-                            else {}
-                        ),
-                    },
-                    evidence_refs=candidate.evidence_refs,
-                    confidence=candidate.confidence,
-                    status=(
-                        "resolved"
-                        if candidate.target_paper_id
-                        else "candidate"
-                    ),
-                    extractor_version=self.extractor.extractor_version,
-                )
-                for candidate in draft.relation_candidates
-            ]
+            relations = self.relation_merger.merge(
+                project_id=self.project_id,
+                source_paper_id=paper_id,
+                candidates=draft.relation_candidates,
+                extractor_version=self.extractor.extractor_version,
+            )
             self.repository.save_card(
                 card,
                 relations=relations,
                 relation_scope_project_id=self.project_id,
             )
+            self.repository.mark_extraction_committed(
+                paper_id,
+                document_version=document_version,
+                extractor_version=self.extractor.extractor_version,
+                schema_version=self.schema_version,
+            )
             completed_diagnostics = {
-                **diagnostics,
+                **extraction.diagnostics,
+                "extractionReplayed": replayed,
                 "claimCount": len(card.claims),
+                "relationCandidateCount": len(draft.relation_candidates),
                 "relationCount": len(relations),
+                "metadataWarningCount": len(metadata_warnings),
             }
             self.repository.mark_build_finished(
                 paper_id,
@@ -178,6 +194,17 @@ class LiteratureMapBuilder:
             )
             raise
 
+    @staticmethod
+    def _coerce_extraction(value: Any) -> PaperExtractionResult:
+        if isinstance(value, PaperExtractionResult):
+            return value
+        if isinstance(value, tuple) and len(value) == 2:
+            draft, diagnostics = value
+            return PaperExtractionResult(
+                draft=draft,
+                diagnostics=dict(diagnostics or {}),
+            )
+        raise TypeError("抽取器必须返回 PaperExtractionResult 或 (draft, diagnostics)")
 
 __all__ = [
     "LiteratureMapBuildResult",

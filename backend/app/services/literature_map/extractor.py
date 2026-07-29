@@ -10,6 +10,7 @@ from app.services.literature_map.models import (
     EvidenceReference,
     MapClaim,
     PaperCardDraft,
+    PaperExtractionResult,
     RelationCandidate,
 )
 from app.services.literature_map.policy import LiteratureMapExtractionPolicy
@@ -86,7 +87,7 @@ class LiteratureMapExtractor:
         self,
         paper: dict[str, Any],
         evidence_chunks: list[dict[str, Any]],
-    ) -> tuple[PaperCardDraft, dict[str, Any]]:
+    ) -> PaperExtractionResult:
         paper_id = str(paper.get("id") or paper.get("recordId") or "").strip()
         if not paper_id:
             raise ValueError("论文缺少稳定 paper_id")
@@ -132,7 +133,11 @@ class LiteratureMapExtractor:
             evidence_index,
         )
         diagnostics["rawResponseLength"] = len(str(raw_response or ""))
-        return draft, diagnostics
+        return PaperExtractionResult(
+            draft=draft,
+            diagnostics=diagnostics,
+            raw_response=str(raw_response or ""),
+        )
 
     def _prepare_evidence(
         self,

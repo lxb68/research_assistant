@@ -24,6 +24,7 @@ from app.services.literature_map import (
     LiteratureMapExtractor,
     LiteratureMapProjectService,
     LiteratureMapRepository,
+    VocabularyNormalizer,
 )
 from app.services.paper_repository import PaperRepository
 from app.services.project_repository import ProjectRepository
@@ -446,6 +447,9 @@ def _literature_map(context: BackgroundJobContext, raw: dict[str, Any]) -> dict[
         papers=PaperRepository(settings.hunter_metadata_db),
         repository=LiteratureMapRepository(settings.literature_map_db),
         extractor_version=settings.literature_map_extractor_version,
+        normalizer=VocabularyNormalizer.from_file(
+            settings.literature_map_normalization_config
+        ),
     )
 
     def report(completed: int, total: int, paper_id: str, outcome: str) -> None:

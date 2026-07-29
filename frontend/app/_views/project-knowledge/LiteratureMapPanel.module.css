@@ -79,6 +79,7 @@
 }
 
 .stale,
+.partial,
 .building {
   background: var(--app-warning-soft);
   color: var(--app-warning);

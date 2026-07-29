@@ -107,6 +107,10 @@ class Settings:
         os.getenv("LITERATURE_MAP_EXTRACTOR_VERSION", "literature-map-v1").strip()
         or "literature-map-v1"
     )
+    literature_map_normalization_config = os.getenv(
+        "LITERATURE_MAP_NORMALIZATION_CONFIG",
+        "",
+    ).strip()
     literature_map_timeout_seconds = max(
         10,
         int(os.getenv("LITERATURE_MAP_TIMEOUT_SECONDS", "120")),

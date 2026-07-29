@@ -39,7 +39,13 @@ export type LiteratureMapRelation = {
   evidence: LiteratureMapEvidence[];
 };
 
-export type LiteratureMapStatus = "empty" | "ready" | "stale" | "building" | "failed";
+export type LiteratureMapStatus =
+  | "empty"
+  | "ready"
+  | "partial"
+  | "stale"
+  | "building"
+  | "failed";
 
 export type LiteratureMapSnapshot = {
   projectId: string;
@@ -48,6 +54,8 @@ export type LiteratureMapSnapshot = {
   paperCount: number;
   claimCount: number;
   relationCount: number;
+  failedPaperCount: number;
+  failedPaperIds: string[];
   cards: LiteratureMapCard[];
   relations: LiteratureMapRelation[];
   error?: string;
@@ -144,7 +152,13 @@ function normalizeRelation(value: unknown): LiteratureMapRelation {
 
 function normalizeStatus(value: unknown, cardCount: number): LiteratureMapStatus {
   const status = asString(value);
-  if (status === "ready" || status === "stale" || status === "building" || status === "failed") {
+  if (
+    status === "ready"
+    || status === "partial"
+    || status === "stale"
+    || status === "building"
+    || status === "failed"
+  ) {
     return status;
   }
   return cardCount > 0 ? "ready" : "empty";
@@ -165,6 +179,10 @@ export function normalizeLiteratureMap(
     paperCount: asNumber(item.paper_count ?? item.paperCount) ?? cards.length,
     claimCount: asNumber(item.claim_count ?? item.claimCount) ?? claimCount,
     relationCount: asNumber(item.relation_count ?? item.relationCount) ?? relations.length,
+    failedPaperCount: asNumber(item.failed_paper_count ?? item.failedPaperCount) ?? 0,
+    failedPaperIds: asArray(item.failed_paper_ids ?? item.failedPaperIds)
+      .map(asString)
+      .filter(Boolean),
     cards,
     relations,
     error: asString(item.error ?? item.error_message ?? item.errorMessage),
@@ -209,4 +227,3 @@ export async function buildLiteratureMap(
     ? normalizeLiteratureMap(projectId, payload)
     : null;
 }
-

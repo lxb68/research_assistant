@@ -1,5 +1,27 @@
-<!-- BEGIN:nextjs-agent-rules -->
-# This is NOT the Next.js you know
+# Research Assistant
 
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
-<!-- END:nextjs-agent-rules -->
+面向科研文献管理与证据化问答的本地研究助理，覆盖文献接入、PDF 解析、项目知识、检索生成、领域树与知识图谱。
+前端为 Next.js 16.2 / React 19 / TypeScript / MUI，后端为 Python 3.11 / FastAPI，运行数据主要落在本地文件与 SQLite。
+
+## 全局红线
+
+- 默认中文沟通；代码注释、调试日志和用户错误信息使用中文，公共协议字段与第三方术语除外。
+- 修改现有代码前先定位根因：检查堆栈、日志、输入、调用链、状态、并发和相关测试；必要时加临时日志或断点。禁止猜测式修复。
+- 修改前评估模块依赖与影响面，以高内聚、低耦合为红线；修复应落在职责所属层，不跨层复制逻辑或扩大共享状态。
+- 先执行 `git status --short`。只触碰任务范围，保留用户已有改动，不回退、不顺手重构。
+- 前后端字段名、可空性、枚举、任务状态、流事件和错误结构是公共契约；变更时同步后端 schema/route、前端 `lib/` 类型/解析器和测试。
+- 真实密钥仅存于忽略的环境文件或秘密存储。不得输出、提交或写入日志；不得用真实 `storage/` 数据跑破坏性测试。
+- Bug 修复需有回归测试，或说明无法自动化的原因。最终只报告实际执行过的验证及遗留风险。
+
+## 工作区
+
+- `frontend/`：前端规则见其目录内 `AGENTS.md`。
+- `backend/`：后端规则见其目录内 `AGENTS.md`。
+- `.next/`、`node_modules/`、`.venv/`、`storage/`、缓存、日志和 SQLite 均为依赖/运行产物，不手工编辑。
+
+根目录开发命令：
+
+```powershell
+npm.cmd run frontend:dev
+npm.cmd run backend:dev
+```

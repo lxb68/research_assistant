@@ -14,6 +14,8 @@ from app.services.literature_map.models import (
     LiteratureRelation,
     MapClaim,
     PaperCard,
+    PaperCardDraft,
+    PaperExtractionResult,
 )
 
 
@@ -62,6 +64,9 @@ class LiteratureMapRepository:
                     summary TEXT NOT NULL DEFAULT '',
                     source_language TEXT NOT NULL DEFAULT '',
                     facets_json TEXT NOT NULL DEFAULT '{}',
+                    canonical_facets_json TEXT NOT NULL DEFAULT '{}',
+                    metadata_warnings_json TEXT NOT NULL DEFAULT '[]',
+                    metadata_provenance_json TEXT NOT NULL DEFAULT '{}',
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -79,6 +84,10 @@ class LiteratureMapRepository:
                     confidence REAL NOT NULL,
                     support_status TEXT NOT NULL,
                     evidence_refs_json TEXT NOT NULL,
+                    raw_kind TEXT NOT NULL DEFAULT '',
+                    canonical_kind TEXT NOT NULL DEFAULT '',
+                    normalizer_version TEXT NOT NULL DEFAULT '',
+                    normalization_confidence REAL NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (paper_id) REFERENCES paper_cards(paper_id) ON DELETE CASCADE
@@ -99,6 +108,11 @@ class LiteratureMapRepository:
                     confidence REAL NOT NULL,
                     status TEXT NOT NULL,
                     extractor_version TEXT NOT NULL DEFAULT '',
+                    raw_relation_type TEXT NOT NULL DEFAULT '',
+                    canonical_relation_type TEXT NOT NULL DEFAULT '',
+                    normalizer_version TEXT NOT NULL DEFAULT '',
+                    normalization_confidence REAL NOT NULL DEFAULT 0,
+                    resolution_method TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY (source_paper_id) REFERENCES paper_cards(paper_id) ON DELETE CASCADE
@@ -120,8 +134,95 @@ class LiteratureMapRepository:
                     started_at TEXT NOT NULL,
                     completed_at TEXT NOT NULL DEFAULT ''
                 );
+
+                CREATE TABLE IF NOT EXISTS literature_map_extractions (
+                    paper_id TEXT NOT NULL,
+                    document_version TEXT NOT NULL,
+                    extractor_version TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    raw_response TEXT NOT NULL DEFAULT '',
+                    draft_json TEXT NOT NULL,
+                    diagnostics_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (
+                        paper_id, document_version, extractor_version, schema_version
+                    )
+                );
                 """
             )
+            self._ensure_column(
+                connection,
+                "paper_cards",
+                "canonical_facets_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
+            self._ensure_column(
+                connection,
+                "paper_cards",
+                "metadata_warnings_json",
+                "TEXT NOT NULL DEFAULT '[]'",
+            )
+            self._ensure_column(
+                connection,
+                "paper_cards",
+                "metadata_provenance_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
+            for column, definition in (
+                ("raw_kind", "TEXT NOT NULL DEFAULT ''"),
+                ("canonical_kind", "TEXT NOT NULL DEFAULT ''"),
+                ("normalizer_version", "TEXT NOT NULL DEFAULT ''"),
+                ("normalization_confidence", "REAL NOT NULL DEFAULT 0"),
+            ):
+                self._ensure_column(connection, "paper_claims", column, definition)
+            for column, definition in (
+                ("raw_relation_type", "TEXT NOT NULL DEFAULT ''"),
+                ("canonical_relation_type", "TEXT NOT NULL DEFAULT ''"),
+                ("normalizer_version", "TEXT NOT NULL DEFAULT ''"),
+                ("normalization_confidence", "REAL NOT NULL DEFAULT 0"),
+                ("resolution_method", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                self._ensure_column(
+                    connection,
+                    "literature_relations",
+                    column,
+                    definition,
+                )
+            connection.execute(
+                """
+                UPDATE paper_claims
+                SET raw_kind = CASE WHEN raw_kind = '' THEN kind ELSE raw_kind END,
+                    canonical_kind = CASE
+                        WHEN canonical_kind = '' THEN kind ELSE canonical_kind END
+                """
+            )
+            connection.execute(
+                """
+                UPDATE literature_relations
+                SET raw_relation_type = CASE
+                        WHEN raw_relation_type = '' THEN relation_type
+                        ELSE raw_relation_type END,
+                    canonical_relation_type = CASE
+                        WHEN canonical_relation_type = '' THEN relation_type
+                        ELSE canonical_relation_type END
+                """
+            )
+
+    @staticmethod
+    def _ensure_column(
+        connection: sqlite3.Connection,
+        table: str,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def needs_rebuild(
         self,
@@ -199,6 +300,133 @@ class LiteratureMapRepository:
                 ),
             )
 
+    def save_extraction(
+        self,
+        paper_id: str,
+        *,
+        document_version: str,
+        extractor_version: str,
+        schema_version: int,
+        result: PaperExtractionResult,
+        status: str = "validated",
+    ) -> None:
+        timestamp = _now()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO literature_map_extractions (
+                    paper_id, document_version, extractor_version, schema_version,
+                    raw_response, draft_json, diagnostics_json, status,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(
+                    paper_id, document_version, extractor_version, schema_version
+                ) DO UPDATE SET
+                    raw_response=excluded.raw_response,
+                    draft_json=excluded.draft_json,
+                    diagnostics_json=excluded.diagnostics_json,
+                    status=excluded.status,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    paper_id,
+                    document_version,
+                    extractor_version,
+                    schema_version,
+                    result.raw_response,
+                    _json(result.draft.to_dict()),
+                    _json(result.diagnostics),
+                    status,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+    def get_extraction(
+        self,
+        paper_id: str,
+        *,
+        document_version: str,
+        extractor_version: str,
+        schema_version: int,
+    ) -> PaperExtractionResult | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT raw_response, draft_json, diagnostics_json
+                FROM literature_map_extractions
+                WHERE paper_id = ? AND document_version = ?
+                  AND extractor_version = ? AND schema_version = ?
+                """,
+                (
+                    paper_id,
+                    document_version,
+                    extractor_version,
+                    schema_version,
+                ),
+            ).fetchone()
+        if not row:
+            return None
+        return PaperExtractionResult(
+            draft=PaperCardDraft.from_dict(json.loads(row["draft_json"] or "{}")),
+            diagnostics=json.loads(row["diagnostics_json"] or "{}"),
+            raw_response=str(row["raw_response"] or ""),
+        )
+
+    def mark_extraction_committed(
+        self,
+        paper_id: str,
+        *,
+        document_version: str,
+        extractor_version: str,
+        schema_version: int,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE literature_map_extractions
+                SET status = 'committed', updated_at = ?
+                WHERE paper_id = ? AND document_version = ?
+                  AND extractor_version = ? AND schema_version = ?
+                """,
+                (
+                    _now(),
+                    paper_id,
+                    document_version,
+                    extractor_version,
+                    schema_version,
+                ),
+            )
+
+    def get_build_statuses(self, paper_ids: list[str]) -> dict[str, dict[str, Any]]:
+        normalized = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in paper_ids
+                if str(value or "").strip()
+            )
+        )
+        if not normalized:
+            return {}
+        placeholders = ", ".join("?" for _ in normalized)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT paper_id, status, error_message, diagnostics_json
+                FROM literature_map_builds
+                WHERE paper_id IN ({placeholders})
+                """,
+                normalized,
+            ).fetchall()
+        return {
+            str(row["paper_id"]): {
+                "status": str(row["status"]),
+                "error": str(row["error_message"] or ""),
+                "diagnostics": json.loads(row["diagnostics_json"] or "{}"),
+            }
+            for row in rows
+        }
+
     def save_card(
         self,
         card: PaperCard,
@@ -220,8 +448,9 @@ class LiteratureMapRepository:
                 INSERT INTO paper_cards (
                     paper_id, title, year, document_version, extractor_version,
                     schema_version, summary, source_language, facets_json,
-                    status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    canonical_facets_json, metadata_warnings_json,
+                    metadata_provenance_json, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(paper_id) DO UPDATE SET
                     title=excluded.title,
                     year=excluded.year,
@@ -231,6 +460,9 @@ class LiteratureMapRepository:
                     summary=excluded.summary,
                     source_language=excluded.source_language,
                     facets_json=excluded.facets_json,
+                    canonical_facets_json=excluded.canonical_facets_json,
+                    metadata_warnings_json=excluded.metadata_warnings_json,
+                    metadata_provenance_json=excluded.metadata_provenance_json,
                     status=excluded.status,
                     updated_at=excluded.updated_at
                 """,
@@ -244,6 +476,9 @@ class LiteratureMapRepository:
                     card.summary,
                     card.source_language,
                     _json(card.facets),
+                    _json(card.canonical_facets),
+                    _json(card.metadata_warnings),
+                    _json(card.metadata_provenance),
                     card.status,
                     created_at,
                     timestamp,
@@ -255,8 +490,10 @@ class LiteratureMapRepository:
                 INSERT INTO paper_claims (
                     id, paper_id, kind, subject, predicate, object,
                     qualifiers_json, attribution_type, confidence, support_status,
-                    evidence_refs_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    evidence_refs_json, raw_kind, canonical_kind,
+                    normalizer_version, normalization_confidence,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -271,6 +508,10 @@ class LiteratureMapRepository:
                         claim.confidence,
                         claim.support_status,
                         _json([item.to_dict() for item in claim.evidence_refs]),
+                        claim.raw_kind or claim.kind,
+                        claim.canonical_kind or claim.kind,
+                        claim.normalizer_version,
+                        claim.normalization_confidence,
                         timestamp,
                         timestamp,
                     )
@@ -291,7 +532,10 @@ class LiteratureMapRepository:
                         id, project_id, source_paper_id, relation_type, target_id,
                         target_type, qualifiers_json, evidence_refs_json, confidence,
                         status, extractor_version, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        , raw_relation_type, canonical_relation_type,
+                        normalizer_version, normalization_confidence,
+                        resolution_method
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -310,6 +554,11 @@ class LiteratureMapRepository:
                             relation.extractor_version,
                             timestamp,
                             timestamp,
+                            relation.raw_relation_type or relation.relation_type,
+                            relation.canonical_relation_type or relation.relation_type,
+                            relation.normalizer_version,
+                            relation.normalization_confidence,
+                            relation.resolution_method,
                         )
                         for relation in relations
                     ],
@@ -434,6 +683,70 @@ class LiteratureMapRepository:
             ).fetchall()
         return [self._row_to_relation(row) for row in rows]
 
+    def rewrite_relations(
+        self,
+        source_paper_ids: list[str],
+        relations: list[LiteratureRelation],
+        *,
+        project_id: str = "",
+    ) -> None:
+        """原子重写指定来源的关系，用于无模型的解析和规范化迁移。"""
+
+        normalized = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in source_paper_ids
+                if str(value or "").strip()
+            )
+        )
+        if not normalized:
+            return
+        placeholders = ", ".join("?" for _ in normalized)
+        timestamp = _now()
+        with self.connect() as connection:
+            connection.execute(
+                f"""
+                DELETE FROM literature_relations
+                WHERE project_id = ? AND source_paper_id IN ({placeholders})
+                """,
+                [project_id, *normalized],
+            )
+            connection.executemany(
+                """
+                INSERT INTO literature_relations (
+                    id, project_id, source_paper_id, relation_type, target_id,
+                    target_type, qualifiers_json, evidence_refs_json, confidence,
+                    status, extractor_version, created_at, updated_at,
+                    raw_relation_type, canonical_relation_type,
+                    normalizer_version, normalization_confidence,
+                    resolution_method
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        relation.id,
+                        relation.project_id,
+                        relation.source_paper_id,
+                        relation.relation_type,
+                        relation.target_id,
+                        relation.target_type,
+                        _json(relation.qualifiers),
+                        _json([item.to_dict() for item in relation.evidence_refs]),
+                        relation.confidence,
+                        relation.status,
+                        relation.extractor_version,
+                        timestamp,
+                        timestamp,
+                        relation.raw_relation_type or relation.relation_type,
+                        relation.canonical_relation_type or relation.relation_type,
+                        relation.normalizer_version,
+                        relation.normalization_confidence,
+                        relation.resolution_method,
+                    )
+                    for relation in relations
+                ],
+            )
+
     @staticmethod
     def _row_to_card(
         row: sqlite3.Row,
@@ -466,10 +779,23 @@ class LiteratureMapRepository:
                         for item in json.loads(claim["evidence_refs_json"] or "[]")
                         if isinstance(item, dict)
                     ],
+                    raw_kind=str(claim["raw_kind"] or claim["kind"]),
+                    canonical_kind=str(
+                        claim["canonical_kind"] or claim["kind"]
+                    ),
+                    normalizer_version=str(claim["normalizer_version"] or ""),
+                    normalization_confidence=float(
+                        claim["normalization_confidence"] or 0
+                    ),
                 )
                 for claim in claim_rows
             ],
             status=str(row["status"]),
+            canonical_facets=json.loads(row["canonical_facets_json"] or "{}"),
+            metadata_warnings=json.loads(row["metadata_warnings_json"] or "[]"),
+            metadata_provenance=json.loads(
+                row["metadata_provenance_json"] or "{}"
+            ),
         )
 
     @staticmethod
@@ -490,6 +816,17 @@ class LiteratureMapRepository:
             confidence=float(row["confidence"]),
             status=str(row["status"]),
             extractor_version=str(row["extractor_version"]),
+            raw_relation_type=str(
+                row["raw_relation_type"] or row["relation_type"]
+            ),
+            canonical_relation_type=str(
+                row["canonical_relation_type"] or row["relation_type"]
+            ),
+            normalizer_version=str(row["normalizer_version"] or ""),
+            normalization_confidence=float(
+                row["normalization_confidence"] or 0
+            ),
+            resolution_method=str(row["resolution_method"] or ""),
         )
 
 

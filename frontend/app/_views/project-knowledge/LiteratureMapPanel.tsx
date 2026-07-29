@@ -21,6 +21,7 @@ type LiteratureMapPanelProps = {
 const STATUS_LABELS: Record<LiteratureMapSnapshot["status"], string> = {
   empty: "尚未生成",
   ready: "已更新",
+  partial: "部分完成",
   stale: "有文献变化",
   building: "正在构建",
   failed: "构建失败",
@@ -30,6 +31,7 @@ function actionLabel(snapshot: LiteratureMapSnapshot | null, isBuilding: boolean
   if (isBuilding || snapshot?.status === "building") return "正在构建...";
   if (!snapshot || snapshot.status === "empty") return "生成文献地图";
   if (snapshot.status === "stale") return "更新文献地图";
+  if (snapshot.status === "partial") return "继续构建";
   return "重新构建";
 }
 
@@ -167,6 +169,11 @@ export function LiteratureMapPanel({
       </header>
 
       {error ? <div className={styles.error}>{error}</div> : null}
+      {snapshot?.status === "partial" ? (
+        <div className={styles.notice}>
+          {snapshot.failedPaperCount} 篇待继续构建
+        </div>
+      ) : null}
       {modelConfigured === false ? <div className={styles.notice}>请先完成模型配置。</div> : null}
       {modelConfigured === true && readyPaperCount === 0 ? (
         <div className={styles.notice}>暂无可分析文献。</div>
