@@ -1,28 +1,27 @@
-# Backend module boundaries
+# 后端模块边界
 
-The backend is organized by responsibility rather than by framework entrypoint:
+后端按照职责组织，而不是按照框架入口组织：
 
-- `api/routes/`: HTTP validation and response mapping only. Routers do not own persistence.
-- `api/streaming.py`: bounded adapter between synchronous jobs and NDJSON responses.
-- `services/domain_tree_jobs.py`: background task lifecycle and cancellation.
-- `services/model_client.py`, `services/mineru.py`, `services/providers/`: external service clients.
-- `services/model_config.py`, `services/embedding_store.py`, catalog services: persistence and configuration stores.
-- `services/project_repository.py`: project metadata and project-to-paper membership persistence.
-- `services/project_scope.py`: trusted project corpus projection for domain analysis and research retrieval.
-- `agents/`: research workflows and domain orchestration.
-- `schemas/`: transport and domain data models.
+- `api/routes/`：只负责 HTTP 校验和响应映射，Router 不负责持久化；
+- `api/streaming.py`：同步任务与 NDJSON 响应之间的有界适配器；
+- `services/domain_tree_jobs.py`：负责后台任务生命周期和取消；
+- `services/model_client.py`、`services/mineru.py`、`services/providers/`：负责外部服务调用；
+- `services/model_config.py`、`services/embedding_store.py` 和目录服务：负责持久化与配置存储；
+- `services/project_repository.py`：负责项目元数据以及项目与论文成员关系的持久化；
+- `services/project_scope.py`：为领域分析和研究检索投影可信的项目语料范围；
+- `agents/`：负责研究工作流和领域编排；
+- `schemas/`：存放传输层和领域数据模型。
 
-`app/main.py` is the composition root. New endpoints belong in a feature router;
-new network integrations belong in a service client; durable state belongs in a
-store/repository; domain decisions belong in an agent or domain service.
+`app/main.py` 是 composition root。新 endpoint 应放入对应的 feature router；新的网络集成应封装为
+service client；持久状态应由 store/repository 管理；领域决策应放入 agent 或 domain service。
 
-## Project isolation boundary
+## 项目隔离边界
 
 项目是论文分析的隔离单位。`ProjectRepository` 决定项目论文成员，领域树 Agent 只能消费该成员集合；
 领域树、知识图谱、语义缓存和后台任务均以稳定的项目 ID 分区。研究问答在进入检索管线前由
 `ProjectScopeService` 过滤论文 ID、历史来源和精确分块引用，生成器和检索器不得自行回退到全局论文。
 
-## Research answer pipeline
+## 研究问答管线
 
 研究问答管线按单一职责依次组合，Agent 只保留兼容门面和流程协调：
 
@@ -40,7 +39,7 @@ store/repository; domain decisions belong in an agent or domain service.
 允许的主依赖方向为：上下文 → 问题契约 → 结构索引 → 候选召回 → 证据组装 →
 证据评估 → 检索补偿或答案生成 → 落地验证。下游组件不得反向修改上游契约。
 
-## Deprecated implementations
+## 已废弃实现
 
-The unused `services/minure.py` and `services/mineru_convert.py` prototypes were
-removed. `services/mineru.py` is the sole supported MinerU integration.
+未使用的 `services/minure.py` 和 `services/mineru_convert.py` 原型已经移除。
+`services/mineru.py` 是当前唯一受支持的 MinerU 集成。
