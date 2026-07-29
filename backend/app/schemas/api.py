@@ -96,6 +96,14 @@ class DomainTreeResumeOptions(BaseModel):
     )
 
 
+class LiteratureMapBuildOptions(BaseModel):
+    force: bool = False
+
+
+class LiteratureMapBuildRequest(LiteratureMapBuildOptions):
+    project_id: str = Field(..., min_length=1)
+
+
 class KnowledgeRevisionRequest(BaseModel):
     revision: int = Field(..., ge=0)
 
@@ -199,6 +207,7 @@ class OrchestratorRequest(BaseModel):
 __all__ = [
     "CleanupMissingPdfsRequest", "DatasetDownloadRequest", "DeduplicatePapersRequest", "DeletePapersRequest",
     "DomainTreeGenerateOptions", "DomainTreeGenerateRequest", "DomainTreeNodeUpdateRequest",
+    "LiteratureMapBuildOptions", "LiteratureMapBuildRequest",
     "KnowledgeEntityUpdateRequest", "KnowledgeRelationUpdateRequest", "KnowledgeRevisionRequest",
     "ImportPaperRequest", "ManualPdfLinkRequest",
     "EnvConfigUpdateRequest", "ExternalServiceConnectionTestRequest", "ModelConfigRequest", "ModelConnectionTestRequest", "ModelDiscoveryRequest", "OrchestratorRequest",

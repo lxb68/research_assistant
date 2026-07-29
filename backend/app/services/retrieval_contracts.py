@@ -45,6 +45,16 @@ EVIDENCE_INTENTS = {
     "synthesis",
 }
 
+REQUIREMENT_KINDS = {
+    "point",
+    "chronology",
+    "comparison",
+    "catalog",
+    "mechanism",
+    "evaluation",
+    "synthesis",
+}
+
 QUESTION_EVIDENCE_INTENT = {
     "simple_fact": "fact",
     "mechanism": "mechanism",
@@ -92,16 +102,136 @@ def normalize_requirement(value: Any, index: int, *, question_type: str) -> dict
         )
     except (TypeError, ValueError):
         minimum_direct_evidence = 1
+    requirement_id = str(item.get("id") or f"req-{index}")[:80]
+    kind = str(
+        item.get("kind")
+        or item.get("requirement_kind")
+        or item.get("requirementKind")
+        or "point"
+    ).strip().casefold()
+    if kind not in REQUIREMENT_KINDS:
+        kind = "point"
+    preferred_section_types = normalize_section_types(
+        item.get("preferred_section_types") or item.get("preferredSectionTypes") or []
+    )
+    coverage_slots: list[dict[str, Any]] = []
+    raw_slots = item.get("coverage_slots") or item.get("coverageSlots") or []
+    for slot_index, raw_slot in enumerate(
+        (raw_slots if isinstance(raw_slots, list) else [])[:6],
+        1,
+    ):
+        if not isinstance(raw_slot, dict):
+            continue
+        slot_description = str(
+            raw_slot.get("description")
+            or raw_slot.get("goal")
+            or raw_slot.get("role")
+            or ""
+        ).strip()
+        if not slot_description:
+            continue
+        try:
+            slot_minimum = int(
+                raw_slot.get("minimum_direct_evidence")
+                or raw_slot.get("minimumDirectEvidence")
+                or 1
+            )
+        except (TypeError, ValueError):
+            slot_minimum = 1
+        coverage_slots.append(
+            {
+                "id": str(
+                    raw_slot.get("id") or f"{requirement_id}-slot-{slot_index}"
+                )[:100],
+                "parentRequirementId": requirement_id,
+                "description": slot_description[:800],
+                "role": str(raw_slot.get("role") or "evidence")[:80],
+                "minimumDirectEvidence": max(1, min(slot_minimum, 4)),
+                "preferredSectionTypes": normalize_section_types(
+                    raw_slot.get("preferred_section_types")
+                    or raw_slot.get("preferredSectionTypes")
+                    or preferred_section_types
+                ),
+                "queryHint": str(
+                    raw_slot.get("query_hint") or raw_slot.get("queryHint") or ""
+                )[:1000],
+            }
+        )
+    if not coverage_slots:
+        coverage_slots = [
+            {
+                "id": requirement_id,
+                "parentRequirementId": requirement_id,
+                "description": description[:800],
+                "role": "evidence",
+                "minimumDirectEvidence": max(1, min(minimum_direct_evidence, 4)),
+                "preferredSectionTypes": preferred_section_types,
+                "queryHint": "",
+            }
+        ]
+    try:
+        minimum_distinct_sources = int(
+            item.get("minimum_distinct_sources")
+            or item.get("minimumDistinctSources")
+            or (min(2, len(coverage_slots)) if kind == "chronology" else 1)
+        )
+    except (TypeError, ValueError):
+        minimum_distinct_sources = 1
+    try:
+        minimum_distinct_periods = int(
+            item.get("minimum_distinct_periods")
+            or item.get("minimumDistinctPeriods")
+            or (min(2, len(coverage_slots)) if kind == "chronology" else 0)
+        )
+    except (TypeError, ValueError):
+        minimum_distinct_periods = 0
     return {
-        "id": str(item.get("id") or f"req-{index}")[:80],
+        "id": requirement_id,
         "description": description[:800],
+        "kind": kind,
         "evidenceIntent": evidence_intent,
-        "preferredSectionTypes": normalize_section_types(
-            item.get("preferred_section_types") or item.get("preferredSectionTypes") or []
-        ),
+        "preferredSectionTypes": preferred_section_types,
         "minimumDirectEvidence": max(1, min(minimum_direct_evidence, 4)),
+        "coverageSlots": coverage_slots,
+        "minimumDistinctSources": max(
+            1,
+            min(minimum_distinct_sources, len(coverage_slots), 6),
+        ),
+        "minimumDistinctPeriods": max(
+            0,
+            min(minimum_distinct_periods, len(coverage_slots), 6),
+        ),
         "required": item.get("required") is not False,
     }
+
+
+def flatten_requirement_slots(
+    requirements: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """把父级回答要求展开为可独立验证和补偿检索的原子覆盖槽位。"""
+    slots: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for requirement in requirements:
+        parent_id = str(requirement.get("id") or "")
+        for raw_slot in requirement.get("coverageSlots") or []:
+            if not isinstance(raw_slot, dict):
+                continue
+            slot_id = str(raw_slot.get("id") or "")
+            if not slot_id or slot_id in seen:
+                continue
+            seen.add(slot_id)
+            slots.append(
+                {
+                    **raw_slot,
+                    "id": slot_id,
+                    "parentRequirementId": parent_id,
+                    "requirementKind": str(requirement.get("kind") or "point"),
+                    "evidenceIntent": str(
+                        requirement.get("evidenceIntent") or "fact"
+                    ),
+                }
+            )
+    return slots
 
 
 def requires_semantic_validation(plan: dict[str, Any]) -> bool:
@@ -160,6 +290,7 @@ __all__ = [
     "EVIDENCE_INTENTS",
     "SECTION_TYPES",
     "compile_tfidf_query",
+    "flatten_requirement_slots",
     "normalize_execution_complexity",
     "normalize_requirement",
     "normalize_section_types",

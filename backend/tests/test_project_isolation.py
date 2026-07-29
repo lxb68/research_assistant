@@ -13,6 +13,7 @@ from app.agents.domainTree_agent import DomainTreeAgent
 from app.services.paper_repository import PaperRepository
 from app.services.domain_tree_store import DomainTreeStore
 from app.services.project_repository import DEFAULT_PROJECT_ID, ProjectRepository
+from app.services.project_research_context import ProjectResearchContextService
 from app.services.project_scope import ProjectScopeService
 
 
@@ -191,6 +192,49 @@ class ProjectIsolationTest(unittest.TestCase):
         self.assertEqual(arguments["authorized_paper_ids"], ["paper-a", "paper-b"])
         self.assertEqual(arguments["project_paper_ids"], ["paper-a", "paper-b"])
         self.assertEqual(arguments["graph_project_id"], "")
+
+    def test_research_context_projects_domain_tree_as_non_evidence_profile(self) -> None:
+        project = self.projects.create(name="项目 A", paper_ids=["paper-a"])
+        analysis_dir = self.root / "domain_tree" / project["id"]
+        analysis_dir.mkdir(parents=True)
+        (analysis_dir / "domain_tree.json").write_text(
+            json.dumps(
+                {
+                    "projectId": project["id"],
+                    "graphStatus": "pending",
+                    "domainTree": [
+                        {
+                            "label": "Secure Model Evaluation",
+                            "child": [{"label": "Training on Protected Data"}],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        arguments = ProjectResearchContextService(
+            self.database,
+            self.root / "domain_tree",
+        ).build_arguments(
+            project_id=project["id"],
+            project_ids=[project["id"]],
+            requested_paper_ids=[],
+            history=[],
+        )
+
+        profile = arguments["scope_profile"]
+        self.assertFalse(profile["allowedAsAnswerEvidence"])
+        self.assertEqual(
+            [item["label"] for item in profile["anchors"]],
+            ["Secure Model Evaluation", "Training on Protected Data"],
+        )
+        self.assertEqual(
+            [item["recordId"] for item in profile["documents"]],
+            ["paper-a"],
+        )
+        self.assertTrue(profile["fingerprint"])
 
 
 if __name__ == "__main__":

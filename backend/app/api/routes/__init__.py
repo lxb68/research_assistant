@@ -2,6 +2,7 @@
 
 from .domain_tree import router as domain_tree_router
 from .jobs import router as jobs_router
+from .literature_map import router as literature_map_router
 from .mineru import router as mineru_router
 from .memory import router as memory_router
 from .papers import router as papers_router
@@ -21,6 +22,7 @@ ALL_ROUTERS = (
     projects_router,
     domain_tree_router,
     jobs_router,
+    literature_map_router,
     mineru_router,
     zotero_router,
     streaming_router,

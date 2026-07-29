@@ -15,11 +15,15 @@ from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAI
 from app.services.model_client import chat_completion
 from app.services.answer_composer import AnswerComposer
 from app.services.answer_policy import AnswerPolicy
+from app.services.candidate_coverage_evaluator import CandidateCoverageEvaluator
+from app.services.coverage_aware_evidence_selector import CoverageAwareEvidenceSelector
+from app.services.evidence_budget_policy import EvidenceBudgetPolicy
 from app.services.grounding_validator import GroundingValidator
 from app.services.hybrid_graph_retriever import HybridGraphRetriever
 from app.services.evidence_groups import (
     evidence_group_is_complete,
     evidence_group_key,
+    flatten_evidence_groups,
     group_evidence,
     limit_evidence_groups,
 )
@@ -27,6 +31,7 @@ from app.services.rag_factory import build_default_rag_retriever
 from app.services.rag_retriever import EvidenceChunk, RAGRetriever
 from app.services.retrieval_contracts import compile_tfidf_query, normalize_section_types
 from app.services.document_capabilities import filter_papers_by_requirements
+from app.services.document_candidate_retriever import DocumentCandidateRetriever
 from app.services.evidence_availability import EvidenceAvailabilityEvaluator
 
 
@@ -38,6 +43,7 @@ class ResearchAgentConfig:
     """集中描述研究问答代理的运行参数。"""
     max_papers: int = settings.research_agent_max_papers
     max_sources: int = settings.research_agent_max_sources
+    max_evidence_groups: int = settings.research_agent_max_evidence_groups
     target_chunk_tokens: int = settings.rag_chunk_target_tokens
     max_chunk_tokens: int = settings.rag_chunk_max_tokens
     overlap_tokens: int = settings.rag_chunk_overlap_tokens
@@ -80,6 +86,10 @@ class ResearchChatAgent:
         )
         self.answer_policy = AnswerPolicy()
         self.grounding_validator = GroundingValidator()
+        self.evidence_budget_policy = EvidenceBudgetPolicy()
+        self.candidate_coverage_evaluator = CandidateCoverageEvaluator()
+        self.coverage_aware_selector = CoverageAwareEvidenceSelector()
+        self.document_candidate_retriever = DocumentCandidateRetriever()
 
     def run(
         self,
@@ -215,6 +225,7 @@ class ResearchChatAgent:
         retrieval_query: str | None = None,
         target_chunks: list[dict[str, Any]] | None = None,
         retrieval_facets: list[dict[str, Any]] | None = None,
+        requirement_specs: list[dict[str, Any]] | None = None,
         question_type: str = "simple_fact",
         target_evidence_count: int | None = None,
         existing_evidence: list[dict[str, Any]] | None = None,
@@ -227,10 +238,36 @@ class ResearchChatAgent:
         papers = self._load_papers(paper_ids)
         query = str(retrieval_query or normalized_question).strip()
         facets = [dict(item) for item in retrieval_facets or [] if isinstance(item, dict)]
-        desired_count = max(
-            settings.orchestrator_min_evidence,
-            min(int(target_evidence_count or settings.orchestrator_min_evidence), self.config.max_sources),
+        requirements = [
+            dict(item)
+            for item in requirement_specs or []
+            if isinstance(item, dict) and item.get("required") is not False
+        ]
+        document_shortlist = getattr(
+            self,
+            "document_candidate_retriever",
+            DocumentCandidateRetriever(),
+        ).shortlist(
+            papers,
+            query=query,
+            retrieval_facets=facets,
+            requirement_specs=requirements,
+            limit=self.config.max_papers,
         )
+        papers = document_shortlist.papers
+        budget_policy = getattr(self, "evidence_budget_policy", EvidenceBudgetPolicy())
+        budget = budget_policy.resolve(
+            question_type=question_type,
+            requirement_specs=requirements,
+            requested_target=target_evidence_count,
+            maximum_context_chars=self.config.max_context_chars,
+            maximum_groups=getattr(
+                self.config,
+                "max_evidence_groups",
+                settings.research_agent_max_evidence_groups,
+            ),
+        )
+        desired_count = budget.target_groups
         if facets:
             evidence, retrieval_diagnostics = self._retrieve_facets(
                 papers,
@@ -238,6 +275,7 @@ class ResearchChatAgent:
                 question_type=question_type,
                 target_evidence_count=desired_count,
                 existing_evidence=existing_evidence or [],
+                defer_selection=bool(requirements),
             )
         else:
             evidence = self.retriever.retrieve(
@@ -248,10 +286,17 @@ class ResearchChatAgent:
             retrieval_diagnostics = dict(self.retriever.last_diagnostics)
         if existing_evidence:
             # 工具命中只作为候选种子；本轮重新检索的完整证据优先保留正文与结构元数据。
+            seeded_evidence = []
+            for raw_item in existing_evidence:
+                if not isinstance(raw_item, dict):
+                    continue
+                item = dict(raw_item)
+                item["existing_evidence"] = True
+                seeded_evidence.append(item)
             evidence = self.graph_retriever.merge_evidence(
-                [*evidence, *[dict(item) for item in existing_evidence if isinstance(item, dict)]],
+                [*evidence, *seeded_evidence],
                 [],
-                limit=desired_count,
+                limit=max(desired_count, len(group_evidence([*evidence, *seeded_evidence]))),
             )
         text_evidence_count = len(evidence)
         try:
@@ -277,20 +322,81 @@ class ResearchChatAgent:
         evidence = self.graph_retriever.merge_evidence(
             evidence,
             graph_evidence,
-            limit=desired_count,
+            limit=(
+                max(desired_count, len(group_evidence([*evidence, *graph_evidence])))
+                if requirements
+                else desired_count
+            ),
         )
         resolved_target_evidence = self.retriever.resolve_chunk_references(papers, target_chunks or [])
         if resolved_target_evidence:
             merged: list[dict[str, Any]] = []
             seen: set[tuple[str, int]] = set()
-            for item in [*resolved_target_evidence, *evidence]:
+            resolved_keys = {
+                (
+                    str(item.get("record_id") or ""),
+                    int(item.get("chunk_index") or 0),
+                )
+                for item in resolved_target_evidence
+            }
+            for raw_item in [*resolved_target_evidence, *evidence]:
+                item = dict(raw_item)
                 key = (str(item.get("record_id") or ""), int(item.get("chunk_index") or 0))
+                if key in resolved_keys:
+                    item["selection_locked"] = True
                 if key in seen:
                     continue
                 seen.add(key)
                 merged.append(item)
             # max_sources 约束逻辑证据数量；连续结构的成员不能在这里被再次截断。
-            evidence = limit_evidence_groups(merged, max_groups=self.config.max_sources)
+            evidence = (
+                merged
+                if requirements
+                else limit_evidence_groups(merged, max_groups=self.config.max_sources)
+            )
+
+        selection_diagnostics: dict[str, Any] = {}
+        coverage_validation_error = ""
+        if requirements and evidence:
+            model = ModelConfigStore().build_model_payload()
+            if model:
+                try:
+                    coverage_evaluator = getattr(
+                        self,
+                        "candidate_coverage_evaluator",
+                        CandidateCoverageEvaluator(),
+                    )
+                    coverage_matrix, _ = coverage_evaluator.evaluate(
+                        evidence,
+                        requirements,
+                        question=query,
+                        question_type=question_type,
+                        completion=chat_completion,
+                        model=model,
+                        timeout=self.config.request_timeout,
+                    )
+                    evidence = coverage_evaluator.annotate(evidence, coverage_matrix)
+                except Exception as error:
+                    coverage_validation_error = str(error)
+                    self._log(f"候选证据语义覆盖判定失败，将保留检索候选并由最终验证器兜底：{error}")
+            else:
+                coverage_validation_error = "模型未配置"
+
+            selector = getattr(
+                self,
+                "coverage_aware_selector",
+                CoverageAwareEvidenceSelector(),
+            )
+            selection = selector.select(evidence, budget=budget)
+            evidence = selection.evidence
+            selection_diagnostics = dict(selection.diagnostics)
+            selection_diagnostics["candidateCoverageValidated"] = not bool(
+                coverage_validation_error
+            )
+            if coverage_validation_error:
+                selection_diagnostics["candidateCoverageValidationError"] = (
+                    coverage_validation_error
+                )
         availability = EvidenceAvailabilityEvaluator().evaluate(
             papers,
             evidence,
@@ -299,6 +405,8 @@ class ResearchChatAgent:
         diagnostics = {
             **retrieval_diagnostics,
             **availability,
+            **selection_diagnostics,
+            "documentShortlisting": document_shortlist.diagnostics,
             "hybridRetrieval": {
                 "textEvidenceCount": text_evidence_count,
                 "graphEvidenceCount": len(graph_evidence),
@@ -338,6 +446,7 @@ class ResearchChatAgent:
         question_type: str,
         target_evidence_count: int,
         existing_evidence: list[dict[str, Any]],
+        defer_selection: bool = False,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """执行多路 facet 检索，并按来源章节和覆盖维度融合结果。"""
         merged: dict[tuple[str, int], dict[str, Any]] = {}
@@ -384,7 +493,11 @@ class ResearchChatAgent:
             retrieval_runs.append(run_diagnostics)
             # per_facet_limit 限制逻辑证据组，而不是物理 chunk 数；否则底层刚补齐的
             # 算法/表格后半段会在这里被切掉。
-            facet_groups = group_evidence(results)[:per_facet_limit]
+            facet_groups = (
+                group_evidence(results)
+                if defer_selection
+                else group_evidence(results)[:per_facet_limit]
+            )
             for rank, group in enumerate(facet_groups, start=1):
                 for raw_item in group:
                     item = dict(raw_item)
@@ -433,6 +546,72 @@ class ResearchChatAgent:
             key=lambda group: max(float(item.get("fusion_score") or 0) for item in group),
             reverse=True,
         )
+        if defer_selection:
+            candidates = flatten_evidence_groups(ranked_groups)
+            requested_facet_ids = {
+                str(item.get("id") or "")
+                for item in facets
+                if str(item.get("id") or "")
+            }
+            selected_facet_ids = {
+                str(facet_id)
+                for item in candidates
+                for facet_id in item.get("matched_facet_ids") or []
+                if str(facet_id)
+            }
+            query_coverages = [
+                float(item.get("queryCoverage") or 0)
+                for item in retrieval_runs
+            ]
+            return candidates, {
+                "retrievalMode": "+".join(
+                    dict.fromkeys(
+                        str(item.get("retrievalMode") or "")
+                        for item in retrieval_runs
+                    )
+                ),
+                "embeddingBackend": "+".join(
+                    dict.fromkeys(
+                        str(item.get("embeddingBackend") or "")
+                        for item in retrieval_runs
+                    )
+                ),
+                "embeddingFailures": list(
+                    dict.fromkeys(
+                        str(failure)
+                        for item in retrieval_runs
+                        for failure in item.get("embeddingFailures") or []
+                    )
+                ),
+                "chunkingStrategy": "mineru_structure_semantic_token_overlap",
+                "candidateCount": max(
+                    (
+                        int(item.get("candidateCount") or 0)
+                        for item in retrieval_runs
+                    ),
+                    default=0,
+                ),
+                "candidateEvidenceGroupCount": len(ranked_groups),
+                "candidateEvidenceCount": len(candidates),
+                "queryCoverage": round(
+                    sum(query_coverages) / max(1, len(query_coverages)),
+                    4,
+                ),
+                "facetCount": len(requested_facet_ids),
+                "retrievalFacetCoverage": round(
+                    len(requested_facet_ids & selected_facet_ids)
+                    / max(1, len(requested_facet_ids)),
+                    4,
+                ),
+                "coveredFacetIds": sorted(
+                    requested_facet_ids & selected_facet_ids
+                ),
+                "missingFacetIds": sorted(
+                    requested_facet_ids - selected_facet_ids
+                ),
+                "retrievalRuns": retrieval_runs,
+                "selectionDeferredForSemanticCoverage": True,
+            }
         selected: list[dict[str, Any]] = []
         selected_keys: set[tuple[str, int]] = set()
         per_section: dict[tuple[str, str], int] = {}
@@ -580,7 +759,8 @@ class ResearchChatAgent:
             if preferred_types & {"method", "protocol", "algorithm", "implementation"}:
                 additions.append("method protocol algorithm implementation detailed steps")
         elif question_type == "evaluation":
-            additions.append("experiment evaluation result metrics comparison")
+            # 章节偏好已由 section_score_adjuster 表达，避免把统一实验词注入所有 facet 查询。
+            pass
         return "\n".join([query, *additions]).strip()
 
     @staticmethod
@@ -684,6 +864,7 @@ class ResearchChatAgent:
         history: list[dict[str, str]] | None,
         *,
         explicit_paper_ids: list[str] | None = None,
+        scope_profile: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str]:
         """兼容原入口，并把实际规划委托给独立 QueryPlanningAgent。"""
         model = ModelConfigStore().build_model_payload()
@@ -694,7 +875,12 @@ class ResearchChatAgent:
             model=model,
             timeout=self.config.request_timeout,
         )
-        return planner.plan(question, history, explicit_paper_ids=explicit_paper_ids)
+        return planner.plan(
+            question,
+            history,
+            explicit_paper_ids=explicit_paper_ids,
+            scope_profile=scope_profile,
+        )
 
     def _load_papers(self, paper_ids: list[str] | None) -> list[dict[str, Any]]:
         """加载论文。"""

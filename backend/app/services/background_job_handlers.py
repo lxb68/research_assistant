@@ -3,17 +3,31 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
 from app.agents import DomainTreeAgent, HunterAgent, OrchestratorAgent
 from app.agents.domainTree_agent import KnowledgeGraphQualityError
 from app.core.config import settings
-from app.schemas.api import DatasetDownloadRequest, DomainTreeGenerateRequest, ResearchChatRequest
+from app.schemas.api import (
+    DatasetDownloadRequest,
+    DomainTreeGenerateRequest,
+    LiteratureMapBuildRequest,
+    ResearchChatRequest,
+)
 from app.services.background_jobs import BackgroundJobContext, BackgroundJobManager
 from app.services.conversations import conversation_store
 from app.services.model_config import ModelConfigStore
-from app.services.project_scope import ProjectScopeService
+from app.services.model_client import ModelCallError, chat_completion_result
+from app.services.literature_map import (
+    LiteratureMapExtractor,
+    LiteratureMapProjectService,
+    LiteratureMapRepository,
+)
+from app.services.paper_repository import PaperRepository
+from app.services.project_repository import ProjectRepository
+from app.services.project_research_context import ProjectResearchContextService
 from app.services.research_memory import research_memory_store
 from app.services.zotero_sync import ZoteroSyncService
 
@@ -101,7 +115,10 @@ def _semantic_recovery_details(
 
 
 def _research_arguments(payload: ResearchChatRequest) -> dict[str, Any]:
-    arguments = ProjectScopeService(settings.hunter_metadata_db).build_research_arguments(
+    arguments = ProjectResearchContextService(
+        settings.hunter_metadata_db,
+        Path(settings.backend_storage_dir) / "domain_tree",
+    ).build_arguments(
         project_id=payload.project_id,
         project_ids=payload.project_ids,
         requested_paper_ids=payload.paper_ids,
@@ -368,6 +385,93 @@ def _zotero_sync(context: BackgroundJobContext, raw: dict[str, Any]) -> dict[str
     ).sync(source_id, cancel_event=context.cancel_event)
 
 
+def _literature_map(context: BackgroundJobContext, raw: dict[str, Any]) -> dict[str, Any]:
+    payload = LiteratureMapBuildRequest.model_validate(raw)
+    project_id = payload.project_id
+    model_payload = ModelConfigStore().build_model_payload()
+    if not model_payload:
+        raise ValueError("请先配置模型参数")
+
+    def completion(model: dict[str, Any], messages: list[dict[str, str]], **kwargs: Any) -> str:
+        started_at = time.monotonic()
+        try:
+            result = chat_completion_result(model, messages, **kwargs)
+        except ModelCallError as error:
+            usage = error.usage
+            context.record_model_call(
+                {
+                    "stage": "literature_map_extraction",
+                    "attempt": 1,
+                    "status": "failed",
+                    "errorCategory": error.category,
+                    "httpStatus": error.http_status,
+                    "requestAccepted": error.request_accepted,
+                    "requestId": error.request_id,
+                    "finishReason": error.finish_reason,
+                    "promptTokens": usage.prompt_tokens,
+                    "completionTokens": usage.completion_tokens,
+                    "totalTokens": usage.total_tokens,
+                    "cachedTokens": usage.cached_tokens,
+                    "reasoningTokens": usage.reasoning_tokens,
+                    "elapsedMs": (time.monotonic() - started_at) * 1000,
+                }
+            )
+            raise
+        usage = result.usage
+        context.record_model_call(
+            {
+                "stage": "literature_map_extraction",
+                "attempt": 1,
+                "status": "success",
+                "requestId": result.request_id,
+                "finishReason": result.finish_reason,
+                "promptTokens": usage.prompt_tokens,
+                "completionTokens": usage.completion_tokens,
+                "totalTokens": usage.total_tokens,
+                "cachedTokens": usage.cached_tokens,
+                "reasoningTokens": usage.reasoning_tokens,
+                "elapsedMs": (time.monotonic() - started_at) * 1000,
+            }
+        )
+        return result.content
+
+    extractor = LiteratureMapExtractor(
+        completion=completion,
+        model=model_payload,
+        extractor_version=settings.literature_map_extractor_version,
+        timeout=settings.literature_map_timeout_seconds,
+    )
+    service = LiteratureMapProjectService(
+        projects=ProjectRepository(settings.hunter_metadata_db),
+        papers=PaperRepository(settings.hunter_metadata_db),
+        repository=LiteratureMapRepository(settings.literature_map_db),
+        extractor_version=settings.literature_map_extractor_version,
+    )
+
+    def report(completed: int, total: int, paper_id: str, outcome: str) -> None:
+        context.progress(
+            5 + int(completed * 90 / total),
+            stage="building_literature_map",
+            message=f"正在构建文献地图（{completed}/{total}）",
+            details={
+                "projectId": project_id,
+                "completedPapers": completed,
+                "totalPapers": total,
+                "currentPaperId": paper_id,
+                "currentOutcome": outcome,
+            },
+        )
+
+    result = service.build_project(
+        project_id,
+        extractor=extractor,
+        force=payload.force,
+        progress=report,
+        check_cancelled=context.check_cancelled,
+    )
+    return {**result, "modelUsage": context.model_usage_summary()}
+
+
 def register_background_job_handlers(manager: BackgroundJobManager) -> None:
     """在应用组合根注册业务处理器，避免调度器反向依赖 API 路由。"""
     manager.register("dataset_download", _dataset_download)
@@ -375,6 +479,7 @@ def register_background_job_handlers(manager: BackgroundJobManager) -> None:
     manager.register("domain_tree", _domain_tree)
     manager.register("pdf_import", _pdf_import)
     manager.register("zotero_sync", _zotero_sync)
+    manager.register("literature_map", _literature_map)
 
 
 __all__ = ["register_background_job_handlers"]

@@ -100,6 +100,17 @@ class Settings:
     background_job_ttl_hours = max(1, int(os.getenv("BACKGROUND_JOB_TTL_HOURS", "168")))
     background_job_max_history = max(1, int(os.getenv("BACKGROUND_JOB_MAX_HISTORY", "1000")))
     background_job_max_events_per_job = max(10, int(os.getenv("BACKGROUND_JOB_MAX_EVENTS_PER_JOB", "500")))
+    literature_map_db = os.getenv("LITERATURE_MAP_DB") or str(
+        BACKEND_DIR / "storage" / "metadata" / "literature_map.sqlite3",
+    )
+    literature_map_extractor_version = (
+        os.getenv("LITERATURE_MAP_EXTRACTOR_VERSION", "literature-map-v1").strip()
+        or "literature-map-v1"
+    )
+    literature_map_timeout_seconds = max(
+        10,
+        int(os.getenv("LITERATURE_MAP_TIMEOUT_SECONDS", "120")),
+    )
     conversation_db = os.getenv("CONVERSATION_DB") or str(
         BACKEND_DIR / "storage" / "metadata" / "conversations.sqlite3",
     )
@@ -207,6 +218,11 @@ class Settings:
     )
     research_agent_max_papers = int(os.getenv("RESEARCH_AGENT_MAX_PAPERS", "100"))
     research_agent_max_sources = int(os.getenv("RESEARCH_AGENT_MAX_SOURCES", "6"))
+    # 单次 facet 的候选召回量与最终回答证据量必须解耦。前者控制检索开销，
+    # 后者只是上下文安全护栏，实际选择数量由核心要求覆盖和上下文预算动态决定。
+    research_agent_max_evidence_groups = int(
+        os.getenv("RESEARCH_AGENT_MAX_EVIDENCE_GROUPS", "12")
+    )
     rag_chunk_target_tokens = int(os.getenv("RAG_CHUNK_TARGET_TOKENS", "500"))
     rag_chunk_max_tokens = int(os.getenv("RAG_CHUNK_MAX_TOKENS", "700"))
     rag_chunk_overlap_tokens = int(os.getenv("RAG_CHUNK_OVERLAP_TOKENS", "80"))
@@ -249,6 +265,24 @@ class Settings:
     orchestrator_max_action_rounds = int(os.getenv("ORCHESTRATOR_MAX_ACTION_ROUNDS", "5"))
     orchestrator_min_facet_coverage = float(os.getenv("ORCHESTRATOR_MIN_FACET_COVERAGE", "0.6"))
     orchestrator_min_method_evidence = int(os.getenv("ORCHESTRATOR_MIN_METHOD_EVIDENCE", "2"))
+    evidence_selection_coverage_weight = float(
+        os.getenv("EVIDENCE_SELECTION_COVERAGE_WEIGHT", "8.0")
+    )
+    evidence_selection_partial_weight = float(
+        os.getenv("EVIDENCE_SELECTION_PARTIAL_WEIGHT", "0.5")
+    )
+    evidence_selection_relevance_weight = float(
+        os.getenv("EVIDENCE_SELECTION_RELEVANCE_WEIGHT", "0.35")
+    )
+    evidence_selection_source_diversity_weight = float(
+        os.getenv("EVIDENCE_SELECTION_SOURCE_DIVERSITY_WEIGHT", "0.3")
+    )
+    evidence_selection_temporal_diversity_weight = float(
+        os.getenv("EVIDENCE_SELECTION_TEMPORAL_DIVERSITY_WEIGHT", "0.3")
+    )
+    evidence_selection_redundancy_weight = float(
+        os.getenv("EVIDENCE_SELECTION_REDUNDANCY_WEIGHT", "1.25")
+    )
     orchestrator_search_limit_per_source = int(os.getenv("ORCHESTRATOR_SEARCH_LIMIT_PER_SOURCE", "3"))
     error_recovery_max_cycles = int(os.getenv("ERROR_RECOVERY_MAX_CYCLES", "3"))
     error_recovery_base_delay_seconds = float(os.getenv("ERROR_RECOVERY_BASE_DELAY_SECONDS", "0.5"))

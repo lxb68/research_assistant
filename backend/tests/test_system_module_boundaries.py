@@ -87,6 +87,48 @@ def test_question_contract_structurally_binds_facets_to_core_requirements() -> N
     assert contract.invalidFacetRequirementIds == {"invalid": ["unknown"]}
 
 
+def test_question_contract_preserves_atomic_chronology_slots() -> None:
+    contract = QuestionContractBuilder().build(
+        {
+            "standalone_question": "梳理技术发展脉络",
+            "question_type": "synthesis",
+            "complexity": "complex",
+            "retrieval_facets": [
+                {
+                    "id": "timeline",
+                    "query": "technology history evolution",
+                    "requirement_ids": ["req-lineage"],
+                }
+            ],
+            "core_requirements": [
+                {
+                    "id": "req-lineage",
+                    "description": "梳理发展脉络",
+                    "kind": "chronology",
+                    "coverage_slots": [
+                        {"id": "early", "description": "早期方案", "role": "predecessor"},
+                        {"id": "middle", "description": "中间转折", "role": "transition"},
+                        {"id": "recent", "description": "近期方案", "role": "recent"},
+                    ],
+                    "minimum_distinct_sources": 2,
+                    "minimum_distinct_periods": 2,
+                }
+            ],
+        },
+        question="梳理技术发展脉络",
+        candidate_sources=[],
+    )
+
+    requirement = contract.requirementSpecs[0]
+    assert requirement["kind"] == "chronology"
+    assert [item["id"] for item in requirement["coverageSlots"]] == [
+        "early",
+        "middle",
+        "recent",
+    ]
+    assert contract.targetEvidenceCount >= 3
+
+
 def test_selected_full_text_availability_is_independent_of_corpus_completeness() -> None:
     diagnostics = EvidenceAvailabilityEvaluator().evaluate(
         [
@@ -294,3 +336,20 @@ def test_answer_policy_composer_and_grounding_validator_are_independent() -> Non
     assert result.valid is True
     assert result.cited_indices == {1}
     assert "核心覆盖目标" in completion.call_args.args[1][0]["content"]
+
+
+def test_grounding_validator_requires_inline_evidence_for_strong_claims() -> None:
+    invalid = GroundingValidator().validate(
+        "该方案首次实现完全同态训练。一般背景见文献 [1]。",
+        source_count=1,
+        retrieval_state={"enforceClaimConsistency": True},
+    )
+    valid = GroundingValidator().validate(
+        "论文作者声称该方案首次实现其设定下的完全同态训练 [1]。",
+        source_count=1,
+        retrieval_state={"enforceClaimConsistency": True},
+    )
+
+    assert invalid.valid is False
+    assert any("强声明" in reason for reason in invalid.reasons)
+    assert valid.valid is True

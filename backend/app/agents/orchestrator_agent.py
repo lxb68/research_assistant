@@ -19,7 +19,10 @@ from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
 from app.services.run_logger import RunLogger
 from app.services.task_control import TaskCancelled, raise_if_task_cancelled
-from app.services.retrieval_contracts import requires_semantic_validation
+from app.services.retrieval_contracts import (
+    flatten_requirement_slots,
+    requires_semantic_validation,
+)
 from app.services.retrieval_refiner import RetrievalRefiner
 from app.services.material_request_policy import MaterialRequestPolicy
 from app.services.answer_capability_contract import (
@@ -1252,6 +1255,11 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                     task,
                     history,
                     explicit_paper_ids=explicit_paper_ids or None,
+                    scope_profile=(
+                        dict(args.get("scope_profile"))
+                        if isinstance(args.get("scope_profile"), dict)
+                        else None
+                    ),
                 ),
                 cancel_event=cancel_event,
             )
@@ -1450,6 +1458,12 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             for item in args.get("retrieval_seed_evidence") or []
             if isinstance(item, dict)
         ]
+        requirement_specs = list(
+            plan.get("requirementSpecs")
+            or plan.get("coreRequirements")
+            or plan.get("answerRequirements")
+            or []
+        )
 
         self._log("正在判断本地知识库证据是否充分")
         self._progress(38, "retrieving", "正在检索所选知识库")
@@ -1464,6 +1478,8 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             "target_evidence_count": target_evidence_count,
             **({"graph_project_id": graph_project_id} if graph_project_id else {}),
         }
+        if requirement_specs:
+            retrieval_kwargs["requirement_specs"] = requirement_specs
         if retrieval_seed_evidence:
             retrieval_kwargs["existing_evidence"] = retrieval_seed_evidence
         evidence, diagnostics = await asyncio.to_thread(
@@ -1494,6 +1510,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 "semanticEvaluation": {
                     "facetAssessments": evaluation.get("facetAssessments", []),
                     "requirementAssessments": evaluation.get("requirementAssessments", []),
+                    "slotAssessments": evaluation.get("slotAssessments", []),
                 },
             },
         )
@@ -1513,18 +1530,23 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                 self._log("首轮证据存在覆盖缺口，正在执行一次补偿检索")
                 self._progress(66, "retrieving", "正在补偿检索证据缺口")
                 raise_if_task_cancelled(cancel_event)
+                refinement_kwargs: dict[str, Any] = {
+                    "history": history,
+                    "paper_ids": retrieval_paper_ids,
+                    "retrieval_query": retrieval_query,
+                    "target_chunks": target_chunks,
+                    "retrieval_facets": refinement_facets,
+                    "question_type": question_type,
+                    "target_evidence_count": target_evidence_count,
+                    "existing_evidence": evidence,
+                    **({"graph_project_id": project_id} if args.get("project_id") else {}),
+                }
+                if requirement_specs:
+                    refinement_kwargs["requirement_specs"] = requirement_specs
                 evidence, diagnostics = await asyncio.to_thread(
                     research_agent.retrieve_evidence,
                     task,
-                    history=history,
-                    paper_ids=retrieval_paper_ids,
-                    retrieval_query=retrieval_query,
-                    target_chunks=target_chunks,
-                    retrieval_facets=refinement_facets,
-                    question_type=question_type,
-                    target_evidence_count=target_evidence_count,
-                    existing_evidence=evidence,
-                    **({"graph_project_id": project_id} if args.get("project_id") else {}),
+                    **refinement_kwargs,
                 )
                 raise_if_task_cancelled(cancel_event)
                 self._progress(72, "validating", "正在验证补偿检索结果")
@@ -1630,15 +1652,20 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
 
             self._log("正在使用补充后的知识库重新评估证据")
             raise_if_task_cancelled(cancel_event)
+            post_search_kwargs: dict[str, Any] = {
+                "history": history,
+                "retrieval_query": retrieval_query,
+                "retrieval_facets": retrieval_facets,
+                "question_type": question_type,
+                "target_evidence_count": target_evidence_count,
+                "existing_evidence": evidence,
+            }
+            if requirement_specs:
+                post_search_kwargs["requirement_specs"] = requirement_specs
             evidence, diagnostics = await asyncio.to_thread(
                 research_agent.retrieve_evidence,
                 task,
-                history=history,
-                retrieval_query=retrieval_query,
-                retrieval_facets=retrieval_facets,
-                question_type=question_type,
-                target_evidence_count=target_evidence_count,
-                existing_evidence=evidence,
+                **post_search_kwargs,
             )
             raise_if_task_cancelled(cancel_event)
             evaluation = await self._evaluate_retrieved_evidence(
@@ -1723,6 +1750,10 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             for item in plan.get("requirementSpecs") or []
             if isinstance(item, dict)
         }
+        coverage_slot_specs = {
+            str(item.get("id") or ""): item
+            for item in flatten_requirement_slots(list(requirement_specs.values()))
+        }
         requirement_claims = [
             {
                 **item,
@@ -1736,20 +1767,51 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             for item in evaluation.get("requirementAssessments") or []
             if isinstance(item, dict)
         ]
+        slot_claims = [
+            {
+                **item,
+                "description": str(
+                    coverage_slot_specs.get(str(item.get("id") or ""), {}).get(
+                        "description"
+                    )
+                    or ""
+                ),
+                "role": str(
+                    coverage_slot_specs.get(str(item.get("id") or ""), {}).get(
+                        "role"
+                    )
+                    or ""
+                ),
+                "citationIndices": [
+                    evidence_indices[ref]
+                    for ref in item.get("supportingRefs") or []
+                    if ref in evidence_indices
+                ],
+            }
+            for item in evaluation.get("slotAssessments") or []
+            if isinstance(item, dict)
+        ]
         retrieval_state = {
             "fullTextAvailable": bool(diagnostics.get("fullTextAvailable")),
             "evidenceSufficient": sufficient,
+            "semanticValidated": bool(evaluation.get("semanticValidated")),
+            "candidateCoverageValidated": bool(
+                diagnostics.get("candidateCoverageValidated", not requirement_specs)
+            ),
             "evidenceCount": len(evidence),
             "candidateCount": int(diagnostics.get("candidateCount") or 0),
             "missingFacetIds": list(evaluation.get("missingFacetIds") or []),
             "missingRequirementIds": list(evaluation.get("missingRequirementIds") or []),
+            "missingSlotIds": list(evaluation.get("missingSlotIds") or []),
             "sectionMetadataDegraded": bool(diagnostics.get("sectionMetadataDegraded")),
             "requirementClaims": requirement_claims,
+            "slotClaims": slot_claims,
             "requiredCitationGroups": [
                 item["citationIndices"]
-                for item in requirement_claims
+                for item in [*requirement_claims, *slot_claims]
                 if item.get("status") == "supported" and item.get("citationIndices")
             ],
+            "enforceClaimConsistency": bool(slot_claims),
         }
         try:
             result, recovery_trace = await self.recovery.execute(
@@ -1870,6 +1932,7 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
                     "truncated": len(raw_response) > self.ROUTER_RAW_LOG_LIMIT,
                     "facetAssessments": semantic.get("facetAssessments", []),
                     "requirementAssessments": semantic.get("requirementAssessments", []),
+                    "slotAssessments": semantic.get("slotAssessments", []),
                     "answerable": semantic.get("answerable", False),
                 },
             )

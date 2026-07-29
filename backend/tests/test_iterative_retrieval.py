@@ -184,6 +184,45 @@ class QueryPlanningAndRetrievalTest(unittest.TestCase):
         self.assertEqual(diagnostics["incompleteStructureCount"], 0)
         self.assertEqual(diagnostics["selectedStructureCount"], 1)
 
+    def test_deferred_selection_keeps_lower_ranked_candidates_for_semantic_coverage(self) -> None:
+        """候选阶段不能按最终证据预算提前丢弃低检索分但可能补足要求的论文。"""
+        self.agent.retriever.last_diagnostics = {
+            "retrievalMode": "hybrid_tfidf",
+            "embeddingBackend": "tfidf",
+            "queryCoverage": 0.8,
+            "candidateCount": 6,
+        }
+        self.agent.retriever.retrieve.return_value = [
+            {
+                "record_id": f"paper-{index}",
+                "chunk_index": index,
+                "title": f"Paper {index}",
+                "section": "Method",
+                "text": f"candidate {index}",
+                "score": float(10 - index),
+            }
+            for index in range(1, 7)
+        ]
+
+        evidence, diagnostics = self.agent._retrieve_facets(
+            [{"id": f"paper-{index}"} for index in range(1, 7)],
+            [
+                {
+                    "id": "training",
+                    "goal": "训练路线",
+                    "query": "training lineage",
+                    "preferredSectionTypes": ["method"],
+                }
+            ],
+            question_type="synthesis",
+            target_evidence_count=2,
+            existing_evidence=[],
+            defer_selection=True,
+        )
+
+        self.assertEqual(len(evidence), 6)
+        self.assertTrue(diagnostics["selectionDeferredForSemanticCoverage"])
+
     def test_putting_everything_together_is_classified_as_overview(self) -> None:
         section_type = self.agent._classify_section_type("Paper Title > 4.6 Putting Everything Together")
         self.assertEqual(section_type, "overview")
@@ -339,6 +378,88 @@ Figure 7: Private GBDT Training Framework.
         self.assertEqual(semantic["missingFacetIds"], ["leaf-weight"])
         self.assertTrue(any(item["id"] == "leaf-weight" for item in semantic["refinementFacets"]))
         self.assertTrue(any(item["id"] == "requirement-req-1" for item in semantic["refinementFacets"]))
+
+    def test_semantic_evaluator_keeps_chronology_blocked_when_a_slot_is_missing(self) -> None:
+        completion = Mock(
+            return_value=json.dumps(
+                {
+                    "facets": [],
+                    "requirements": [
+                        {
+                            "id": "req-lineage",
+                            "status": "supported",
+                            "supporting_refs": ["recent:1"],
+                        }
+                    ],
+                    "coverage_slots": [
+                        {
+                            "id": "slot-predecessor",
+                            "status": "unsupported",
+                            "supporting_refs": [],
+                            "missing_detail": "缺少前序工作",
+                            "refinement_query": "earlier predecessor method",
+                        },
+                        {
+                            "id": "slot-recent",
+                            "status": "supported",
+                            "supporting_refs": ["recent:1"],
+                        },
+                    ],
+                    "optional_details": [],
+                },
+                ensure_ascii=False,
+            )
+        )
+        semantic, _ = EvidenceEvaluator().evaluate_semantic(
+            [
+                {
+                    "record_id": "recent",
+                    "chunk_index": 1,
+                    "title": "Recent",
+                    "year": "2024",
+                    "section": "Abstract",
+                    "text": "A recent method.",
+                }
+            ],
+            {
+                "standaloneQuestion": "发展脉络是什么？",
+                "questionType": "synthesis",
+                "retrievalFacets": [],
+                "requirementSpecs": [
+                    {
+                        "id": "req-lineage",
+                        "description": "说明发展脉络",
+                        "kind": "chronology",
+                        "coverageSlots": [
+                            {
+                                "id": "slot-predecessor",
+                                "description": "前序工作",
+                                "queryHint": "earlier predecessor method",
+                            },
+                            {"id": "slot-recent", "description": "近期工作"},
+                        ],
+                        "minimumDistinctSources": 2,
+                        "minimumDistinctPeriods": 2,
+                    }
+                ],
+            },
+            completion=completion,
+            model={"model": "test"},
+            timeout=30,
+        )
+
+        self.assertFalse(semantic["answerable"])
+        self.assertEqual(semantic["missingSlotIds"], ["slot-predecessor"])
+        self.assertEqual(
+            semantic["requirementAssessments"][0]["status"],
+            "partial",
+        )
+        self.assertTrue(
+            any(
+                item["query"] == "earlier predecessor method"
+                for item in semantic["refinementFacets"]
+            )
+        )
 
 
 class IterativeOrchestratorTest(unittest.IsolatedAsyncioTestCase):

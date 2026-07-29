@@ -84,6 +84,72 @@ class ResearchChatReferenceTest(unittest.TestCase):
 
     @patch("app.agents.research_chat_agent.chat_completion")
     @patch("app.agents.research_chat_agent.ModelConfigStore.build_model_payload")
+    def test_planner_uses_project_profile_and_rejects_invented_anchor(
+        self,
+        build_model_payload: Mock,
+        completion: Mock,
+    ) -> None:
+        """模糊术语可由项目画像消歧，但规划器不能编造画像锚点。"""
+        build_model_payload.return_value = {"model": "test-model"}
+
+        def complete(_model, messages, **_kwargs):
+            planner_payload = json.loads(messages[1]["content"])
+            self.assertFalse(
+                planner_payload["scope_profile"]["allowedAsAnswerEvidence"]
+            )
+            self.assertEqual(
+                planner_payload["scope_profile"]["anchors"][0]["label"],
+                "Protected Tree Evaluation",
+            )
+            return json.dumps(
+                {
+                    "standalone_question": "受保护树模型的推理与训练路线是什么？",
+                    "question_type": "synthesis",
+                    "complexity": "complex",
+                    "scope_mode": "corpus",
+                    "scope_anchor_ids": ["anchor-tree", "invented-anchor"],
+                    "retrieval_facets": [
+                        {
+                            "id": "facet-1",
+                            "goal": "推理路线",
+                            "query": "protected tree evaluation",
+                        },
+                        {
+                            "id": "facet-2",
+                            "goal": "训练路线",
+                            "query": "training on protected data",
+                        },
+                    ],
+                    "core_requirements": ["推理路线", "训练路线"],
+                    "needs_clarification": False,
+                },
+                ensure_ascii=False,
+            )
+
+        completion.side_effect = complete
+        plan, _ = self.agent.plan_retrieval(
+            "树推理和训练的路线是什么？",
+            [],
+            scope_profile={
+                "schemaVersion": 1,
+                "anchors": [
+                    {"id": "anchor-tree", "label": "Protected Tree Evaluation"}
+                ],
+                "documents": [
+                    {
+                        "recordId": "paper-1",
+                        "title": "Training on Protected Data",
+                    }
+                ],
+                "allowedAsAnswerEvidence": False,
+            },
+        )
+
+        self.assertEqual(plan["scopeAnchorIds"], ["anchor-tree"])
+        self.assertEqual(plan["invalidScopeAnchorIds"], ["invented-anchor"])
+
+    @patch("app.agents.research_chat_agent.chat_completion")
+    @patch("app.agents.research_chat_agent.ModelConfigStore.build_model_payload")
     def test_planner_rejects_hallucinated_source_ids(
         self,
         build_model_payload: Mock,

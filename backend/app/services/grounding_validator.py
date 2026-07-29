@@ -22,6 +22,12 @@ class GroundingValidator:
         re.compile(r"(?:无法|不能|未能).{0,20}(?:获取|访问|读取|检索).{0,12}(?:全文|full[ -]?text)", re.IGNORECASE),
         re.compile(r"(?:全文|full[ -]?text).{0,12}(?:不可用|不存在|unavailable|not available)", re.IGNORECASE),
     )
+    STRONG_CLAIM_PATTERN = re.compile(
+        r"(?:首次|首个|最快|最优|全面优于|至少\s*\d|"
+        r"\d+(?:\.\d+)?\s*(?:倍|%|％)|显著(?:提升|降低|优于)|"
+        r"\bfirst\b|\bfastest\b|\bstate[- ]of[- ]the[- ]art\b)",
+        re.IGNORECASE,
+    )
 
     def validate(self, answer: str, *, source_count: int, retrieval_state: dict[str, Any]) -> GroundingValidationResult:
         cited = self.extract_citation_indices(answer, source_count)
@@ -34,6 +40,15 @@ class GroundingValidator:
             valid_group = {int(value) for value in group if str(value).isdigit() and 1 <= int(value) <= source_count}
             if valid_group and not (valid_group & cited):
                 reasons.append(f"回答未引用核心要求对应的直接证据 {sorted(valid_group)}")
+        if retrieval_state.get("enforceClaimConsistency"):
+            for sentence in re.split(r"(?<=[。！？!?])|\n+", answer):
+                if not self.STRONG_CLAIM_PATTERN.search(sentence):
+                    continue
+                if not self.extract_citation_indices(sentence, source_count):
+                    reasons.append(
+                        "包含首次、最优或量化比较的强声明没有在同一句中引用直接证据"
+                    )
+                    break
         return GroundingValidationResult(valid=not reasons, reasons=reasons, cited_indices=cited)
 
     @staticmethod

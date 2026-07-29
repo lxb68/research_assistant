@@ -7,6 +7,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.services.retrieval_contracts import (
+    flatten_requirement_slots,
     normalize_execution_complexity,
     normalize_requirement,
     normalize_section_types,
@@ -47,6 +48,8 @@ class QuestionContract:
     invalidInteractionBasis: list[str] = field(default_factory=list)
     interactionClassificationRepaired: bool = False
     invalidFacetRequirementIds: dict[str, list[str]] = field(default_factory=dict)
+    scopeAnchorIds: list[str] = field(default_factory=list)
+    invalidScopeAnchorIds: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -72,8 +75,26 @@ class QuestionContractBuilder:
         candidate_sources: list[dict[str, Any]],
         explicit_paper_ids: list[str] | None = None,
         has_history: bool = False,
+        available_scope_anchors: list[dict[str, Any]] | None = None,
     ) -> QuestionContract:
         explicit_ids = [str(value) for value in explicit_paper_ids or [] if str(value)]
+        known_anchor_ids = {
+            str(item.get("id") or "").strip()
+            for item in available_scope_anchors or []
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        }
+        raw_anchor_ids = payload.get("scope_anchor_ids") or payload.get("scopeAnchorIds")
+        proposed_anchor_ids = list(dict.fromkeys(
+            str(value).strip()
+            for value in (raw_anchor_ids if isinstance(raw_anchor_ids, list) else [])
+            if str(value).strip()
+        ))
+        scope_anchor_ids = [
+            value for value in proposed_anchor_ids if value in known_anchor_ids
+        ]
+        invalid_scope_anchor_ids = [
+            value for value in proposed_anchor_ids if value not in known_anchor_ids
+        ]
         proposed = payload.get("target_paper_ids")
         proposed = proposed if isinstance(proposed, list) else []
 
@@ -191,7 +212,21 @@ class QuestionContractBuilder:
             else "narrow"
         )
         is_complex = complexity == "complex"
-        target_count = max(settings.orchestrator_min_evidence, settings.rag_complex_target_evidence) if is_complex else settings.orchestrator_min_evidence
+        required_evidence_capacity = sum(
+            int(item.get("minimumDirectEvidence") or 1)
+            for item in flatten_requirement_slots(
+                [item for item in requirement_specs if item.get("required")]
+            )
+        )
+        target_count = (
+            max(
+                settings.orchestrator_min_evidence,
+                settings.rag_complex_target_evidence,
+                required_evidence_capacity,
+            )
+            if is_complex
+            else max(settings.orchestrator_min_evidence, required_evidence_capacity)
+        )
         return QuestionContract(
             standaloneQuestion=standalone,
             questionType=question_type,
@@ -205,7 +240,10 @@ class QuestionContractBuilder:
             optionalDetails=optional_details,
             answerRequirements=core_requirements,
             requiresIterativeRetrieval=is_complex and bool(facets or requirement_specs),
-            targetEvidenceCount=max(1, min(int(target_count), 12)),
+            targetEvidenceCount=max(
+                1,
+                min(int(target_count), settings.research_agent_max_evidence_groups),
+            ),
             needsClarification=needs_clarification,
             clarificationQuestion=clarification,
             candidateSourceCount=len(candidate_sources),
@@ -219,6 +257,8 @@ class QuestionContractBuilder:
             invalidInteractionBasis=interaction.invalid_basis,
             interactionClassificationRepaired=interaction.repaired,
             invalidFacetRequirementIds=binding.invalid_requirement_ids,
+            scopeAnchorIds=scope_anchor_ids,
+            invalidScopeAnchorIds=invalid_scope_anchor_ids,
         )
 
 

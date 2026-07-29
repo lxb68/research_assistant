@@ -1,6 +1,7 @@
 """Research chat and orchestration routes."""
 
 import asyncio
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -9,7 +10,7 @@ from app.api.streaming import ndjson_worker_response
 from app.schemas.api import OrchestratorRequest, ResearchChatRequest
 from app.core.config import settings
 from app.services.project_repository import ProjectNotFoundError
-from app.services.project_scope import ProjectScopeService
+from app.services.project_research_context import ProjectResearchContextService
 
 
 router = APIRouter()
@@ -17,8 +18,12 @@ router = APIRouter()
 
 def _research_arguments(payload: ResearchChatRequest) -> dict:
     try:
-        return ProjectScopeService(settings.hunter_metadata_db).build_research_arguments(
+        return ProjectResearchContextService(
+            settings.hunter_metadata_db,
+            Path(settings.backend_storage_dir) / "domain_tree",
+        ).build_arguments(
             project_id=payload.project_id,
+            project_ids=payload.project_ids,
             requested_paper_ids=payload.paper_ids,
             history=[message.model_dump() for message in payload.history],
         )

@@ -14,6 +14,7 @@ import { KnowledgeGraphPanel } from "@/app/_views/project-knowledge/KnowledgeGra
 import { HeadingCountControl } from "@/app/_views/project-knowledge/HeadingCountControl";
 import { TokenLimitControl } from "@/app/_views/project-knowledge/TokenLimitControl";
 import { ProjectLiteraturePanel } from "@/app/_views/project-knowledge/ProjectLiteraturePanel";
+import { LiteratureMapPanel } from "@/app/_views/project-knowledge/LiteratureMapPanel";
 import {
   KnowledgeCurationDialog,
   KnowledgeCurationEditor,
@@ -181,7 +182,7 @@ type ModelConfigStatus = {
 
 type DomainTreeAction = "revise" | "rebuild" | "keep";
 type DomainTreeJobAction = DomainTreeAction | "resume";
-type DomainTreeViewMode = "project" | "tree" | "graph";
+type DomainTreeViewMode = "project" | "map" | "tree" | "graph";
 type DomainTreeLanguage = "auto" | "中文" | "English";
 
 type DomainTreeJob = {
@@ -1734,7 +1735,7 @@ function DomainTreeProjectPage({
         <section
           className="domain-tree-view-switcher"
           aria-label="项目知识空间视图切换"
-          style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}
+          style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}
         >
           <button
             type="button"
@@ -1742,6 +1743,13 @@ function DomainTreeProjectPage({
             onClick={() => setViewMode("project")}
           >
             项目文献
+          </button>
+          <button
+            type="button"
+            className={`domain-tree-view-button${viewMode === "map" ? " is-active" : ""}`}
+            onClick={() => setViewMode("map")}
+          >
+            文献地图
           </button>
           <button
             type="button"
@@ -1758,7 +1766,7 @@ function DomainTreeProjectPage({
             知识图谱
           </button>
         </section>
-          {viewMode === "project" ? null : analysisStats}
+          {viewMode === "tree" || viewMode === "graph" ? analysisStats : null}
         </div>
 
         {viewMode === "project" ? (
@@ -2054,7 +2062,16 @@ function DomainTreeProjectPage({
           </>
         ) : null}
 
-        {viewMode !== "project" ? (
+        {viewMode === "map" ? (
+          <LiteratureMapPanel
+            key={activeProjectId}
+            projectId={activeProjectId}
+            papers={papers}
+            modelConfigured={modelStatus?.configured}
+          />
+        ) : null}
+
+        {viewMode === "tree" || viewMode === "graph" ? (
           <>
         {status ? (
           <div className="domain-tree-status">

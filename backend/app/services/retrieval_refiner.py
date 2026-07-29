@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.config import settings
-from app.services.retrieval_contracts import normalize_requirement
+from app.services.retrieval_contracts import (
+    flatten_requirement_slots,
+    normalize_requirement,
+)
 
 
 class RetrievalRefiner:
@@ -23,8 +26,13 @@ class RetrievalRefiner:
             return semantic[: settings.query_planner_max_facets]
 
         facets = [dict(item) for item in plan.get("retrievalFacets") or [] if isinstance(item, dict)]
+        coverage_assessments = (
+            evaluation.get("slotAssessments")
+            if "slotAssessments" in evaluation
+            else evaluation.get("requirementAssessments")
+        )
         assessments = [
-            *[item for item in evaluation.get("requirementAssessments") or [] if isinstance(item, dict)],
+            *[item for item in coverage_assessments or [] if isinstance(item, dict)],
             *[item for item in evaluation.get("facetAssessments") or [] if isinstance(item, dict)],
         ]
         generated = self._from_assessments(plan, assessments)
@@ -67,7 +75,10 @@ class RetrievalRefiner:
             if isinstance(item, dict)
             and str(item.get("role") or "required") == "required"
         }
-        requirements = RetrievalRefiner._requirements(plan)
+        requirements = {
+            **RetrievalRefiner._requirements(plan),
+            **RetrievalRefiner._slots(plan),
+        }
         result: list[dict[str, Any]] = []
         for assessment in assessments:
             if assessment.get("status") == "supported":
@@ -90,7 +101,10 @@ class RetrievalRefiner:
 
     @staticmethod
     def _allowed_refinement_ids(plan: dict[str, Any]) -> set[str]:
-        requirement_ids = set(RetrievalRefiner._requirements(plan))
+        requirement_ids = (
+            set(RetrievalRefiner._requirements(plan))
+            | set(RetrievalRefiner._slots(plan))
+        )
         required_facet_ids = {
             str(item.get("id") or "")
             for item in plan.get("retrievalFacets") or []
@@ -122,6 +136,18 @@ class RetrievalRefiner:
             and item.get("required")
         ]
         return {str(item["id"]): item for item in normalized}
+
+    @staticmethod
+    def _slots(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        requirements = list(RetrievalRefiner._requirements(plan).values())
+        return {
+            str(item["id"]): {
+                **item,
+                "query": str(item.get("queryHint") or item.get("description") or ""),
+                "goal": str(item.get("description") or ""),
+            }
+            for item in flatten_requirement_slots(requirements)
+        }
 
     @staticmethod
     def _is_allowed_id(item_id: str, allowed_ids: set[str]) -> bool:
