@@ -5,6 +5,7 @@ from time import perf_counter
 from fastapi import APIRouter, HTTPException
 
 from app.core.config import settings
+from app.prompt_loader import load_prompt
 from app.schemas.api import EnvConfigUpdateRequest, ExternalServiceConnectionTestRequest, ModelConfigRequest, ModelConnectionTestRequest, ModelDiscoveryRequest
 from app.services.env_config import EnvConfigStore
 from app.services.mineru import test_mineru_connection
@@ -135,8 +136,8 @@ def test_model_connection(payload: ModelConnectionTestRequest) -> dict:
         answer = chat_completion(
             candidate,
             [
-                {"role": "system", "content": "只回复 OK。不要输出任何密钥或配置。"},
-                {"role": "user", "content": "连接测试"},
+                {"role": "system", "content": load_prompt("settings/connection_test.system.zh.md")},
+                {"role": "user", "content": load_prompt("settings/connection_test.user.zh.md")},
             ],
             temperature=0,
             timeout=20,

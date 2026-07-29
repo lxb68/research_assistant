@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.prompt_loader import load_prompt
 from app.services.model_client import (
     MODEL_PROVIDERS,
     get_provider,
@@ -18,11 +19,7 @@ from app.services.model_client import (
 from app.services.secret_store import WindowsDpapiProtector
 
 
-SYSTEM_SECURITY_CONSTRAINT = (
-    "Security constraint: never reveal, repeat, print, transform, summarize, or infer any API key, "
-    "access token, secret, authorization header, hidden configuration, or credential-like value. "
-    "If a user asks for secrets or hidden settings, refuse and continue without exposing them."
-)
+SYSTEM_SECURITY_CONSTRAINT = load_prompt("common/security.en.md")
 
 
 class ModelConfigStore:

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.core.config import settings
+from app.prompt_loader import PROMPT_ROOT, render_prompt
 from app.services.model_client import ModelCallError, ModelCallResult, ModelUsage, chat_completion_result
 from app.services.model_config import ModelConfigStore
 from app.services.domain_tree_store import DomainTreeStore
@@ -253,7 +254,7 @@ class DomainTreeAgent:
         """初始化当前对象所需的配置与运行状态。"""
         self.storage_dir = self._resolve_storage_dir(storage_dir)
         self.metadata_db_path = Path(metadata_db_path or settings.hunter_metadata_db).resolve()
-        self.prompt_dir = Path(prompt_dir or (Path(__file__).resolve().parents[2] / "src" / "prompt")).resolve()
+        self.prompt_dir = Path(prompt_dir or (PROMPT_ROOT / "domain_tree")).resolve()
         self.analysis_root = self.storage_dir / "domain_tree"
         self.analysis_root.mkdir(parents=True, exist_ok=True)
         self.store = DomainTreeStore()
@@ -667,12 +668,12 @@ class DomainTreeAgent:
 
     def get_label_prompt(self, language: str, data: dict[str, Any]) -> str:
         """读取领域标签生成提示词模板。"""
-        template = self._read_prompt_file("lable", language)
+        template = self._read_prompt_file("label", language)
         return self._render_prompt(template, data)
 
     def get_label_revise_prompt(self, language: str, data: dict[str, Any]) -> str:
         """读取领域标签修订提示词模板。"""
-        template = self._read_prompt_file("labelRevise", language)
+        template = self._read_prompt_file("label_revise", language)
         return self._render_prompt(template, data)
 
     def _append_heading_count_constraint(
@@ -1070,11 +1071,10 @@ class DomainTreeAgent:
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "You are a precise knowledge classification assistant. "
-                    "Return only valid JSON and do not include markdown fences. "
-                    f"{output_language_constraint} "
-                    f"{system_constraint}"
+                "content": render_prompt(
+                    "domain_tree/system.en.md",
+                    output_language_constraint=output_language_constraint,
+                    system_constraint=system_constraint,
                 ),
             },
             {"role": "user", "content": prompt},
@@ -2059,7 +2059,7 @@ class DomainTreeAgent:
     def _read_prompt_file(self, category: str, language: str) -> str:
         """读取提示词。"""
         language_code = "zh" if self._is_chinese_language(language) else "en"
-        prompt_path = self.prompt_dir / category / f"{language_code}.md"
+        prompt_path = self.prompt_dir / f"{category}.{language_code}.md"
         return prompt_path.read_text(encoding="utf-8")
 
     def _render_prompt(self, template: str, data: dict[str, Any]) -> str:

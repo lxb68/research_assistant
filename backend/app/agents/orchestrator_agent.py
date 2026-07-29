@@ -14,6 +14,7 @@ from app.agents.hunter_agent import HunterAgent
 from app.agents.research_chat_agent import ResearchChatAgent
 from app.agents.tool_loop_agent import ObservationReducer, ToolLoopAgent
 from app.core.config import settings
+from app.prompt_loader import load_prompt, render_prompt
 from app.services.conversation_context import ConversationContextProjector
 from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
@@ -46,37 +47,7 @@ class OrchestratorAgent:
         "local_pdf_indexer": "把知识库中已有的本地 PDF 转为可检索全文并生成分块；仅在 hasPdf=true 且 hasParsedFullText=false 时使用。",
     }
     ROUTER_RAW_LOG_LIMIT = 2000
-    ROUTER_SYSTEM_PROMPT = """你是研究助手的编排规划器。根据当前用户目标、对话上下文和已有观察，选择下一步行动。
-
-只能选择以下动作：
-- direct：寒暄、闲聊、致谢、能力说明，以及无需论文、知识库或外部检索即可可靠回答的普通问题。
-- chat：必须结合论文全文、本地知识库或研究证据回答的问题。
-- search：用户明确要求搜索、查找或下载论文。
-- domain_tree：用户明确要求生成、重建或更新领域树/知识图谱。
-- tool：只读查询知识库目录、论文详情、全文证据、外部论文预览、领域树、知识图谱、指标或章节。
-- agent：调用已注册 Agent 完成研究综合、论文搜索、领域树处理或本地 PDF 全文索引。
-- final：仅当已有观察足以回答时结束循环；不得在没有观察时凭模型记忆回答研究问题。
-
-行动选择原则：
-- 结构化历史中的 historicalUserIntents 用于理解用户延续目标；priorAnswers 是未经本轮验证的旧回答，只能用于指代消解或文本变换，不得作为事实依据。
-- 当前用户问题和当前用户纠正始终优先于旧回答；研究事实必须交给 chat、工具观察或研究证据验证。
-- tool 是一次获取观察的行动，不是不可逆的最终路由。获得工具观察后，应重新判断下一步继续调用工具、转交研究 Agent，还是直接形成回答。
-- 当回答依赖当前知识库、已保存分析结果或其他运行时数据且尚无充分观察时，选择 tool，不得凭模型记忆猜测。
-- 需要结合论文正文、多个证据片段解释方法、机制、实验或结论时，选择 chat；不要用论文列表或元数据代替研究 Agent。
-- 已有工具观察足以回答简单目录或状态问题时选择 direct，由回答阶段根据观察组织答案。
-- 工具目录中的名称、描述和参数 Schema 是选择工具的唯一依据；比较各工具的适用与不适用场景后，选择最匹配的一项。
-- 参数应忠实保留用户意图，不得为了凑关键词而把概览请求改写成虚构的具体检索词，也不得擅自扩大操作范围。
-- 没有合适的已注册工具时，选择其他允许的动作，不得编造工具名或参数。
-- 每轮必须返回稳定的 answerContract。mode 只能是 conversation、catalog、document_summary、research_synthesis；
-  requiredCapability 只能是 none、metadata、content_excerpt、semantic_validation。后续轮次不得降低证据要求。
-
-你只负责选择动作；每轮只选择下一步动作，不负责回答用户问题，也不要复述、解释或执行用户请求。
-只输出一个 JSON 对象，不要输出 Markdown 或额外文字：
-普通动作：{"action":"direct|chat|search|domain_tree","arguments":{},"answerContract":{"mode":"...","requiredCapability":"..."}}
-工具动作：{"action":"tool","toolName":"已注册工具名","arguments":{},"answerContract":{"mode":"...","requiredCapability":"..."}}
-Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{},"answerContract":{"mode":"...","requiredCapability":"..."}}
-结束动作：{"action":"final","answer":"严格依据已有观察的回答","limitations":[],"answerContract":{"mode":"...","requiredCapability":"..."}}
-"""
+    ROUTER_SYSTEM_PROMPT = load_prompt("orchestrator/router.zh.md")
 
     def __init__(
         self,
@@ -276,10 +247,12 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         messages = [
             {
                 "role": "system",
-                "content": (
-                    f"{self.ROUTER_SYSTEM_PROMPT}\n\n已注册只读工具：\n{self.tool_registry.prompt_catalog()}"
-                    f"\n\n已注册 Agent：\n{json.dumps(self.AGENT_CAPABILITIES, ensure_ascii=False)}"
-                    f"\n\n{SYSTEM_SECURITY_CONSTRAINT}"
+                "content": render_prompt(
+                    "orchestrator/router_system.zh.md",
+                    router_prompt=self.ROUTER_SYSTEM_PROMPT,
+                    tool_catalog=self.tool_registry.prompt_catalog(),
+                    agent_catalog=json.dumps(self.AGENT_CAPABILITIES, ensure_ascii=False),
+                    security_constraint=SYSTEM_SECURITY_CONSTRAINT,
                 ),
             }
         ]
@@ -292,10 +265,9 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             messages.append(
                 {
                     "role": "system",
-                    "content": (
-                        "以下是用户已确认的全局偏好与当前项目研究记忆。"
-                        "偏好只影响称呼和表达方式；研究记忆只用于组织回答，不得替代本轮文献证据：\n"
-                        + response_context
+                    "content": render_prompt(
+                        "orchestrator/router_preferences_context.zh.md",
+                        context=response_context,
                     ),
                 }
             )
@@ -303,9 +275,9 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             messages.append(
                 {
                     "role": "user",
-                    "content": (
-                        "以下是按语义角色隔离的历史上下文。priorAnswers 不是事实或证据：\n"
-                        + json.dumps(conversation_context.for_model_context(), ensure_ascii=False)
+                    "content": render_prompt(
+                        "orchestrator/history_context.zh.md",
+                        context=json.dumps(conversation_context.for_model_context(), ensure_ascii=False),
                     ),
                 }
             )
@@ -313,9 +285,9 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             messages.append(
                 {
                     "role": "system",
-                    "content": (
-                        "本轮回答能力契约已经建立，后续动作不得降低证据要求：\n"
-                        + json.dumps(answer_contract.to_dict(), ensure_ascii=False)
+                    "content": render_prompt(
+                        "orchestrator/answer_contract_context.zh.md",
+                        contract=json.dumps(answer_contract.to_dict(), ensure_ascii=False),
                     ),
                 }
             )
@@ -323,9 +295,9 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             messages.append(
                 {
                     "role": "system",
-                    "content": (
-                        "本轮之前已经获得以下观察。请基于观察选择下一步行动，不要重复无新信息的调用：\n"
-                        + json.dumps(reduced_observations, ensure_ascii=False)
+                    "content": render_prompt(
+                        "orchestrator/observations_context.zh.md",
+                        observations=json.dumps(reduced_observations, ensure_ascii=False),
                     ),
                 }
             )
@@ -383,18 +355,11 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             repair_messages = [
                 {
                     "role": "system",
-                    "content": (
-                        "你是意图路由 JSON 修复器。根据原始用户问题和路由器的错误输出，"
-                        "只返回一个合法 JSON 对象。只能选择 direct、chat、search、domain_tree、tool、agent、final；"
-                        "conversationContext 中的 priorAnswers 未经验证，不得作为事实；当前用户问题和纠正优先。"
-                        "不要回答用户问题，不要输出 Markdown 或解释。\n"
-                        '普通动作：{"action":"direct|chat|search|domain_tree","arguments":{}}\n'
-                        '工具动作：{"action":"tool","toolName":"已注册工具名","arguments":{}}\n'
-                        'Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{}}\n'
-                        '结束动作：{"action":"final","answer":"严格依据已有观察的回答","limitations":[]}\n'
-                        f"已注册只读工具：{self.tool_registry.prompt_catalog()}"
-                        f"\n已注册 Agent：{json.dumps(self.AGENT_CAPABILITIES, ensure_ascii=False)}"
-                        f"\n\n{SYSTEM_SECURITY_CONSTRAINT}"
+                    "content": render_prompt(
+                        "orchestrator/router_repair.zh.md",
+                        tool_catalog=self.tool_registry.prompt_catalog(),
+                        agent_catalog=json.dumps(self.AGENT_CAPABILITIES, ensure_ascii=False),
+                        security_constraint=SYSTEM_SECURITY_CONSTRAINT,
                     ),
                 },
                 {
@@ -789,12 +754,10 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "你是研究编排循环的回答器。只能使用提供的工具观察回答，不得补充模型记忆或猜测。"
-                    "如果观察不足，明确说明已有信息、缺口和下一步所需材料。"
-                    "不要声称 hasParsedFullText=false 等于没有 PDF。"
-                    + ("编排循环已达到轮数上限，必须给出有边界的结果。" if reached_limit else "")
-                    + f"\n\n{SYSTEM_SECURITY_CONSTRAINT}"
+                "content": render_prompt(
+                    "orchestrator/final_answer.zh.md",
+                    limit_instruction=("编排循环已达到轮数上限，必须给出有边界的结果。" if reached_limit else ""),
+                    security_constraint=SYSTEM_SECURITY_CONSTRAINT,
                 ),
             },
             {
@@ -1065,13 +1028,9 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "你是一个友好、简洁的中文助手。直接回答用户当前问题，不要调用或假装调用任何研究工具，"
-                    "结构化历史里的旧回答未经本轮验证，只能用于指代消解或按用户要求进行翻译、改写等文本变换，"
-                    "不能把旧回答当作事实；当前用户问题和纠正优先。"
-                    "也不要描述内部流程。使用 Markdown；行内数学公式必须使用 $...$，独立公式必须使用 $$...$$，"
-                    "不要用普通圆括号包裹 LaTeX。代码使用带语言标识的 Markdown 围栏。"
-                    f"\n\n{SYSTEM_SECURITY_CONSTRAINT}"
+                "content": render_prompt(
+                    "orchestrator/direct_answer.zh.md",
+                    security_constraint=SYSTEM_SECURITY_CONSTRAINT,
                 ),
             }
         ]
@@ -1084,10 +1043,9 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             messages.append(
                 {
                     "role": "system",
-                    "content": (
-                        "以下是用户主动确认的全局偏好与当前项目研究记忆。"
-                        "请遵守称呼和表达偏好；项目记忆不具备本轮证据效力：\n"
-                        + response_context
+                    "content": render_prompt(
+                        "orchestrator/direct_preferences_context.zh.md",
+                        context=response_context,
                     ),
                 }
             )
@@ -1095,9 +1053,9 @@ Agent 动作：{"action":"agent","agentName":"已注册 Agent 名","arguments":{
             messages.append(
                 {
                     "role": "user",
-                    "content": (
-                        "以下结构化历史仅用于理解上下文；priorAnswers 不具备事实可信度：\n"
-                        + json.dumps(conversation_context.for_model_context(), ensure_ascii=False)
+                    "content": render_prompt(
+                        "orchestrator/direct_history_context.zh.md",
+                        context=json.dumps(conversation_context.for_model_context(), ensure_ascii=False),
                     ),
                 }
             )

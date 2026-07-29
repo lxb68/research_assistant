@@ -12,6 +12,7 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from app.core.config import settings
+from app.prompt_loader import load_prompt
 from app.services.model_client import chat_completion
 from app.services.model_config import ModelConfigStore
 
@@ -98,13 +99,7 @@ class ResearchMemoryExtractor:
                 [
                     {
                         "role": "system",
-                        "content": (
-                            "你是研究记忆提炼器。只提取未来研究中可复用的信息，不复述整条回答。"
-                            "输出一个 JSON 对象，字段为 title、summary、type、tags、confidence。"
-                            "type 只能是 conclusion、fact、decision、limitation、hypothesis、task；"
-                            "summary 不超过 500 个汉字，必须保留关键限定条件；tags 最多 8 个；"
-                            "confidence 为 0 到 1。不要输出 Markdown。"
-                        ),
+                        "content": load_prompt("memory/extractor.zh.md"),
                     },
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],

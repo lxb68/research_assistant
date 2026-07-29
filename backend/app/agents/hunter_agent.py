@@ -18,6 +18,7 @@ import sqlite3
 import time
 
 from app.core.config import settings
+from app.prompt_loader import load_prompt
 from app.services.ccf_catalog import CcfCatalog
 from app.services.paper_search import SUPPORTED_SOURCES
 from app.services.paper_repository import PaperRepository
@@ -2126,10 +2127,7 @@ class HunterAgent:
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "Translate Chinese academic search keywords into concise English. "
-                    "Return only the translated query, with no explanation."
-                ),
+                "content": load_prompt("search/query_translation.en.md"),
             },
             {"role": "user", "content": text},
         ]

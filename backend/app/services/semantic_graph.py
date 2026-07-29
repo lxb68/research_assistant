@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from app.core.config import settings
+from app.prompt_loader import load_prompt, render_prompt
 from app.services.model_client import (
     ModelCallError,
     ModelCallResult,
@@ -770,18 +771,9 @@ class SemanticGraphExtractor:
     def _build_extraction_messages(self, prompt: str) -> list[dict[str, str]]:
         """构造与实体类型目标语言一致的模型消息。"""
         if self.entity_type_language == "中文":
-            system_prompt = (
-                "你是科研文献语义抽取器。只能依据给定原文抽取，不得补充常识或猜测。"
-                "必须返回合法 JSON，不要使用 Markdown 代码块。"
-                "实体类型必须使用简洁中文分类标签；其他抽取字段必须保留原文语言。"
-            )
+            system_prompt = load_prompt("semantic_graph/extraction_system.zh.md")
         else:
-            system_prompt = (
-                "You extract structured semantics only from the supplied research text. "
-                "Do not add background knowledge or guesses. Return valid JSON without Markdown. "
-                "Entity type labels must be concise English category labels and must not contain "
-                "Chinese characters. All other extracted fields must preserve the source language."
-            )
+            system_prompt = load_prompt("semantic_graph/extraction_system.en.md")
         return [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
@@ -944,16 +936,13 @@ class SemanticGraphExtractor:
     def _build_type_language_correction(self, invalid_types: list[str]) -> str:
         """要求模型仅纠正类型语言并完整返回原 JSON。"""
         if self.entity_type_language == "中文":
-            return (
-                f"以下实体类型不是中文分类标签：{json.dumps(invalid_types, ensure_ascii=False)}。"
-                "请只把这些 type 改成语义等价、简洁的中文分类标签；其他字段不得改变。"
-                "完整返回修正后的合法 JSON。"
+            return render_prompt(
+                "semantic_graph/type_correction.zh.md",
+                invalid_types=json.dumps(invalid_types, ensure_ascii=False),
             )
-        return (
-            "The following entity types violate the English-only type contract: "
-            f"{json.dumps(invalid_types, ensure_ascii=False)}. "
-            "Change only those type values to concise, semantically equivalent English category "
-            "labels. Do not change any other field. Return the complete corrected JSON."
+        return render_prompt(
+            "semantic_graph/type_correction.en.md",
+            invalid_types=json.dumps(invalid_types, ensure_ascii=False),
         )
 
     def _on_chunk_retry(
@@ -984,27 +973,16 @@ class SemanticGraphExtractor:
     def _build_extraction_prompt(self, document: SemanticSourceDocument, chunk: TextChunk) -> str:
         """构造紧凑 JSON 契约，减少每个分块重复发送的固定 Token。"""
         if self.entity_type_language == "English":
-            return f"""Extract research entities, explicit attributes, and relations as JSON.
-Context: document={document.record_id}; title={document.title}; section={chunk.section}
-Rules:
-- Names, aliases, attributes, and quotes must preserve the source language; canonicalName is the fullest source form; predicate must preserve the source language.
-- type is an inferred category label and must be concise English. relationType is general|causal|comparison|experimental|property; use causal only for explicit causation.
-- Every item needs an exact evidenceQuote from this chunk; omit unsupported items. Relations reference entity localId; confidence is 0..1.
-Schema: {{"entities":[{{"localId":"e1","name":"","canonicalName":"","type": "model","aliases":[],"attributes":[{{"name":"","value":"","unit":""}}],"evidenceQuote":""}}],"relations":[{{"source":"e1","target":"e2","predicate":"","relationType":"general","confidence":0.9,"evidenceQuote":""}}]}}
-Source:
-{chunk.text}
-"""
-
-        return f"""从科研原文抽取研究实体、明示属性和实体关系，仅返回 JSON。
-上下文：文献={document.record_id}；标题={document.title}；章节={chunk.section}
-规则：
-- 名称、别名、属性、谓词和引文保持原文语言；canonicalName 使用原文中最完整形式。
-- type 使用简洁中文分类；relationType 仅限 general|causal|comparison|experimental|property，只有明示因果才用 causal。
-- 每项必须有本段逐字 evidenceQuote，无直接证据则省略；关系引用实体 localId；confidence 范围为 0..1。
-结构：{{"entities":[{{"localId":"e1","name":"","canonicalName":"","type":"","aliases":[],"attributes":[{{"name":"","value":"","unit":""}}],"evidenceQuote":""}}],"relations":[{{"source":"e1","target":"e2","predicate":"","relationType":"general","confidence":0.9,"evidenceQuote":""}}]}}
-原文：
-{chunk.text}
-"""
+            resource = "semantic_graph/extraction.en.md"
+        else:
+            resource = "semantic_graph/extraction.zh.md"
+        return render_prompt(
+            resource,
+            record_id=document.record_id,
+            title=document.title,
+            section=chunk.section,
+            text=chunk.text,
+        )
 
     def _merge_chunk_payload(
         self,
@@ -1220,49 +1198,15 @@ Source:
                 return mapping
 
         if self.entity_type_language == "中文":
-            system_prompt = (
-                "你是知识图谱类型归并器。只归并语义等价标签。"
-                "canonical 必须是简洁中文分类标签，不得改变成员标签的专业含义。"
-            )
-            prompt = f"""请归并下面这些科研知识图谱实体类型标签中的语义等价项。
-
-输入标签及出现次数：
-{json.dumps(type_counts, ensure_ascii=False, sort_keys=True)}
-
-要求：
-1. 只合并含义相同的类型；上位类、下位类或相关类型不得合并。
-2. 大小写、单复数、缩写和跨语言翻译可在确实等价时合并。
-3. canonical 必须是与组内成员语义等价的简洁中文分类标签。
-4. 如果组内已有合适的中文标签，canonical 必须逐字选用该中文标签。
-5. 只有组内完全没有中文标签时，才允许为翻译目的生成新的中文 canonical。
-6. 每个输入标签必须且只能出现一次。
-7. 只返回合法 JSON，不要解释。
-
-返回结构：
-{{"groups":[{{"canonical":"中文类型标签","members":["等价标签1","等价标签2"]}}]}}
-"""
+            system_prompt = load_prompt("semantic_graph/type_merge_system.zh.md")
+            prompt_resource = "semantic_graph/type_merge.zh.md"
         else:
-            system_prompt = (
-                "You merge only semantically equivalent knowledge-graph entity type labels. "
-                "Every canonical label must be concise English and preserve the members' specificity."
-            )
-            prompt = f"""Merge semantically equivalent research knowledge-graph entity type labels.
-
-Input labels and counts:
-{json.dumps(type_counts, ensure_ascii=False, sort_keys=True)}
-
-Requirements:
-1. Merge only equivalent labels; never merge parent, child, or merely related types.
-2. Case, number, abbreviation, and cross-language variants may be merged only when equivalent.
-3. canonical must be a concise English category label equivalent to every member.
-4. If a suitable English member exists, canonical must exactly use that English member.
-5. A new canonical is allowed only to translate a group that has no English member.
-6. Every input label must appear exactly once.
-7. Return valid JSON only, without explanation.
-
-Return shape:
-{{"groups":[{{"canonical":"English type label","members":["equivalent label 1","equivalent label 2"]}}]}}
-"""
+            system_prompt = load_prompt("semantic_graph/type_merge_system.en.md")
+            prompt_resource = "semantic_graph/type_merge.en.md"
+        prompt = render_prompt(
+            prompt_resource,
+            type_counts=json.dumps(type_counts, ensure_ascii=False, sort_keys=True),
+        )
         messages = [
             {
                 "role": "system",

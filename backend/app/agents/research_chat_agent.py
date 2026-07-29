@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from app.agents.hunter_agent import HunterAgent
 from app.agents.query_planning_agent import QueryPlanningAgent
+from app.prompt_loader import load_prompt
 from app.core.config import settings
 from app.services.model_config import ModelConfigStore, SYSTEM_SECURITY_CONSTRAINT
 from app.services.model_client import chat_completion
@@ -953,10 +954,7 @@ class ResearchChatAgent:
 
     def _load_prompt(self) -> str:
         """加载提示词。"""
-        prompt_path = Path(__file__).resolve().parents[2] / "src" / "prompt" / "research_agent" / "zh.md"
-        if not prompt_path.exists():
-            raise FileNotFoundError(f"研究助手 Prompt 不存在：{prompt_path}")
-        return prompt_path.read_text(encoding="utf-8")
+        return load_prompt("research/answer.zh.md")
 
     def _extract_citation_indices(self, answer: str, source_count: int) -> set[int]:
         """从回答文本中提取有效引用序号。"""

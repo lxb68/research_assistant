@@ -463,7 +463,7 @@ class ResearchChatReferenceTest(unittest.TestCase):
         completion.return_value = "本轮证据显示准确率为 91% [1]。"
         self.agent.retriever.build_context.return_value = "[1] 实验表格报告准确率为 91%。"
         self.agent._load_prompt = Mock(
-            return_value=(BACKEND_DIR / "src" / "prompt" / "research_agent" / "zh.md").read_text(encoding="utf-8")
+            return_value=(BACKEND_DIR / "prompt" / "research" / "answer.zh.md").read_text(encoding="utf-8")
         )
 
         answer = self.agent._complete(
