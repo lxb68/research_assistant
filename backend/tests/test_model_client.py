@@ -6,7 +6,10 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -17,12 +20,14 @@ if str(BACKEND_DIR) not in sys.path:
 
 from app.services.model_client import (
     ModelCallError,
+    ModelCallResult,
     ModelUsage,
     chat_completion,
     chat_completion_result,
     discover_models,
 )
 from app.services.model_config import ModelConfigStore
+from app.services.model_call_limiter import ModelCallLimiter
 
 
 def response(payload: dict, status_code: int = 200) -> Mock:
@@ -40,6 +45,64 @@ class ModelClientTest(unittest.TestCase):
         {"role": "system", "content": "请简洁回答。"},
         {"role": "user", "content": "你好"},
     ]
+
+    def test_process_limiter_caps_concurrent_model_calls(self) -> None:
+        """多个调用方共享同一个闸门时，并发峰值不得超过配置上限。"""
+        limiter = ModelCallLimiter(2)
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def invoke() -> None:
+            nonlocal active, peak
+            with limiter.slot():
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                time.sleep(0.02)
+                with lock:
+                    active -= 1
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = [executor.submit(invoke) for _ in range(6)]
+            for future in futures:
+                future.result()
+
+        self.assertEqual(peak, 2)
+        self.assertEqual(limiter.snapshot()["active"], 0)
+        self.assertEqual(limiter.snapshot()["peak"], 2)
+
+    def test_chat_entrypoint_shares_process_limiter(self) -> None:
+        """聊天入口必须实际占用统一闸门，而不是只在业务线程池局部限流。"""
+        limiter = ModelCallLimiter(2)
+
+        def complete(*_args, **_kwargs):
+            time.sleep(0.02)
+            return ModelCallResult("ok", ModelUsage())
+
+        model = {
+            "provider": "custom",
+            "protocol": "openai_compatible",
+            "base_url": "https://model.test/v1",
+            "model": "test-model",
+        }
+        with patch(
+            "app.services.model_client._MODEL_CALL_LIMITER",
+            limiter,
+        ), patch(
+            "app.services.model_client._chat_openai_compatible_result",
+            side_effect=complete,
+        ):
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                answers = list(
+                    executor.map(
+                        lambda _index: chat_completion(model, self.messages),
+                        range(6),
+                    )
+                )
+
+        self.assertEqual(answers, ["ok"] * 6)
+        self.assertEqual(limiter.snapshot()["peak"], 2)
 
     @patch("app.services.model_client.requests.post")
     def test_openai_compatible_chat(self, post: Mock) -> None:

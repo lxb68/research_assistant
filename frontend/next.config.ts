@@ -24,6 +24,15 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: path.join(__dirname, ".."),
   },
+  async redirects() {
+    return [
+      {
+        source: "/reserarch-chat",
+        destination: "/research-chat",
+        permanent: true,
+      },
+    ];
+  },
   allowedDevOrigins: [
     "localhost",
     "127.0.0.1",

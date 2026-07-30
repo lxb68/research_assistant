@@ -204,6 +204,28 @@ class CoverageAwareEvidenceSelector:
         )
         return EvidenceSelectionResult(flatten_evidence_groups(selected), diagnostics)
 
+    def preserve_all(
+        self,
+        evidence: list[dict[str, Any]],
+        *,
+        budget: EvidenceBudget,
+    ) -> EvidenceSelectionResult:
+        """覆盖判定失败时保留原候选，禁止残缺语义信号参与裁剪。"""
+        groups = group_evidence(evidence)
+        diagnostics = self._diagnostics(
+            groups,
+            groups,
+            dict(budget.required_direct_evidence),
+            budget,
+        )
+        diagnostics.update(
+            {
+                "selectionStrategy": "coverage_validation_fallback_preserve_all",
+                "coverageSignalsAvailable": False,
+            }
+        )
+        return EvidenceSelectionResult(list(evidence), diagnostics)
+
     def _marginal_score(
         self,
         group: list[dict[str, Any]],

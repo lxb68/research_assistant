@@ -1716,7 +1716,10 @@ class OrchestratorAgent:
                     "message": "当前知识库和自动检索结果不足以可靠回答该问题，请补充相关 PDF 后重试。",
                     "requiredMaterials": material_decision.required_materials,
                     "reasonCodes": material_decision.reason_codes,
-                    "retrievalDiagnostics": diagnostics,
+                    "retrievalDiagnostics": self._final_retrieval_diagnostics(
+                        diagnostics,
+                        evaluation,
+                    ),
                     "evidencePreview": self._evidence_preview(evidence),
                     "trace": trace,
                     "runLog": self.run_logger.public_info(),
@@ -1846,8 +1849,37 @@ class OrchestratorAgent:
         return {
             "agent": "orchestrator",
             "action": "chat",
-            "result": {**result, "trace": trace, "runLog": self.run_logger.public_info()},
+            "result": {
+                **result,
+                "retrievalDiagnostics": self._final_retrieval_diagnostics(
+                    diagnostics,
+                    evaluation,
+                ),
+                "trace": trace,
+                "runLog": self.run_logger.public_info(),
+            },
         }
+
+    @staticmethod
+    def _final_retrieval_diagnostics(
+        diagnostics: dict[str, Any],
+        evaluation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """编译前端可消费的最终检索诊断，并兼容旧覆盖字段。"""
+        result = dict(diagnostics)
+        retrieval_coverage = result.get("retrievalFacetCoverage")
+        if retrieval_coverage is None:
+            retrieval_coverage = result.get("facetCoverage")
+        if retrieval_coverage is not None:
+            result["retrievalFacetCoverage"] = retrieval_coverage
+            result.setdefault("facetCoverage", retrieval_coverage)
+
+        if (
+            evaluation.get("semanticValidated")
+            and evaluation.get("facetCoverage") is not None
+        ):
+            result["semanticFacetCoverage"] = evaluation["facetCoverage"]
+        return result
 
     @staticmethod
     def _evidence_identity(item: dict[str, Any]) -> tuple[str, int, str]:

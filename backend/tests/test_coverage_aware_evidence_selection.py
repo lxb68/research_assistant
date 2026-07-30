@@ -95,6 +95,24 @@ class EvidenceBudgetPolicyTest(unittest.TestCase):
 
 
 class CandidateCoverageEvaluatorTest(unittest.TestCase):
+    @staticmethod
+    def _coverage_response(messages) -> str:
+        payload = json.loads(messages[1]["content"])
+        return json.dumps(
+            {
+                "assessments": [
+                    {
+                        "evidence_ref": evidence["evidence_ref"],
+                        "requirement_id": requirement["id"],
+                        "status": "direct",
+                        "confidence": 0.9,
+                    }
+                    for evidence in payload["evidence_groups"]
+                    for requirement in payload["requirements"]
+                ]
+            }
+        )
+
     def test_candidate_batches_use_bounded_parallelism(self) -> None:
         active = 0
         peak = 0
@@ -146,6 +164,219 @@ class CandidateCoverageEvaluatorTest(unittest.TestCase):
 
         self.assertEqual(len(matrix), 8)
         self.assertEqual(peak, 4)
+
+    def test_dynamic_batches_respect_group_and_matrix_budgets(self) -> None:
+        diagnostics: dict = {}
+        evidence = [
+            {
+                "record_id": f"paper-{index}",
+                "chunk_index": index,
+                "text": f"证据 {index}",
+            }
+            for index in range(5)
+        ]
+
+        matrix, _ = CandidateCoverageEvaluator(
+            batch_size=4,
+            max_concurrency=3,
+            max_matrix_cells=4,
+        ).evaluate(
+            evidence,
+            [
+                {
+                    "id": "req-a",
+                    "description": "说明方法",
+                    "coverageSlots": [
+                        {"id": "slot-a", "description": "方法原理"},
+                        {"id": "slot-b", "description": "方法效果"},
+                    ],
+                }
+            ],
+            question="方法是什么？",
+            question_type="mechanism",
+            completion=lambda _model, messages, **_kwargs: self._coverage_response(
+                messages
+            ),
+            model={"model": "test"},
+            timeout=30,
+            diagnostics=diagnostics,
+        )
+
+        self.assertEqual(len(matrix), 5)
+        self.assertEqual(
+            diagnostics["candidateCoverageBatchGroupCounts"],
+            [2, 2, 1],
+        )
+        self.assertEqual(
+            diagnostics["candidateCoverageMatrixCellCount"],
+            10,
+        )
+        self.assertLessEqual(
+            diagnostics["candidateCoverageConcurrentBatchPeak"],
+            3,
+        )
+
+    def test_dynamic_batches_respect_input_character_budget(self) -> None:
+        diagnostics: dict = {}
+        CandidateCoverageEvaluator(
+            batch_size=4,
+            max_concurrency=2,
+            max_matrix_cells=32,
+            max_input_chars=4000,
+        ).evaluate(
+            [
+                {
+                    "record_id": f"paper-{index}",
+                    "chunk_index": index,
+                    "text": "证据内容" * 350,
+                }
+                for index in range(3)
+            ],
+            [{"id": "req-a", "description": "说明方法"}],
+            question="方法是什么？",
+            question_type="mechanism",
+            completion=lambda _model, messages, **_kwargs: self._coverage_response(
+                messages
+            ),
+            model={"model": "test"},
+            timeout=30,
+            diagnostics=diagnostics,
+        )
+
+        self.assertEqual(
+            diagnostics["candidateCoverageBatchGroupCounts"],
+            [1, 1, 1],
+        )
+        self.assertTrue(
+            all(
+                value <= 4000
+                for value in diagnostics["candidateCoverageBatchInputChars"]
+            )
+        )
+
+    def test_parallel_results_are_merged_in_input_batch_order(self) -> None:
+        def completion(_model, messages, **_kwargs):
+            payload = json.loads(messages[1]["content"])
+            reference = payload["evidence_groups"][0]["evidence_ref"]
+            delay = 0.04 if reference.startswith("paper-0:") else 0.01
+            time.sleep(delay)
+            return json.dumps(
+                {
+                    "batch": reference,
+                    "assessments": [
+                        {
+                            "evidence_ref": reference,
+                            "requirement_id": "req-a",
+                            "status": "direct",
+                            "confidence": 0.9,
+                        }
+                    ],
+                }
+            )
+
+        _, raw = CandidateCoverageEvaluator(
+            batch_size=1,
+            max_concurrency=3,
+        ).evaluate(
+            [
+                {
+                    "record_id": f"paper-{index}",
+                    "chunk_index": index,
+                    "text": f"证据 {index}",
+                }
+                for index in range(3)
+            ],
+            [{"id": "req-a", "description": "说明方法"}],
+            question="方法是什么？",
+            question_type="mechanism",
+            completion=completion,
+            model={"model": "test"},
+            timeout=30,
+        )
+
+        positions = [raw.index(f"paper-{index}:chunk:{index}") for index in range(3)]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_parallel_batches_reduce_wall_time_without_changing_matrix(self) -> None:
+        """等耗时独立批次并行后应接近最慢单批，同时保持矩阵一致。"""
+        evidence = [
+            {
+                "record_id": f"paper-{index}",
+                "chunk_index": index,
+                "text": f"证据 {index}",
+            }
+            for index in range(4)
+        ]
+
+        def completion(_model, messages, **_kwargs):
+            time.sleep(0.04)
+            return self._coverage_response(messages)
+
+        def evaluate(max_concurrency: int):
+            started_at = time.perf_counter()
+            matrix, _ = CandidateCoverageEvaluator(
+                batch_size=1,
+                max_concurrency=max_concurrency,
+            ).evaluate(
+                evidence,
+                [{"id": "req-a", "description": "说明方法"}],
+                question="方法是什么？",
+                question_type="mechanism",
+                completion=completion,
+                model={"model": "test"},
+                timeout=30,
+            )
+            return matrix, time.perf_counter() - started_at
+
+        serial_matrix, serial_seconds = evaluate(1)
+        parallel_matrix, parallel_seconds = evaluate(4)
+
+        self.assertEqual(parallel_matrix, serial_matrix)
+        self.assertLess(parallel_seconds, serial_seconds * 0.6)
+
+    def test_failed_batch_does_not_return_partial_matrix(self) -> None:
+        call_counts: dict[str, int] = {}
+        repair_calls = 0
+        lock = threading.Lock()
+
+        def completion(_model, messages, **_kwargs):
+            nonlocal repair_calls
+            if messages[1]["content"] == "invalid-json":
+                with lock:
+                    repair_calls += 1
+                return "still-invalid-json"
+            payload = json.loads(messages[1]["content"])
+            reference = payload["evidence_groups"][0]["evidence_ref"]
+            with lock:
+                call_counts[reference] = call_counts.get(reference, 0) + 1
+            if reference.startswith("paper-1:"):
+                return "invalid-json"
+            return self._coverage_response(messages)
+
+        diagnostics: dict = {}
+        with self.assertRaises((ValueError, json.JSONDecodeError)):
+            CandidateCoverageEvaluator(
+                batch_size=1,
+                max_concurrency=2,
+            ).evaluate(
+                [
+                    {"record_id": "paper-0", "chunk_index": 0, "text": "成功批次"},
+                    {"record_id": "paper-1", "chunk_index": 1, "text": "失败批次"},
+                ],
+                [{"id": "req-a", "description": "说明方法"}],
+                question="方法是什么？",
+                question_type="mechanism",
+                completion=completion,
+                model={"model": "test"},
+                timeout=30,
+                diagnostics=diagnostics,
+            )
+
+        self.assertEqual(call_counts["paper-0:chunk:0"], 1)
+        self.assertEqual(call_counts["paper-1:chunk:1"], 1)
+        self.assertEqual(repair_calls, 1)
+        self.assertEqual(diagnostics["candidateCoverageFailedBatchCount"], 1)
+        self.assertEqual(diagnostics["candidateCoverageRepairBatchCount"], 1)
 
     def test_invalid_json_after_repair_fails_closed(self) -> None:
         completion = Mock(side_effect=["not-json", "still-not-json"])
@@ -492,6 +723,46 @@ class CoverageAwareEvidenceSelectorTest(unittest.TestCase):
 
         self.assertEqual(len(result.evidence), 3)
         self.assertFalse(result.diagnostics["coverageSignalsAvailable"])
+
+    def test_validation_failure_preserves_all_candidates(self) -> None:
+        budget = EvidenceBudgetPolicy().resolve(
+            question_type="mechanism",
+            requirement_specs=[
+                {
+                    "id": "req-method",
+                    "description": "完整方法",
+                    "minimumDirectEvidence": 1,
+                }
+            ],
+            requested_target=2,
+            maximum_context_chars=18000,
+            maximum_groups=2,
+        )
+        evidence = [
+            self._item(
+                f"paper-{index}",
+                index,
+                score=float(10 - index),
+                support={},
+                text=f"候选证据 {index}",
+            )
+            for index in range(5)
+        ]
+
+        result = CoverageAwareEvidenceSelector().preserve_all(
+            evidence,
+            budget=budget,
+        )
+
+        self.assertEqual(result.evidence, evidence)
+        self.assertEqual(
+            result.diagnostics["selectionStrategy"],
+            "coverage_validation_fallback_preserve_all",
+        )
+        self.assertEqual(
+            result.diagnostics["selectedEvidenceGroupCount"],
+            5,
+        )
 
     def test_existing_direct_evidence_is_locked_across_refinement(self) -> None:
         budget = EvidenceBudgetPolicy().resolve(

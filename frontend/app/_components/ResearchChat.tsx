@@ -84,6 +84,8 @@ type OrchestratorResult = {
       distinctPaperCount?: number;
       retrievalMode?: string;
       facetCoverage?: number;
+      retrievalFacetCoverage?: number;
+      semanticFacetCoverage?: number;
     };
   };
 };
@@ -185,6 +187,8 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
     || (researchStatus === "failed" ? researchJob?.error || "研究任务执行失败" : "等待开始研究任务");
   const researchResult = researchJob?.result as OrchestratorResult | null | undefined;
   const researchDiagnostics = researchResult?.result?.retrievalDiagnostics;
+  const retrievalFacetCoverage = researchDiagnostics?.retrievalFacetCoverage
+    ?? researchDiagnostics?.facetCoverage;
   const scopedProjects = projectScopeIds
     .map((projectId) => projects.find((project) => project.id === projectId))
     .filter((project) => project !== undefined);
@@ -955,7 +959,14 @@ export default function ResearchChat({ onOpenBrowse, onOpenDomainTree }: Props) 
             {researchDiagnostics ? <div className="research-progress-metrics">
               <span><strong>{researchDiagnostics.evidenceCount ?? 0}</strong> 条证据</span>
               <span><strong>{researchDiagnostics.distinctPaperCount ?? 0}</strong> 篇文献</span>
-              <span><strong>{Math.round((researchDiagnostics.facetCoverage ?? 0) * 100)}%</strong> 检索维度覆盖</span>
+              <span>
+                <strong>
+                  {retrievalFacetCoverage === undefined
+                    ? "--"
+                    : `${Math.round(retrievalFacetCoverage * 100)}%`}
+                </strong>{" "}
+                检索维度覆盖
+              </span>
               {researchDiagnostics.retrievalMode ? <small>{researchDiagnostics.retrievalMode}</small> : null}
             </div> : null}
           </section>

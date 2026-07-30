@@ -669,10 +669,39 @@ class IterativeOrchestratorTest(unittest.IsolatedAsyncioTestCase):
         result = await agent._run_research_pipeline("它怎么训练？", {"history": []})
 
         self.assertEqual(result["action"], "chat")
+        self.assertEqual(
+            result["result"]["retrievalDiagnostics"]["retrievalFacetCoverage"],
+            1.0,
+        )
         self.assertEqual(research_agent.retrieve_evidence.call_count, 2)
         second_call = research_agent.retrieve_evidence.call_args_list[1]
         self.assertEqual([item["id"] for item in second_call.kwargs["retrieval_facets"]], ["protocol"])
         self.assertEqual(second_call.kwargs["existing_evidence"], first_evidence)
+
+    def test_final_diagnostics_separates_retrieval_and_semantic_coverage(self) -> None:
+        diagnostics = OrchestratorAgent._final_retrieval_diagnostics(
+            {
+                "evidenceCount": 3,
+                "retrievalFacetCoverage": 1.0,
+            },
+            {
+                "semanticValidated": True,
+                "facetCoverage": 0.5,
+            },
+        )
+
+        self.assertEqual(diagnostics["retrievalFacetCoverage"], 1.0)
+        self.assertEqual(diagnostics["semanticFacetCoverage"], 0.5)
+        self.assertEqual(diagnostics["facetCoverage"], 1.0)
+
+    def test_final_diagnostics_normalizes_legacy_retrieval_coverage(self) -> None:
+        diagnostics = OrchestratorAgent._final_retrieval_diagnostics(
+            {"facetCoverage": 0.0},
+            {"semanticValidated": False},
+        )
+
+        self.assertEqual(diagnostics["retrievalFacetCoverage"], 0.0)
+        self.assertEqual(diagnostics["facetCoverage"], 0.0)
 
     def test_incremental_validation_keeps_only_missing_requirements_and_related_evidence(self) -> None:
         agent = OrchestratorAgent()

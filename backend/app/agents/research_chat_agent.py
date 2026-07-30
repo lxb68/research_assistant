@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import time
@@ -398,6 +399,7 @@ class ResearchChatAgent:
             )
 
         selection_diagnostics: dict[str, Any] = {}
+        coverage_diagnostics: dict[str, Any] = {}
         coverage_validation_error = ""
         if requirements and evidence:
             model = ModelConfigStore().build_model_payload()
@@ -409,23 +411,47 @@ class ResearchChatAgent:
                         CandidateCoverageEvaluator(),
                     )
                     coverage_started_at = time.perf_counter()
-                    coverage_matrix, coverage_raw = coverage_evaluator.evaluate(
-                        evidence,
-                        requirements,
-                        question=query,
-                        question_type=question_type,
-                        completion=chat_completion,
-                        model=model,
-                        timeout=self.config.request_timeout,
-                    )
-                    evidence = coverage_evaluator.annotate(evidence, coverage_matrix)
-                    selection_diagnostics["candidateCoverageDurationMs"] = round(
-                        (time.perf_counter() - coverage_started_at) * 1000,
-                        2,
-                    )
-                    selection_diagnostics["candidateCoverageResponseChars"] = len(
-                        coverage_raw
-                    )
+                    try:
+                        coverage_kwargs = {
+                            "question": query,
+                            "question_type": question_type,
+                            "completion": chat_completion,
+                            "model": model,
+                            "timeout": self.config.request_timeout,
+                        }
+                        try:
+                            evaluate_parameters = inspect.signature(
+                                coverage_evaluator.evaluate
+                            ).parameters.values()
+                            supports_diagnostics = any(
+                                parameter.name == "diagnostics"
+                                or parameter.kind
+                                is inspect.Parameter.VAR_KEYWORD
+                                for parameter in evaluate_parameters
+                            )
+                        except (TypeError, ValueError):
+                            supports_diagnostics = True
+                        if supports_diagnostics:
+                            coverage_kwargs["diagnostics"] = coverage_diagnostics
+                        coverage_matrix, coverage_raw = coverage_evaluator.evaluate(
+                            evidence,
+                            requirements,
+                            **coverage_kwargs,
+                        )
+                        evidence = coverage_evaluator.annotate(
+                            evidence,
+                            coverage_matrix,
+                        )
+                        coverage_diagnostics[
+                            "candidateCoverageResponseChars"
+                        ] = len(coverage_raw)
+                    finally:
+                        coverage_diagnostics[
+                            "candidateCoverageDurationMs"
+                        ] = round(
+                            (time.perf_counter() - coverage_started_at) * 1000,
+                            2,
+                        )
                 except Exception as error:
                     coverage_validation_error = str(error)
                     self._log(f"候选证据语义覆盖判定失败，将保留检索候选并由最终验证器兜底：{error}")
@@ -437,9 +463,16 @@ class ResearchChatAgent:
                 "coverage_aware_selector",
                 CoverageAwareEvidenceSelector(),
             )
-            selection = selector.select(evidence, budget=budget)
+            selection = (
+                selector.preserve_all(evidence, budget=budget)
+                if coverage_validation_error
+                else selector.select(evidence, budget=budget)
+            )
             evidence = selection.evidence
-            selection_diagnostics = dict(selection.diagnostics)
+            selection_diagnostics = {
+                **selection.diagnostics,
+                **coverage_diagnostics,
+            }
             selection_diagnostics["candidateCoverageValidated"] = not bool(
                 coverage_validation_error
             )

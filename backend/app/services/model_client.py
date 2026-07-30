@@ -8,6 +8,12 @@ from urllib.parse import quote, urlparse
 
 import requests
 
+from app.core.config import settings
+from app.services.model_call_limiter import ModelCallLimiter
+
+
+_MODEL_CALL_LIMITER = ModelCallLimiter(settings.agent_model_max_concurrency)
+
 
 @dataclass(frozen=True, slots=True)
 class ModelUsage:
@@ -221,43 +227,47 @@ def chat_completion_result(
     thinking: bool | None = None,
 ) -> ModelCallResult:
     """按运行时协议发送聊天请求，并保留正文、用量和请求标识。"""
-    protocol = normalize_protocol(model.get("protocol", ""), model.get("provider", "custom"))
-    if protocol == "ollama":
-        return _chat_ollama_result(
+    with _MODEL_CALL_LIMITER.slot():
+        protocol = normalize_protocol(
+            model.get("protocol", ""),
+            model.get("provider", "custom"),
+        )
+        if protocol == "ollama":
+            return _chat_ollama_result(
+                model,
+                messages,
+                temperature=temperature,
+                timeout=timeout,
+                response_format=response_format,
+                max_output_tokens=max_output_tokens,
+            )
+        if protocol == "anthropic":
+            return _chat_anthropic_result(
+                model,
+                messages,
+                temperature=temperature,
+                timeout=timeout,
+                response_format=response_format,
+                max_output_tokens=max_output_tokens,
+            )
+        if protocol == "gemini":
+            return _chat_gemini_result(
+                model,
+                messages,
+                temperature=temperature,
+                timeout=timeout,
+                response_format=response_format,
+                max_output_tokens=max_output_tokens,
+            )
+        return _chat_openai_compatible_result(
             model,
             messages,
             temperature=temperature,
             timeout=timeout,
             response_format=response_format,
             max_output_tokens=max_output_tokens,
+            thinking=thinking,
         )
-    if protocol == "anthropic":
-        return _chat_anthropic_result(
-            model,
-            messages,
-            temperature=temperature,
-            timeout=timeout,
-            response_format=response_format,
-            max_output_tokens=max_output_tokens,
-        )
-    if protocol == "gemini":
-        return _chat_gemini_result(
-            model,
-            messages,
-            temperature=temperature,
-            timeout=timeout,
-            response_format=response_format,
-            max_output_tokens=max_output_tokens,
-        )
-    return _chat_openai_compatible_result(
-        model,
-        messages,
-        temperature=temperature,
-        timeout=timeout,
-        response_format=response_format,
-        max_output_tokens=max_output_tokens,
-        thinking=thinking,
-    )
 
 
 def chat_completion(

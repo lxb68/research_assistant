@@ -232,6 +232,7 @@ class Settings:
     rag_chunk_overlap_tokens = int(os.getenv("RAG_CHUNK_OVERLAP_TOKENS", "80"))
     research_agent_max_context_chars = int(os.getenv("RESEARCH_AGENT_MAX_CONTEXT_CHARS", "18000"))
     research_agent_request_timeout = int(os.getenv("RESEARCH_AGENT_REQUEST_TIMEOUT", "90"))
+    # 进程内所有 Agent 共享同一模型调用额度，避免嵌套并行放大真实请求数。
     agent_model_max_concurrency = max(
         1,
         min(int(os.getenv("AGENT_MODEL_MAX_CONCURRENCY", "4")), 8),
