@@ -39,7 +39,3 @@ service client；持久状态应由 store/repository 管理；领域决策应放
 允许的主依赖方向为：上下文 → 问题契约 → 结构索引 → 候选召回 → 证据组装 →
 证据评估 → 检索补偿或答案生成 → 落地验证。下游组件不得反向修改上游契约。
 
-## 已废弃实现
-
-未使用的 `services/minure.py` 和 `services/mineru_convert.py` 原型已经移除。
-`services/mineru.py` 是当前唯一受支持的 MinerU 集成。
