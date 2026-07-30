@@ -2162,6 +2162,66 @@ class HunterAgent:
             raise ValueError("检索问题不能为空")
         return self._expand_keyword(normalized)
 
+    def translate_search_queries(self, queries: list[str]) -> list[str]:
+        """一次模型调用批量翻译检索词；失败时保持原查询，避免逐条重试放大延迟。"""
+        normalized_queries = [str(query).strip() for query in queries]
+        if any(not query for query in normalized_queries):
+            raise ValueError("检索问题不能为空")
+        results = list(normalized_queries)
+        pending: list[dict[str, str]] = []
+        for index, query in enumerate(normalized_queries):
+            cache_key = query.casefold()
+            if not self._is_chinese(query):
+                continue
+            if cache_key in self.translation_cache:
+                results[index] = self.translation_cache[cache_key]
+                continue
+            pending.append({"id": str(index), "query": query})
+        if not pending:
+            return results
+
+        model = ModelConfigStore().build_auxiliary_model_payload()
+        if not model:
+            self._log("批量翻译跳过：尚未配置可用模型，使用原始检索词")
+            return results
+        try:
+            raw_response = chat_completion(
+                model,
+                [
+                    {
+                        "role": "system",
+                        "content": load_prompt("search/query_translation_batch.en.md"),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps({"queries": pending}, ensure_ascii=False),
+                    },
+                ],
+                temperature=0,
+                timeout=settings.request_timeout,
+                response_format={"type": "json_object"},
+                max_output_tokens=max(512, min(2048, len(pending) * 256)),
+                thinking=False,
+            )
+            payload = json.loads(str(raw_response or "").strip())
+            translations = payload.get("translations") if isinstance(payload, dict) else []
+            translated_by_id = {
+                str(item.get("id") or ""): str(item.get("query") or "").strip()
+                for item in translations or []
+                if isinstance(item, dict) and str(item.get("query") or "").strip()
+            }
+            for item in pending:
+                translated = translated_by_id.get(item["id"], "")
+                if not translated:
+                    continue
+                index = int(item["id"])
+                results[index] = translated
+                self.translation_cache[normalized_queries[index].casefold()] = translated
+            self._log(f"批量翻译完成：{len(translated_by_id)}/{len(pending)} 条")
+        except Exception as error:
+            self._log(f"批量翻译失败，使用原始检索词：{error}")
+        return results
+
     def _expand_keyword(self, keyword: str) -> str:
         """把研究关键词扩展为适合多来源检索的英文词组。"""
         normalized = keyword.strip().lower()

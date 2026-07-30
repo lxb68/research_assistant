@@ -142,6 +142,7 @@ const tabItems: Array<{ id: SettingsTab; label: string; description: string }> =
 const envSectionCatalog: Record<string, Array<{ id: string; label: string; keys: string[] }>> = {
   integrations: [
     { id: "translation", label: "腾讯云翻译", keys: ["TENCENTCLOUD_SECRET_ID", "TENCENTCLOUD_SECRET_KEY", "TENCENT_TRANSLATION_REGION"] },
+    { id: "auxiliary_model", label: "辅助模型", keys: ["AUXILIARY_MODEL_PROVIDER", "AUXILIARY_MODEL_PROTOCOL", "AUXILIARY_MODEL_NAME", "AUXILIARY_MODEL_BASE_URL", "AUXILIARY_MODEL_API_KEY"] },
     { id: "literature", label: "学术检索", keys: ["NCBI_EMAIL", "NCBI_API_KEY", "IEEE_API_KEY", "SEMANTIC_SCHOLAR_API_KEY"] },
     { id: "remote_embedding", label: "远程向量", keys: ["RAG_EMBEDDING_API_KEY", "RAG_EMBEDDING_BASE_URL", "RAG_EMBEDDING_MODEL"] },
     { id: "local_embedding", label: "本地向量", keys: ["RAG_LOCAL_EMBEDDING_BASE_URL", "RAG_LOCAL_EMBEDDING_MODEL", "RAG_LOCAL_EMBEDDING_PROTOCOL", "RAG_LOCAL_EMBEDDING_API_KEY"] },
@@ -149,7 +150,8 @@ const envSectionCatalog: Record<string, Array<{ id: string; label: string; keys:
   research: [
     { id: "candidate_budget", label: "候选召回预算", keys: ["RESEARCH_AGENT_MAX_PAPERS", "RESEARCH_AGENT_MAX_SOURCES"] },
     { id: "evidence_budget", label: "最终证据预算", keys: ["ORCHESTRATOR_MIN_EVIDENCE", "RAG_COMPLEX_TARGET_EVIDENCE", "RESEARCH_AGENT_MAX_EVIDENCE_GROUPS", "RESEARCH_AGENT_MAX_CONTEXT_CHARS"] },
-    { id: "orchestration", label: "任务编排", keys: ["RESEARCH_AGENT_REQUEST_TIMEOUT", "ORCHESTRATOR_MAX_RETRIEVAL_ROUNDS", "ORCHESTRATOR_MAX_ACTION_ROUNDS", "ORCHESTRATOR_SEARCH_LIMIT_PER_SOURCE"] },
+    { id: "orchestration", label: "任务编排", keys: ["RESEARCH_AGENT_REQUEST_TIMEOUT", "AGENT_MODEL_MAX_CONCURRENCY", "ORCHESTRATOR_MAX_RETRIEVAL_ROUNDS", "ORCHESTRATOR_MAX_ACTION_ROUNDS", "ORCHESTRATOR_SEARCH_LIMIT_PER_SOURCE"] },
+    { id: "semantic_validation", label: "语义验证", keys: ["RESEARCH_SEMANTIC_MAX_CONTEXT_CHARS", "RESEARCH_SEMANTIC_MAX_OUTPUT_TOKENS"] },
     { id: "chunking", label: "向量分块", keys: ["RAG_CHUNK_TARGET_TOKENS", "RAG_CHUNK_MAX_TOKENS", "RAG_CHUNK_OVERLAP_TOKENS"] },
     { id: "ranking", label: "混合排序", keys: ["RAG_BM25_WEIGHT", "RAG_VECTOR_WEIGHT"] },
     { id: "graph", label: "知识图谱", keys: ["HYBRID_GRAPH_ENABLED", "HYBRID_GRAPH_PROJECT_ID"] },
@@ -168,6 +170,9 @@ const runtimeLabels: Record<string, string> = {
   port: "监听端口",
   corsOrigins: "允许的前端来源",
   requestTimeoutSeconds: "请求超时（秒）",
+  modelMaxConcurrency: "模型全局并发上限",
+  semanticMaxContextChars: "语义验证字符预算",
+  semanticMaxOutputTokens: "语义验证输出上限",
   logLevel: "日志级别",
   maxPapers: "候选论文上限",
   maxSources: "单路候选证据上限",
@@ -854,7 +859,7 @@ export default function SettingsWorkspace() {
               </>
             ) : null}
 
-            {!isLoading && activeTab === "research" ? renderEnvSections("01", ["translation", "literature", "candidate_budget", "evidence_budget", "orchestration", "chunking", "ranking", "graph"], "translation") : null}
+            {!isLoading && activeTab === "research" ? renderEnvSections("01", ["translation", "literature", "candidate_budget", "evidence_budget", "orchestration", "semantic_validation", "chunking", "ranking", "graph"], "translation") : null}
 
             {!isLoading && activeTab === "environment" ? (
               <>

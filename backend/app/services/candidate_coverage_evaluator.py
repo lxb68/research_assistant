@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
+from app.core.config import settings
 from app.services.evidence_groups import evidence_group_key, group_evidence
 from app.prompt_loader import load_prompt
 from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT_ZH
@@ -23,8 +25,15 @@ class CandidateCoverageEvaluator:
     SYSTEM_PROMPT = load_prompt("evidence/candidate_coverage.zh.md")
     REPAIR_PROMPT = load_prompt("evidence/candidate_coverage_repair.zh.md")
 
-    def __init__(self, *, batch_size: int = 6) -> None:
+    def __init__(self, *, batch_size: int = 6, max_concurrency: int | None = None) -> None:
         self.batch_size = max(1, min(int(batch_size), 20))
+        self.max_concurrency = max(
+            1,
+            min(
+                int(max_concurrency or settings.agent_model_max_concurrency),
+                settings.agent_model_max_concurrency,
+            ),
+        )
 
     def evaluate(
         self,
@@ -79,18 +88,35 @@ class CandidateCoverageEvaluator:
             }
             for item in slots
         ]
+        batches = [
+            evidence_payload[offset : offset + self.batch_size]
+            for offset in range(0, len(evidence_payload), self.batch_size)
+        ]
+        batch_results: dict[int, tuple[dict[str, Any], list[str]]] = {}
+        # 候选批次相互独立；并发上限由单次任务的全局模型预算约束。
+        with ThreadPoolExecutor(
+            max_workers=min(self.max_concurrency, len(batches)),
+            thread_name_prefix="候选证据覆盖",
+        ) as executor:
+            futures = {
+                executor.submit(
+                    self._evaluate_batch,
+                    question=question,
+                    requirements=requirement_payload,
+                    evidence_groups=batch,
+                    completion=completion,
+                    model=model,
+                    timeout=timeout,
+                ): index
+                for index, batch in enumerate(batches)
+            }
+            for future in as_completed(futures):
+                batch_results[futures[future]] = future.result()
+
         assessments: list[dict[str, Any]] = []
         raw_responses: list[str] = []
-        for offset in range(0, len(evidence_payload), self.batch_size):
-            batch = evidence_payload[offset : offset + self.batch_size]
-            payload, batch_responses = self._evaluate_batch(
-                question=question,
-                requirements=requirement_payload,
-                evidence_groups=batch,
-                completion=completion,
-                model=model,
-                timeout=timeout,
-            )
+        for index in range(len(batches)):
+            payload, batch_responses = batch_results[index]
             raw_responses.extend(batch_responses)
             assessments.extend(
                 item
@@ -180,6 +206,8 @@ class CandidateCoverageEvaluator:
             temperature=0,
             timeout=timeout,
             response_format={"type": "json_object"},
+            max_output_tokens=settings.research_semantic_max_output_tokens,
+            thinking=False,
         )
         responses = [str(raw_response or "")]
         try:
@@ -200,6 +228,8 @@ class CandidateCoverageEvaluator:
                 temperature=0,
                 timeout=timeout,
                 response_format={"type": "json_object"},
+                max_output_tokens=settings.research_semantic_max_output_tokens,
+                thinking=False,
             )
             responses.append(str(repaired or ""))
             return self._parse_response(repaired), responses

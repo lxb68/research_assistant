@@ -51,6 +51,21 @@ class GroundingValidator:
                     break
         return GroundingValidationResult(valid=not reasons, reasons=reasons, cited_indices=cited)
 
+    @classmethod
+    def uncited_strong_claim_sentences(
+        cls,
+        answer: str,
+        source_count: int,
+    ) -> list[str]:
+        """返回可精确替换的无同句引用强声明。"""
+        return [
+            sentence
+            for sentence in re.split(r"(?<=[。！？!?])|\n+", answer)
+            if sentence
+            and cls.STRONG_CLAIM_PATTERN.search(sentence)
+            and not cls.extract_citation_indices(sentence, source_count)
+        ]
+
     @staticmethod
     def extract_citation_indices(answer: str, source_count: int) -> set[int]:
         indices: set[int] = set()

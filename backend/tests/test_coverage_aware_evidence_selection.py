@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -93,6 +95,58 @@ class EvidenceBudgetPolicyTest(unittest.TestCase):
 
 
 class CandidateCoverageEvaluatorTest(unittest.TestCase):
+    def test_candidate_batches_use_bounded_parallelism(self) -> None:
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def completion(_model, messages, **_kwargs):
+            nonlocal active, peak
+            payload = json.loads(messages[1]["content"])
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "evidence_ref": item["evidence_ref"],
+                            "requirement_id": "req-a",
+                            "status": "direct",
+                            "confidence": 0.9,
+                        }
+                        for item in payload["evidence_groups"]
+                    ]
+                }
+            )
+
+        evidence = [
+            {
+                "record_id": f"paper-{index}",
+                "chunk_index": index,
+                "text": f"证据 {index}",
+            }
+            for index in range(8)
+        ]
+        matrix, _ = CandidateCoverageEvaluator(
+            batch_size=2,
+            max_concurrency=4,
+        ).evaluate(
+            evidence,
+            [{"id": "req-a", "description": "说明方法"}],
+            question="方法是什么？",
+            question_type="mechanism",
+            completion=completion,
+            model={"model": "test"},
+            timeout=30,
+        )
+
+        self.assertEqual(len(matrix), 8)
+        self.assertEqual(peak, 4)
+
     def test_invalid_json_after_repair_fails_closed(self) -> None:
         completion = Mock(side_effect=["not-json", "still-not-json"])
 

@@ -205,6 +205,38 @@ class ModelConfigStore:
             return None
         return runtime
 
+    def build_auxiliary_model_payload(self) -> dict[str, Any] | None:
+        """构造辅助任务模型；配置不完整时安全回退到主模型。"""
+        model_name = str(settings.auxiliary_model_name or "").strip()
+        base_url = str(settings.auxiliary_model_base_url or "").strip().rstrip("/")
+        if not model_name or not base_url:
+            return self.build_model_payload()
+        provider = str(
+            settings.auxiliary_model_provider or infer_provider(base_url)
+        ).strip().lower()
+        protocol = normalize_protocol(
+            str(settings.auxiliary_model_protocol or ""),
+            provider,
+        )
+        api_key = str(settings.auxiliary_model_api_key or "").strip()
+        if requires_api_key(provider, protocol) and not api_key:
+            return self.build_model_payload()
+        return {
+            "api_key": api_key,
+            "base_url": validate_base_url(base_url),
+            "model": model_name,
+            "provider": provider,
+            "protocol": protocol,
+            "requires_api_key": requires_api_key(provider, protocol),
+            "allow_heuristic_fallback": False,
+            "max_output_tokens": settings.model_max_output_tokens,
+            "system_constraint": SYSTEM_SECURITY_CONSTRAINT,
+            "system_constraints": {
+                "en": SYSTEM_SECURITY_CONSTRAINT_EN,
+                "zh": SYSTEM_SECURITY_CONSTRAINT_ZH,
+            },
+        }
+
     def build_candidate(
         self,
         *,

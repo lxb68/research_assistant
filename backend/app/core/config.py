@@ -232,6 +232,23 @@ class Settings:
     rag_chunk_overlap_tokens = int(os.getenv("RAG_CHUNK_OVERLAP_TOKENS", "80"))
     research_agent_max_context_chars = int(os.getenv("RESEARCH_AGENT_MAX_CONTEXT_CHARS", "18000"))
     research_agent_request_timeout = int(os.getenv("RESEARCH_AGENT_REQUEST_TIMEOUT", "90"))
+    agent_model_max_concurrency = max(
+        1,
+        min(int(os.getenv("AGENT_MODEL_MAX_CONCURRENCY", "4")), 8),
+    )
+    research_semantic_max_context_chars = max(
+        4000,
+        int(os.getenv("RESEARCH_SEMANTIC_MAX_CONTEXT_CHARS", "12000")),
+    )
+    research_semantic_max_output_tokens = max(
+        512,
+        min(int(os.getenv("RESEARCH_SEMANTIC_MAX_OUTPUT_TOKENS", "3072")), 8192),
+    )
+    auxiliary_model_provider = os.getenv("AUXILIARY_MODEL_PROVIDER", "").strip()
+    auxiliary_model_protocol = os.getenv("AUXILIARY_MODEL_PROTOCOL", "").strip()
+    auxiliary_model_name = os.getenv("AUXILIARY_MODEL_NAME", "").strip()
+    auxiliary_model_base_url = os.getenv("AUXILIARY_MODEL_BASE_URL", "").strip()
+    auxiliary_model_api_key = os.getenv("AUXILIARY_MODEL_API_KEY", "").strip()
     # 百炼使用 OpenAI 兼容 Embedding 协议；没有专用变量时复用官方 DASHSCOPE_API_KEY。
     rag_embedding_model = os.getenv("RAG_EMBEDDING_MODEL", "text-embedding-v4")
     rag_embedding_base_url = (

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -20,6 +21,7 @@ from app.services.candidate_coverage_evaluator import CandidateCoverageEvaluator
 from app.services.coverage_aware_evidence_selector import CoverageAwareEvidenceSelector
 from app.services.evidence_budget_policy import EvidenceBudgetPolicy
 from app.services.grounding_validator import GroundingValidator
+from app.services.grounding_repairer import GroundingRepairer
 from app.services.hybrid_graph_retriever import HybridGraphRetriever
 from app.services.evidence_groups import (
     evidence_group_is_complete,
@@ -145,6 +147,7 @@ class ResearchChatAgent:
 
         if not reused_evidence:
             self._log(f"已选取 {len(evidence)} 条相关证据，正在生成回答")
+        answer_started_at = time.perf_counter()
         answer = self._complete(
             model=model,
             question=normalized_question,
@@ -153,6 +156,9 @@ class ResearchChatAgent:
             answer_requirements=answer_requirements or [],
             retrieval_state=retrieval_state or {},
             response_context=response_context,
+        )
+        self._log(
+            f"首次回答生成耗时：{time.perf_counter() - answer_started_at:.2f} 秒"
         )
         retrieved_sources = [
             {
@@ -193,19 +199,47 @@ class ResearchChatAgent:
         retry_reasons = grounding.reasons
         if retry_reasons:
             self._log(f"回答一致性校验未通过，正在重试：{'；'.join(retry_reasons)}")
-            answer = self._complete(
-                model=model,
-                question=normalized_question,
-                resolved_question=str(retrieval_query or normalized_question).strip(),
-                evidence=evidence,
-                answer_requirements=answer_requirements or [],
+            retry_started_at = time.perf_counter()
+            repaired_answer = answer
+            if retry_reasons == [
+                "包含首次、最优或量化比较的强声明没有在同一句中引用直接证据"
+            ]:
+                try:
+                    repaired_answer = GroundingRepairer(
+                        completion=chat_completion
+                    ).repair_strong_claims(
+                        answer,
+                        evidence_context=self.retriever.build_context(evidence),
+                        source_count=len(retrieved_sources),
+                        model=model,
+                        timeout=self.config.request_timeout,
+                    )
+                except Exception as error:
+                    self._log(f"局部引用修订失败，将回退整篇修订：{error}")
+            repaired_validation = self._grounding_validator().validate(
+                repaired_answer,
+                source_count=len(retrieved_sources),
                 retrieval_state=retrieval_state or {},
-                response_context=response_context,
-                revision_instruction=(
-                    "上一次草稿未通过一致性校验。请重新回答，并修正以下问题："
-                    + "；".join(retry_reasons)
-                    + "。当前检索状态优先于历史对话中的旧判断。"
-                ),
+            )
+            if repaired_validation.valid:
+                answer = repaired_answer
+            else:
+                answer = self._complete(
+                    model=model,
+                    question=normalized_question,
+                    resolved_question=str(retrieval_query or normalized_question).strip(),
+                    evidence=evidence,
+                    answer_requirements=answer_requirements or [],
+                    retrieval_state=retrieval_state or {},
+                    response_context=response_context,
+                    revision_instruction=(
+                        "上一次草稿未通过一致性校验。请重新回答，并修正以下问题："
+                        + "；".join(retry_reasons)
+                        + "。当前检索状态优先于历史对话中的旧判断。"
+                    ),
+                )
+            self._log(
+                f"回答修订耗时：{time.perf_counter() - retry_started_at:.2f} 秒"
             )
             cited_indices = self._grounding_validator().extract_citation_indices(answer, len(retrieved_sources))
         sources = [source for source in retrieved_sources if source["index"] in cited_indices]
@@ -374,7 +408,8 @@ class ResearchChatAgent:
                         "candidate_coverage_evaluator",
                         CandidateCoverageEvaluator(),
                     )
-                    coverage_matrix, _ = coverage_evaluator.evaluate(
+                    coverage_started_at = time.perf_counter()
+                    coverage_matrix, coverage_raw = coverage_evaluator.evaluate(
                         evidence,
                         requirements,
                         question=query,
@@ -384,6 +419,13 @@ class ResearchChatAgent:
                         timeout=self.config.request_timeout,
                     )
                     evidence = coverage_evaluator.annotate(evidence, coverage_matrix)
+                    selection_diagnostics["candidateCoverageDurationMs"] = round(
+                        (time.perf_counter() - coverage_started_at) * 1000,
+                        2,
+                    )
+                    selection_diagnostics["candidateCoverageResponseChars"] = len(
+                        coverage_raw
+                    )
                 except Exception as error:
                     coverage_validation_error = str(error)
                     self._log(f"候选证据语义覆盖判定失败，将保留检索候选并由最终验证器兜底：{error}")
@@ -460,8 +502,8 @@ class ResearchChatAgent:
         merged: dict[tuple[str, int], dict[str, Any]] = {}
         retrieval_runs: list[dict[str, Any]] = []
         per_facet_limit = max(2, min(4, target_evidence_count // max(1, len(facets)) + 1))
+        prepared_facets: list[tuple[dict[str, Any], str, str, set[str]]] = []
         for facet in facets[: settings.query_planner_max_facets]:
-            facet_id = str(facet.get("id") or f"facet-{len(retrieval_runs) + 1}")
             facet_query = str(facet.get("query") or "").strip()
             if not facet_query:
                 continue
@@ -474,8 +516,33 @@ class ResearchChatAgent:
                 question_type=question_type,
                 preferred_types=preferred_types,
             )
+            prepared_facets.append(
+                (facet, facet_query, expanded_facet_query, preferred_types)
+            )
+        source_queries = [item[2] for item in prepared_facets]
+        translated_queries = self.hunter.translate_search_queries(source_queries)
+        if (
+            not isinstance(translated_queries, list)
+            or len(translated_queries) != len(source_queries)
+        ):
+            # 兼容仅实现旧单条翻译接口的注入式 Hunter；生产实现始终走批量接口。
+            translated_queries = [
+                self.hunter.translate_search_query(query)
+                for query in source_queries
+            ]
+        for (facet, facet_query, expanded_facet_query, preferred_types), translated_query in zip(
+            prepared_facets,
+            translated_queries,
+        ):
+            facet_id = str(facet.get("id") or f"facet-{len(retrieval_runs) + 1}")
+            compiled_query = compile_tfidf_query(facet) or facet_query
             results = self.retriever.retrieve(
-                self._expand_retrieval_query(expanded_facet_query),
+                (
+                    expanded_facet_query
+                    if translated_query.strip().casefold()
+                    == expanded_facet_query.strip().casefold()
+                    else f"{expanded_facet_query}\n{translated_query}".strip()
+                ),
                 papers,
                 minimum_evidence_count=per_facet_limit,
                 section_score_adjuster=lambda section, preferred=preferred_types: self._section_intent_adjustment(
@@ -875,7 +942,7 @@ class ResearchChatAgent:
         scope_profile: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], str]:
         """兼容原入口，并把实际规划委托给独立 QueryPlanningAgent。"""
-        model = ModelConfigStore().build_model_payload()
+        model = ModelConfigStore().build_auxiliary_model_payload()
         if not model:
             raise ValueError("请先配置模型参数")
         planner = QueryPlanningAgent(

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from app.core.config import settings
 from app.prompt_loader import load_prompt
 from app.services.model_config import SYSTEM_SECURITY_CONSTRAINT_ZH
+from app.services.intermediate_result_cache import StrictIntermediateCache
 from app.services.retrieval_contracts import (
     flatten_requirement_slots,
     normalize_requirement,
@@ -20,6 +22,7 @@ class EvidenceEvaluator:
 
     METHOD_SECTION_TYPES = {"method", "framework", "protocol", "algorithm", "implementation", "overview"}
     SEMANTIC_PROMPT = load_prompt("evidence/evaluator.zh.md")
+    _semantic_cache = StrictIntermediateCache(max_entries=128)
 
     def evaluate(
         self,
@@ -97,10 +100,211 @@ class EvidenceEvaluator:
         model: dict[str, Any],
         timeout: int,
     ) -> tuple[dict[str, Any], str]:
+        """按证据、合同、模型和提示词完整指纹复用语义验证结果。"""
+        cache_key = self._semantic_cache.make_key(
+            "semantic-evidence-v1",
+            {
+                "evidence": evidence,
+                "plan": plan,
+                "model": {
+                    "provider": model.get("provider"),
+                    "protocol": model.get("protocol"),
+                    "model": model.get("model"),
+                },
+                "prompt": self.SEMANTIC_PROMPT,
+                "contextBudget": settings.research_semantic_max_context_chars,
+                "outputTokens": settings.research_semantic_max_output_tokens,
+            },
+        )
+        cached = self._semantic_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = self._evaluate_semantic_parallel(
+            evidence,
+            plan,
+            completion=completion,
+            model=model,
+            timeout=timeout,
+        )
+        self._semantic_cache.put(cache_key, result)
+        return result
+
+    def _evaluate_semantic_parallel(
+        self,
+        evidence: list[dict[str, Any]],
+        plan: dict[str, Any],
+        *,
+        completion: Callable[..., str],
+        model: dict[str, Any],
+        timeout: int,
+    ) -> tuple[dict[str, Any], str]:
+        """按核心要求分组并行验证；单要求保持原有单调用路径。"""
+        requirements = [
+            dict(item)
+            for item in (
+                plan.get("requirementSpecs")
+                or plan.get("coreRequirements")
+                or []
+            )
+            if isinstance(item, dict) and item.get("required") is not False
+        ]
+        worker_count = min(
+            settings.agent_model_max_concurrency,
+            len(requirements),
+        )
+        if worker_count <= 1:
+            return self._evaluate_semantic_uncached(
+                evidence,
+                plan,
+                completion=completion,
+                model=model,
+                timeout=timeout,
+            )
+
+        groups: list[list[dict[str, Any]]] = [[] for _ in range(worker_count)]
+        for index, requirement in enumerate(requirements):
+            groups[index % worker_count].append(requirement)
+        tasks: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
+        all_facets = [
+            dict(item)
+            for item in plan.get("retrievalFacets") or []
+            if isinstance(item, dict)
+        ]
+        for group_index, group in enumerate(groups):
+            requirement_ids = {str(item.get("id") or "") for item in group}
+            support_ids = set(requirement_ids)
+            for item in group:
+                support_ids.update(
+                    str(slot.get("id") or "")
+                    for slot in item.get("coverageSlots") or []
+                    if isinstance(slot, dict)
+                )
+            relevant_evidence = [
+                item
+                for item in evidence
+                if support_ids
+                & {
+                    str(value)
+                    for value in (item.get("requirement_support") or {}).keys()
+                }
+            ]
+            subplan = dict(plan)
+            subplan["requirementSpecs"] = group
+            subplan["coreRequirements"] = group
+            subplan["retrievalFacets"] = [
+                facet
+                for facet in all_facets
+                if (
+                    requirement_ids
+                    & {
+                        str(value)
+                        for value in facet.get("requirementIds") or []
+                    }
+                )
+                or (
+                    group_index == 0
+                    and not list(facet.get("requirementIds") or [])
+                )
+            ]
+            # 缺少候选覆盖标注时保留完整证据，宁可多耗时也不静默降低质量。
+            tasks.append((relevant_evidence or evidence, subplan))
+
+        results: dict[int, tuple[dict[str, Any], str]] = {}
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="语义证据验证",
+        ) as executor:
+            futures = {
+                executor.submit(
+                    self._evaluate_semantic_uncached,
+                    task_evidence,
+                    task_plan,
+                    completion=completion,
+                    model=model,
+                    timeout=timeout,
+                ): index
+                for index, (task_evidence, task_plan) in enumerate(tasks)
+            }
+            for future in as_completed(futures):
+                results[futures[future]] = future.result()
+        ordered = [results[index] for index in range(len(tasks))]
+        return self._merge_parallel_results(ordered)
+
+    @staticmethod
+    def _merge_parallel_results(
+        results: list[tuple[dict[str, Any], str]],
+    ) -> tuple[dict[str, Any], str]:
+        merged: dict[str, Any] = {
+            "semanticValidated": True,
+            "answerable": True,
+        }
+        list_fields = (
+            "facetAssessments",
+            "requirementAssessments",
+            "slotAssessments",
+            "optionalAssessments",
+        )
+        for field in list_fields:
+            by_id: dict[str, dict[str, Any]] = {}
+            for evaluation, _ in results:
+                for item in evaluation.get(field) or []:
+                    if isinstance(item, dict) and str(item.get("id") or ""):
+                        by_id[str(item["id"])] = dict(item)
+            merged[field] = list(by_id.values())
+        for field in (
+            "missingFacetIds",
+            "blockingMissingFacetIds",
+            "exploratoryMissingFacetIds",
+            "missingRequirementIds",
+            "missingSlotIds",
+        ):
+            merged[field] = list(
+                dict.fromkeys(
+                    str(value)
+                    for evaluation, _ in results
+                    for value in evaluation.get(field) or []
+                    if str(value)
+                )
+            )
+        refinements: dict[str, dict[str, Any]] = {}
+        for evaluation, _ in results:
+            merged["answerable"] = bool(
+                merged["answerable"] and evaluation.get("answerable")
+            )
+            for item in evaluation.get("refinementFacets") or []:
+                if isinstance(item, dict):
+                    key = str(item.get("id") or item.get("query") or "")
+                    if key:
+                        refinements[key] = dict(item)
+        merged["refinementFacets"] = list(refinements.values())
+        merged["facetCoverage"] = round(
+            sum(
+                item.get("status") == "supported"
+                for item in merged["facetAssessments"]
+            )
+            / max(1, len(merged["facetAssessments"])),
+            4,
+        )
+        return merged, "\n".join(raw for _, raw in results if raw)
+
+    def _evaluate_semantic_uncached(
+        self,
+        evidence: list[dict[str, Any]],
+        plan: dict[str, Any],
+        *,
+        completion: Callable[..., str],
+        model: dict[str, Any],
+        timeout: int,
+    ) -> tuple[dict[str, Any], str]:
         """让模型逐项验证真实证据支持度，并严格校验其证据引用。"""
         evidence_payload: list[dict[str, Any]] = []
         known_refs: set[str] = set()
         evidence_metadata: dict[str, dict[str, str]] = {}
+        evidence_count = max(1, len(evidence))
+        per_evidence_text_budget = max(
+            500,
+            settings.research_semantic_max_context_chars // evidence_count,
+        )
         for item in evidence:
             record_id = str(item.get("record_id") or "")
             chunk_index = int(item.get("chunk_index") or 0)
@@ -115,7 +319,7 @@ class EvidenceEvaluator:
                     "ref": reference,
                     "title": str(item.get("title") or "")[:500],
                     "section": str(item.get("section") or "")[:1000],
-                    "text": str(item.get("text") or "")[:3500],
+                    "text": str(item.get("text") or "")[:per_evidence_text_budget],
                 }
             )
         facets = [
@@ -198,6 +402,8 @@ class EvidenceEvaluator:
             temperature=0,
             timeout=timeout,
             response_format={"type": "json_object"},
+            max_output_tokens=settings.research_semantic_max_output_tokens,
+            thinking=False,
         )
         try:
             payload = self._parse_semantic_response(raw_response)

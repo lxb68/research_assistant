@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from typing import Any, Callable
 
 from app.agents.domainTree_agent import DomainTreeAgent
@@ -193,6 +194,7 @@ class OrchestratorAgent:
         **completion_kwargs: Any,
     ) -> str:
         """复用统一恢复器执行无副作用的模型推理调用。"""
+        started_at = time.perf_counter()
         try:
             result, recovery_trace = await self.recovery.execute(
                 operation_name,
@@ -223,7 +225,13 @@ class OrchestratorAgent:
             "ErrorRecoveryAgent",
             f"{operation_name}完成",
             event="model_call_recovery",
-            data={"trace": recovery_trace},
+            data={
+                "trace": recovery_trace,
+                "durationMs": round(
+                    (time.perf_counter() - started_at) * 1000,
+                    2,
+                ),
+            },
         )
         return str(result or "")
 
@@ -237,7 +245,7 @@ class OrchestratorAgent:
         cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         """使用已配置模型判断是否需要研究 Agent，并在无需工具时直接作答。"""
-        model = ModelConfigStore().build_model_payload()
+        model = ModelConfigStore().build_auxiliary_model_payload()
         if not model:
             raise ValueError("请先配置模型参数")
 
@@ -895,7 +903,7 @@ class OrchestratorAgent:
     ) -> dict[str, Any]:
         """进入有界行动—观察循环，直到工具信息足以形成回答。"""
         raise_if_task_cancelled(cancel_event)
-        model = ModelConfigStore().build_model_payload()
+        model = ModelConfigStore().build_auxiliary_model_payload()
         if not model:
             raise ValueError("请先配置模型参数")
 
@@ -1485,6 +1493,8 @@ class OrchestratorAgent:
         max_retrieval_rounds = max(1, min(settings.orchestrator_max_retrieval_rounds, 3))
         refinement_facets = self.retrieval_refiner.refine(plan, evaluation) if not sufficient else []
         if not sufficient and max_retrieval_rounds > 1 and refinement_facets:
+                previous_evidence = list(evidence)
+                previous_evaluation = dict(evaluation)
                 self._log("首轮证据存在覆盖缺口，正在执行一次补偿检索")
                 self._progress(66, "retrieving", "正在补偿检索证据缺口")
                 raise_if_task_cancelled(cancel_event)
@@ -1508,13 +1518,33 @@ class OrchestratorAgent:
                 )
                 raise_if_task_cancelled(cancel_event)
                 self._progress(72, "validating", "正在验证补偿检索结果")
-                evaluation = await self._evaluate_retrieved_evidence(
-                    diagnostics,
-                    evidence=evidence,
-                    plan=plan,
-                    required_paper_ids=required_paper_ids,
-                    required_chunk_refs=target_chunks,
+                incremental_evidence, incremental_plan = self._incremental_validation_inputs(
+                    previous_evidence,
+                    evidence,
+                    plan,
+                    previous_evaluation,
+                    refinement_facets,
                 )
+                if incremental_evidence:
+                    incremental_evaluation = await self._evaluate_retrieved_evidence(
+                        diagnostics,
+                        evidence=incremental_evidence,
+                        plan=incremental_plan,
+                        required_paper_ids=required_paper_ids,
+                        required_chunk_refs=target_chunks,
+                    )
+                    evaluation = self._merge_incremental_evaluation(
+                        previous_evaluation,
+                        incremental_evaluation,
+                    )
+                else:
+                    evaluation = previous_evaluation
+                    self.run_logger.log(
+                        "EvidenceEvaluator",
+                        "补偿检索未产生新证据，跳过重复语义验证",
+                        event="semantic_evidence_assessment_skipped",
+                        data={"reason": "unchanged_evidence_fingerprint"},
+                    )
                 sufficient = bool(evaluation["sufficient"])
                 reasons = list(evaluation["reasons"])
                 self.run_logger.log(
@@ -1819,6 +1849,113 @@ class OrchestratorAgent:
             "result": {**result, "trace": trace, "runLog": self.run_logger.public_info()},
         }
 
+    @staticmethod
+    def _evidence_identity(item: dict[str, Any]) -> tuple[str, int, str]:
+        return (
+            str(item.get("record_id") or ""),
+            int(item.get("chunk_index") or 0),
+            str(item.get("text") or ""),
+        )
+
+    def _incremental_validation_inputs(
+        self,
+        previous_evidence: list[dict[str, Any]],
+        current_evidence: list[dict[str, Any]],
+        plan: dict[str, Any],
+        previous_evaluation: dict[str, Any],
+        refinement_facets: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """只构造缺失要求及其新增/相关证据，避免补偿轮完整重验。"""
+        previous_keys = {
+            self._evidence_identity(item) for item in previous_evidence
+        }
+        missing_ids = {
+            str(value)
+            for value in [
+                *list(previous_evaluation.get("missingRequirementIds") or []),
+                *list(previous_evaluation.get("missingSlotIds") or []),
+            ]
+            if str(value)
+        }
+        selected: list[dict[str, Any]] = []
+        for item in current_evidence:
+            support_ids = {
+                str(value)
+                for value in (item.get("requirement_support") or {}).keys()
+            }
+            if (
+                self._evidence_identity(item) not in previous_keys
+                or bool(support_ids & missing_ids)
+            ):
+                selected.append(item)
+        if not any(
+            self._evidence_identity(item) not in previous_keys for item in selected
+        ):
+            return [], dict(plan)
+
+        incremental_plan = dict(plan)
+        if missing_ids:
+            requirements = [
+                dict(item)
+                for item in (
+                    plan.get("requirementSpecs")
+                    or plan.get("coreRequirements")
+                    or []
+                )
+                if isinstance(item, dict)
+                and str(item.get("id") or "") in missing_ids
+            ]
+            if requirements:
+                incremental_plan["requirementSpecs"] = requirements
+                incremental_plan["coreRequirements"] = requirements
+        incremental_plan["retrievalFacets"] = [
+            dict(item) for item in refinement_facets if isinstance(item, dict)
+        ]
+        return selected, incremental_plan
+
+    @staticmethod
+    def _merge_incremental_evaluation(
+        previous: dict[str, Any],
+        incremental: dict[str, Any],
+    ) -> dict[str, Any]:
+        """按稳定 ID 合并验证结果，新一轮只覆盖实际重验的项目。"""
+        merged = {**previous, **incremental}
+        for field in (
+            "facetAssessments",
+            "requirementAssessments",
+            "slotAssessments",
+        ):
+            by_id = {
+                str(item.get("id") or ""): dict(item)
+                for item in previous.get(field) or []
+                if isinstance(item, dict) and str(item.get("id") or "")
+            }
+            by_id.update(
+                {
+                    str(item.get("id") or ""): dict(item)
+                    for item in incremental.get(field) or []
+                    if isinstance(item, dict) and str(item.get("id") or "")
+                }
+            )
+            merged[field] = list(by_id.values())
+        merged["missingRequirementIds"] = [
+            str(item.get("id") or "")
+            for item in merged.get("requirementAssessments") or []
+            if item.get("status") != "supported"
+        ]
+        merged["missingSlotIds"] = [
+            str(item.get("id") or "")
+            for item in merged.get("slotAssessments") or []
+            if item.get("status") != "supported"
+        ]
+        merged["answerable"] = not (
+            merged["missingRequirementIds"] or merged["missingSlotIds"]
+        )
+        merged["sufficient"] = bool(
+            incremental.get("sufficient") and merged["answerable"]
+        )
+        return merged
+
     def _assess_evidence(
         self,
         diagnostics: dict[str, Any],
@@ -1872,6 +2009,7 @@ class OrchestratorAgent:
         if not model:
             return {**evaluation, "semanticValidated": False, "semanticValidationError": "模型未配置"}
         try:
+            semantic_started_at = time.perf_counter()
             semantic, raw_response = await asyncio.to_thread(
                 self.evidence_evaluator.evaluate_semantic,
                 evidence,
@@ -1892,6 +2030,12 @@ class OrchestratorAgent:
                     "requirementAssessments": semantic.get("requirementAssessments", []),
                     "slotAssessments": semantic.get("slotAssessments", []),
                     "answerable": semantic.get("answerable", False),
+                    "durationMs": round(
+                        (time.perf_counter() - semantic_started_at) * 1000,
+                        2,
+                    ),
+                    "evidenceCount": len(evidence),
+                    "inputCharacterBudget": settings.research_semantic_max_context_chars,
                 },
             )
         except Exception as error:

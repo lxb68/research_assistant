@@ -674,6 +674,83 @@ class IterativeOrchestratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["id"] for item in second_call.kwargs["retrieval_facets"]], ["protocol"])
         self.assertEqual(second_call.kwargs["existing_evidence"], first_evidence)
 
+    def test_incremental_validation_keeps_only_missing_requirements_and_related_evidence(self) -> None:
+        agent = OrchestratorAgent()
+        previous = [
+            {
+                "record_id": "paper-1",
+                "chunk_index": 1,
+                "text": "已支持证据",
+                "requirement_support": {"req-1": {"status": "direct"}},
+            },
+            {
+                "record_id": "paper-2",
+                "chunk_index": 2,
+                "text": "部分支持证据",
+                "requirement_support": {"req-2": {"status": "partial"}},
+            },
+        ]
+        added = {
+            "record_id": "paper-3",
+            "chunk_index": 3,
+            "text": "新增直接证据",
+            "requirement_support": {"req-2": {"status": "direct"}},
+        }
+        evidence, plan = agent._incremental_validation_inputs(
+            previous,
+            [*previous, added],
+            {
+                "requirementSpecs": [
+                    {"id": "req-1", "description": "要求一"},
+                    {"id": "req-2", "description": "要求二"},
+                ],
+                "retrievalFacets": [],
+            },
+            {
+                "missingRequirementIds": ["req-2"],
+                "missingSlotIds": [],
+            },
+            [{"id": "facet-2", "query": "要求二"}],
+        )
+
+        self.assertEqual(
+            [(item["record_id"], item["chunk_index"]) for item in evidence],
+            [("paper-2", 2), ("paper-3", 3)],
+        )
+        self.assertEqual(
+            [item["id"] for item in plan["requirementSpecs"]],
+            ["req-2"],
+        )
+
+    def test_incremental_evaluation_merge_preserves_completed_requirements(self) -> None:
+        merged = OrchestratorAgent._merge_incremental_evaluation(
+            {
+                "requirementAssessments": [
+                    {"id": "req-1", "status": "supported"},
+                    {"id": "req-2", "status": "partial"},
+                ],
+                "slotAssessments": [
+                    {"id": "slot-1", "status": "supported"},
+                    {"id": "slot-2", "status": "partial"},
+                ],
+                "sufficient": False,
+            },
+            {
+                "requirementAssessments": [
+                    {"id": "req-2", "status": "supported"},
+                ],
+                "slotAssessments": [
+                    {"id": "slot-2", "status": "supported"},
+                ],
+                "sufficient": True,
+            },
+        )
+
+        self.assertTrue(merged["sufficient"])
+        self.assertTrue(merged["answerable"])
+        self.assertEqual(merged["missingRequirementIds"], [])
+        self.assertEqual(merged["missingSlotIds"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

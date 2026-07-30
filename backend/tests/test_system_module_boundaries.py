@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from unittest.mock import Mock
 
 from app.agents.evidence_evaluator import EvidenceEvaluator
@@ -13,6 +15,7 @@ from app.services.context_resolver import ContextResolver
 from app.services.document_structure_indexer import DocumentStructureIndexer
 from app.services.document_capabilities import normalize_document_requirements
 from app.services.grounding_validator import GroundingValidator
+from app.services.grounding_repairer import GroundingRepairer
 from app.services.evidence_availability import EvidenceAvailabilityEvaluator
 from app.services.material_request_policy import MaterialRequestPolicy
 from app.services.question_contract_builder import QuestionContractBuilder
@@ -217,6 +220,120 @@ def test_semantic_context_contract_validates_mode_and_current_question_basis() -
     assert classification.repaired is False
 
 
+def test_semantic_evaluator_enforces_total_input_budget_and_generation_limits() -> None:
+    EvidenceEvaluator._semantic_cache.clear()
+    captured: dict = {}
+
+    def completion(_model, messages, **kwargs):
+        captured["payload"] = json.loads(messages[1]["content"])
+        captured["kwargs"] = kwargs
+        return "{}"
+
+    EvidenceEvaluator().evaluate_semantic(
+        [
+            {
+                "record_id": f"paper-{index}",
+                "chunk_index": index,
+                "text": "证据" * 2000,
+            }
+            for index in range(12)
+        ],
+        {"standaloneQuestion": "概括研究结论"},
+        completion=completion,
+        model={"model": "test"},
+        timeout=30,
+    )
+
+    assert sum(
+        len(item["text"]) for item in captured["payload"]["evidence"]
+    ) <= 12000
+    assert captured["kwargs"]["max_output_tokens"] == 3072
+    assert captured["kwargs"]["thinking"] is False
+
+
+def test_semantic_evaluator_reuses_only_identical_intermediate_results() -> None:
+    EvidenceEvaluator._semantic_cache.clear()
+    completion = Mock(return_value="{}")
+    evaluator = EvidenceEvaluator()
+    evidence = [{"record_id": "cache-paper", "chunk_index": 1, "text": "缓存证据"}]
+    plan = {"standaloneQuestion": "缓存问题"}
+
+    first = evaluator.evaluate_semantic(
+        evidence,
+        plan,
+        completion=completion,
+        model={"model": "cache-model"},
+        timeout=30,
+    )
+    second = evaluator.evaluate_semantic(
+        evidence,
+        plan,
+        completion=completion,
+        model={"model": "cache-model"},
+        timeout=30,
+    )
+
+    assert first == second
+    assert completion.call_count == 1
+
+
+def test_semantic_evaluator_parallelizes_independent_requirement_groups() -> None:
+    EvidenceEvaluator._semantic_cache.clear()
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def completion(_model, messages, **_kwargs):
+        nonlocal active, peak
+        payload = json.loads(messages[1]["content"])
+        reference = payload["evidence"][0]["ref"]
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        assessments = [
+            {
+                "id": item["id"],
+                "status": "supported",
+                "supporting_refs": [reference],
+            }
+            for item in payload["coverage_slots"]
+        ]
+        return json.dumps(
+            {
+                "requirements": assessments,
+                "coverage_slots": assessments,
+            }
+        )
+
+    requirements = [
+        {"id": f"parallel-req-{index}", "description": f"要求 {index}"}
+        for index in range(4)
+    ]
+    evaluation, _ = EvidenceEvaluator().evaluate_semantic(
+        [
+            {
+                "record_id": f"parallel-paper-{index}",
+                "chunk_index": index,
+                "text": f"证据 {index}",
+            }
+            for index in range(4)
+        ],
+        {
+            "standaloneQuestion": "并行验证问题",
+            "requirementSpecs": requirements,
+        },
+        completion=completion,
+        model={"model": "parallel-model"},
+        timeout=30,
+    )
+
+    assert evaluation["answerable"] is True
+    assert peak == 4
+
+
 def test_semantic_context_contract_repairs_unverifiable_classification() -> None:
     classification = SemanticContextContractBuilder().build(
         {"mode": "reference", "basis": ["上面两篇"]},
@@ -353,3 +470,31 @@ def test_grounding_validator_requires_inline_evidence_for_strong_claims() -> Non
     assert invalid.valid is False
     assert any("强声明" in reason for reason in invalid.reasons)
     assert valid.valid is True
+
+
+def test_grounding_repairer_only_replaces_identified_strong_claim_sentence() -> None:
+    answer = "该方法首次实现目标。背景说明保持不变 [1]。"
+    completion = Mock(
+        return_value=json.dumps(
+            {
+                "repairs": [
+                    {
+                        "original": "该方法首次实现目标。",
+                        "replacement": "论文作者将其描述为首次实现目标 [1]。",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    repaired = GroundingRepairer(completion=completion).repair_strong_claims(
+        answer,
+        evidence_context="[1] 原文明确声明首次实现目标。",
+        source_count=1,
+        model={"model": "test"},
+        timeout=30,
+    )
+
+    assert repaired == "论文作者将其描述为首次实现目标 [1]。背景说明保持不变 [1]。"
+    assert completion.call_args.kwargs["thinking"] is False
