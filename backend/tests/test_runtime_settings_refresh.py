@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.core.config import runtime_config_manager
+from app.agents.research_chat_agent import ResearchAgentConfig
 from app.services.env_config import EnvConfigStore
 from app.services.runtime_settings import (
     RuntimeConfigManager,
@@ -114,6 +115,42 @@ class RuntimeSettingsRefreshTest(unittest.TestCase):
                 store.update({"SPLIT_MIN_LENGTH": 3000, "SPLIT_MAX_LENGTH": 2000})
 
             self.assertFalse(env_path.exists())
+
+    def test_new_research_agent_config_reads_latest_runtime_values(self) -> None:
+        with patch(
+            "app.agents.research_chat_agent.settings.research_agent_max_sources",
+            11,
+        ), patch(
+            "app.agents.research_chat_agent.settings.research_agent_max_evidence_groups",
+            14,
+        ):
+            config = ResearchAgentConfig()
+
+        self.assertEqual(config.max_sources, 11)
+        self.assertEqual(config.max_evidence_groups, 14)
+
+    def test_evidence_budget_controls_hot_reload_for_new_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = isolated_runtime_manager()
+            store = EnvConfigStore(Path(temporary) / ".env", runtime_manager=manager)
+
+            result = store.update(
+                {
+                    "RAG_COMPLEX_TARGET_EVIDENCE": 8,
+                    "RESEARCH_AGENT_MAX_EVIDENCE_GROUPS": 14,
+                }
+            )
+
+            snapshot = manager.snapshot()
+            self.assertEqual(snapshot.get("rag_complex_target_evidence"), 8)
+            self.assertEqual(snapshot.get("research_agent_max_evidence_groups"), 14)
+            self.assertEqual(
+                result["appliedKeys"],
+                [
+                    "RAG_COMPLEX_TARGET_EVIDENCE",
+                    "RESEARCH_AGENT_MAX_EVIDENCE_GROUPS",
+                ],
+            )
 
 
 if __name__ == "__main__":

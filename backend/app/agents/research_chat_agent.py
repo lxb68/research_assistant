@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -42,14 +42,21 @@ LogCallback = Callable[[str], None]
 @dataclass(slots=True)
 class ResearchAgentConfig:
     """集中描述研究问答代理的运行参数。"""
-    max_papers: int = settings.research_agent_max_papers
-    max_sources: int = settings.research_agent_max_sources
-    max_evidence_groups: int = settings.research_agent_max_evidence_groups
-    target_chunk_tokens: int = settings.rag_chunk_target_tokens
-    max_chunk_tokens: int = settings.rag_chunk_max_tokens
-    overlap_tokens: int = settings.rag_chunk_overlap_tokens
-    max_context_chars: int = settings.research_agent_max_context_chars
-    request_timeout: int = settings.research_agent_request_timeout
+    # 使用 default_factory，确保设置页热更新后新建代理读取最新运行时快照。
+    max_papers: int = field(default_factory=lambda: settings.research_agent_max_papers)
+    max_sources: int = field(default_factory=lambda: settings.research_agent_max_sources)
+    max_evidence_groups: int = field(
+        default_factory=lambda: settings.research_agent_max_evidence_groups
+    )
+    target_chunk_tokens: int = field(default_factory=lambda: settings.rag_chunk_target_tokens)
+    max_chunk_tokens: int = field(default_factory=lambda: settings.rag_chunk_max_tokens)
+    overlap_tokens: int = field(default_factory=lambda: settings.rag_chunk_overlap_tokens)
+    max_context_chars: int = field(
+        default_factory=lambda: settings.research_agent_max_context_chars
+    )
+    request_timeout: int = field(
+        default_factory=lambda: settings.research_agent_request_timeout
+    )
 
 
 class ResearchChatAgent:

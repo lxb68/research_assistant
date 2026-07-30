@@ -147,8 +147,9 @@ const envSectionCatalog: Record<string, Array<{ id: string; label: string; keys:
     { id: "local_embedding", label: "本地向量", keys: ["RAG_LOCAL_EMBEDDING_BASE_URL", "RAG_LOCAL_EMBEDDING_MODEL", "RAG_LOCAL_EMBEDDING_PROTOCOL", "RAG_LOCAL_EMBEDDING_API_KEY"] },
   ],
   research: [
-    { id: "research_budget", label: "研究预算", keys: ["RESEARCH_AGENT_MAX_PAPERS", "RESEARCH_AGENT_MAX_SOURCES", "RESEARCH_AGENT_MAX_CONTEXT_CHARS", "RESEARCH_AGENT_REQUEST_TIMEOUT"] },
-    { id: "orchestration", label: "任务编排", keys: ["ORCHESTRATOR_MIN_EVIDENCE", "ORCHESTRATOR_MAX_RETRIEVAL_ROUNDS", "ORCHESTRATOR_MAX_ACTION_ROUNDS", "ORCHESTRATOR_SEARCH_LIMIT_PER_SOURCE"] },
+    { id: "candidate_budget", label: "候选召回预算", keys: ["RESEARCH_AGENT_MAX_PAPERS", "RESEARCH_AGENT_MAX_SOURCES"] },
+    { id: "evidence_budget", label: "最终证据预算", keys: ["ORCHESTRATOR_MIN_EVIDENCE", "RAG_COMPLEX_TARGET_EVIDENCE", "RESEARCH_AGENT_MAX_EVIDENCE_GROUPS", "RESEARCH_AGENT_MAX_CONTEXT_CHARS"] },
+    { id: "orchestration", label: "任务编排", keys: ["RESEARCH_AGENT_REQUEST_TIMEOUT", "ORCHESTRATOR_MAX_RETRIEVAL_ROUNDS", "ORCHESTRATOR_MAX_ACTION_ROUNDS", "ORCHESTRATOR_SEARCH_LIMIT_PER_SOURCE"] },
     { id: "chunking", label: "向量分块", keys: ["RAG_CHUNK_TARGET_TOKENS", "RAG_CHUNK_MAX_TOKENS", "RAG_CHUNK_OVERLAP_TOKENS"] },
     { id: "ranking", label: "混合排序", keys: ["RAG_BM25_WEIGHT", "RAG_VECTOR_WEIGHT"] },
     { id: "graph", label: "知识图谱", keys: ["HYBRID_GRAPH_ENABLED", "HYBRID_GRAPH_PROJECT_ID"] },
@@ -168,10 +169,12 @@ const runtimeLabels: Record<string, string> = {
   corsOrigins: "允许的前端来源",
   requestTimeoutSeconds: "请求超时（秒）",
   logLevel: "日志级别",
-  maxPapers: "最大候选论文数",
-  maxSources: "最大证据来源数",
-  maxContextChars: "最大上下文字符数",
-  minimumEvidence: "最少证据数",
+  maxPapers: "候选论文上限",
+  maxSources: "单路候选证据上限",
+  complexTargetEvidence: "复杂问题目标证据数",
+  maxEvidenceGroups: "最终证据组安全上限",
+  maxContextChars: "最终证据上下文字符上限",
+  minimumEvidence: "最低证据数量门槛",
   maxRetrievalRounds: "最大检索轮次",
   maxActionRounds: "最大编排轮次",
   searchLimitPerSource: "每来源补充数量",
@@ -851,7 +854,7 @@ export default function SettingsWorkspace() {
               </>
             ) : null}
 
-            {!isLoading && activeTab === "research" ? renderEnvSections("01", ["translation", "literature", "research_budget", "orchestration", "chunking", "ranking", "graph"], "translation") : null}
+            {!isLoading && activeTab === "research" ? renderEnvSections("01", ["translation", "literature", "candidate_budget", "evidence_budget", "orchestration", "chunking", "ranking", "graph"], "translation") : null}
 
             {!isLoading && activeTab === "environment" ? (
               <>

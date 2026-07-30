@@ -38,6 +38,23 @@ class PublicRuntimeConfigTest(unittest.TestCase):
         self.assertTrue(integrations["mineru"]["configured"])
         self.assertTrue(integrations["tencent_translation"]["configured"])
 
+    def test_snapshot_distinguishes_candidate_target_and_final_limit(self) -> None:
+        with patch(
+            "app.services.runtime_config.settings.research_agent_max_sources",
+            10,
+        ), patch(
+            "app.services.runtime_config.settings.rag_complex_target_evidence",
+            7,
+        ), patch(
+            "app.services.runtime_config.settings.research_agent_max_evidence_groups",
+            12,
+        ):
+            research = get_public_runtime_config()["research"]
+
+        self.assertEqual(research["maxSources"], 10)
+        self.assertEqual(research["complexTargetEvidence"], 7)
+        self.assertEqual(research["maxEvidenceGroups"], 12)
+
 
 if __name__ == "__main__":
     unittest.main()

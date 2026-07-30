@@ -61,3 +61,45 @@ def test_unknown_and_invalid_values_are_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="日志级别"):
         store.update({"LOG_LEVEL": "VERBOSE"})
 
+
+def test_evidence_budget_fields_expose_distinct_semantics(tmp_path: Path) -> None:
+    payload = EnvConfigStore(tmp_path / ".env").get_public_config()
+    fields = {
+        item["key"]: item
+        for group in payload["groups"]
+        for item in group["fields"]
+    }
+
+    assert fields["RESEARCH_AGENT_MAX_SOURCES"]["label"] == "单路候选证据上限"
+    assert "不是最终回答的目标证据数" in fields["RESEARCH_AGENT_MAX_SOURCES"]["description"]
+    assert fields["RAG_COMPLEX_TARGET_EVIDENCE"]["label"] == "复杂问题目标证据数"
+    assert "不保证取满" in fields["RAG_COMPLEX_TARGET_EVIDENCE"]["description"]
+    assert (
+        fields["RESEARCH_AGENT_MAX_EVIDENCE_GROUPS"]["label"]
+        == "最终证据组安全上限"
+    )
+
+
+def test_evidence_budget_relationships_are_validated_before_persistence(
+    tmp_path: Path,
+) -> None:
+    env_path = tmp_path / ".env"
+    store = EnvConfigStore(env_path)
+
+    with pytest.raises(ValueError, match="复杂问题目标证据数不能大于"):
+        store.update(
+            {
+                "RAG_COMPLEX_TARGET_EVIDENCE": 13,
+                "RESEARCH_AGENT_MAX_EVIDENCE_GROUPS": 12,
+            }
+        )
+
+    with pytest.raises(ValueError, match="最低证据数量门槛不能大于"):
+        store.update(
+            {
+                "ORCHESTRATOR_MIN_EVIDENCE": 13,
+                "RESEARCH_AGENT_MAX_EVIDENCE_GROUPS": 12,
+            }
+        )
+
+    assert not env_path.exists()

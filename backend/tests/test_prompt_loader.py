@@ -22,6 +22,8 @@ def test_load_prompt_reads_utf8_resource() -> None:
 
     assert "知识库证据" in prompt
     assert "{{evidence}}" in prompt
+    assert "不以寒暄、确认收到、任务复述、输入摘要、处理过程" in prompt
+    assert "首句必须直接提供结论、判断或有信息量的结构概括" in prompt
 
 
 def test_render_prompt_replaces_declared_values() -> None:

@@ -32,6 +32,8 @@ def get_public_runtime_config() -> dict[str, Any]:
         "research": {
             "maxPapers": settings.research_agent_max_papers,
             "maxSources": settings.research_agent_max_sources,
+            "complexTargetEvidence": settings.rag_complex_target_evidence,
+            "maxEvidenceGroups": settings.research_agent_max_evidence_groups,
             "maxContextChars": settings.research_agent_max_context_chars,
             "requestTimeoutSeconds": settings.research_agent_request_timeout,
             "minimumEvidence": settings.orchestrator_min_evidence,

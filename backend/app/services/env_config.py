@@ -54,11 +54,13 @@ FIELDS = (
     EnvFieldSpec("RAG_LOCAL_EMBEDDING_MODEL", "本地 Embedding 模型", "integrations", "text", "rag_local_embedding_model", "留空表示不指定本地模型。"),
     EnvFieldSpec("RAG_LOCAL_EMBEDDING_PROTOCOL", "本地 Embedding 协议", "integrations", "choice", "rag_local_embedding_protocol", "本地向量服务协议。", options=("ollama", "openai_compatible")),
     EnvFieldSpec("RAG_LOCAL_EMBEDDING_API_KEY", "本地 Embedding API Key", "integrations", "secret", "rag_local_embedding_api_key", "本地服务无需鉴权时可留空。"),
-    EnvFieldSpec("RESEARCH_AGENT_MAX_PAPERS", "最大候选论文数", "research", "integer", "research_agent_max_papers", "单次研究可纳入的候选论文上限。", 1, 1000),
-    EnvFieldSpec("RESEARCH_AGENT_MAX_SOURCES", "最大证据来源数", "research", "integer", "research_agent_max_sources", "单次回答最多使用的证据来源。", 1, 50),
-    EnvFieldSpec("RESEARCH_AGENT_MAX_CONTEXT_CHARS", "最大上下文字符数", "research", "integer", "research_agent_max_context_chars", "发送给模型的证据上下文预算。", 1000, 200000),
+    EnvFieldSpec("RESEARCH_AGENT_MAX_PAPERS", "候选论文上限", "research", "integer", "research_agent_max_papers", "单次研究可纳入候选池的论文数量上限。", 1, 1000),
+    EnvFieldSpec("RESEARCH_AGENT_MAX_SOURCES", "单路候选证据上限", "research", "integer", "research_agent_max_sources", "每次检索调用最多保留的候选证据组数；无结构化要求的简单回答也以此为最终上限。复杂问题可执行多路检索，因此它不是最终回答的目标证据数。", 1, 50),
+    EnvFieldSpec("RAG_COMPLEX_TARGET_EVIDENCE", "复杂问题目标证据数", "research", "integer", "rag_complex_target_evidence", "复杂问题最终选择器期望保留的证据组数；这是目标值，不保证取满，并受有效候选和最终证据组上限约束。", 1, 50),
+    EnvFieldSpec("RESEARCH_AGENT_MAX_EVIDENCE_GROUPS", "最终证据组安全上限", "research", "integer", "research_agent_max_evidence_groups", "最终送入回答生成阶段的逻辑证据组上限；连续结构片段按一个证据组计算。", 1, 50),
+    EnvFieldSpec("RESEARCH_AGENT_MAX_CONTEXT_CHARS", "最终证据上下文字符上限", "research", "integer", "research_agent_max_context_chars", "最终发送给生成模型的证据上下文字符预算。", 1000, 200000),
     EnvFieldSpec("RESEARCH_AGENT_REQUEST_TIMEOUT", "研究请求超时（秒）", "research", "integer", "research_agent_request_timeout", "研究流程的模型请求超时。", 5, 600),
-    EnvFieldSpec("ORCHESTRATOR_MIN_EVIDENCE", "最少证据数", "research", "integer", "orchestrator_min_evidence", "满足回答要求的最少证据数量。", 1, 20),
+    EnvFieldSpec("ORCHESTRATOR_MIN_EVIDENCE", "最低证据数量门槛", "research", "integer", "orchestrator_min_evidence", "证据充分性检查使用的最低数量门槛；达到该数量不代表语义覆盖已经充分。", 1, 20),
     EnvFieldSpec("ORCHESTRATOR_MAX_RETRIEVAL_ROUNDS", "最大检索轮次", "research", "integer", "orchestrator_max_retrieval_rounds", "编排器允许的补充检索轮次。", 1, 3),
     EnvFieldSpec("ORCHESTRATOR_MAX_ACTION_ROUNDS", "最大动作轮次", "research", "integer", "orchestrator_max_action_rounds", "单次任务的工具动作上限。", 1, 20),
     EnvFieldSpec("ORCHESTRATOR_SEARCH_LIMIT_PER_SOURCE", "单来源检索上限", "research", "integer", "orchestrator_search_limit_per_source", "每个检索源返回的候选数。", 1, 20),
@@ -282,6 +284,11 @@ class EnvConfigStore:
             raise ValueError("分块重叠 Token 必须小于最大分块 Token")
         if float(value("RAG_BM25_WEIGHT")) + float(value("RAG_VECTOR_WEIGHT")) <= 0:
             raise ValueError("BM25 权重和向量权重不能同时为 0")
+        maximum_evidence_groups = int(value("RESEARCH_AGENT_MAX_EVIDENCE_GROUPS"))
+        if int(value("RAG_COMPLEX_TARGET_EVIDENCE")) > maximum_evidence_groups:
+            raise ValueError("复杂问题目标证据数不能大于最终证据组安全上限")
+        if int(value("ORCHESTRATOR_MIN_EVIDENCE")) > maximum_evidence_groups:
+            raise ValueError("最低证据数量门槛不能大于最终证据组安全上限")
 
     def _read_values(self) -> dict[str, str]:
         if not self.env_path.exists():
