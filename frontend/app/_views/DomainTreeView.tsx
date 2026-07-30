@@ -301,7 +301,7 @@ const ACTION_LABELS: Record<DomainTreeJobAction, string> = {
 const ACTION_BUTTON_LABELS: Record<DomainTreeAction, string> = {
   revise: "应用修改并更新领域树",
   rebuild: "重新生成领域树",
-  keep: "保留结构并刷新结果",
+  keep: "保留并刷新",
 };
 
 const ACTION_DESCRIPTIONS: Record<DomainTreeAction, string> = {
