@@ -123,6 +123,10 @@ class Settings:
         0.0,
         float(os.getenv("DOMAIN_TREE_RETRY_BASE_DELAY_SECONDS", "2")),
     )
+    domain_tree_request_timeout_seconds = max(
+        5,
+        min(int(os.getenv("DOMAIN_TREE_REQUEST_TIMEOUT_SECONDS", "60")), 600),
+    )
     domain_tree_json_output = os.getenv(
         "DOMAIN_TREE_JSON_OUTPUT",
         "true",

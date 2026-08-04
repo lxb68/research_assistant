@@ -685,7 +685,18 @@ export default function DatasetDownloadPage({
         }}
       />
 
-      <Container maxWidth="lg" sx={{ position: "relative", zIndex: 1, pt: "32px", pb: { xs: 4, md: 7 } }}>
+      <Container
+        disableGutters
+        maxWidth={false}
+        sx={{
+          width: "calc(100% - var(--dataset-center-inline-space))",
+          maxWidth: "var(--dataset-center-content-width)",
+          position: "relative",
+          zIndex: 1,
+          pt: "32px",
+          pb: { xs: 4, md: 7 },
+        }}
+      >
         <Stack spacing={4}>
           <Paper
             component="form"

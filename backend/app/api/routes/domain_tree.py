@@ -120,6 +120,7 @@ def resume_project_semantic_extraction(
         {
             "action": "resume",
             "semantic_max_output_tokens": payload.semantic_max_output_tokens,
+            "request_timeout_seconds": payload.request_timeout_seconds,
         },
     )
 

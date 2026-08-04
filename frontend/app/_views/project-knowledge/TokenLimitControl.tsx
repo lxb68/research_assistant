@@ -5,36 +5,41 @@ import styles from "./TokenLimitControl.module.css";
 type TokenLimitControlProps = {
   domainTreeValue: string;
   semanticValue: string;
+  requestTimeoutValue: string;
   domainTreeDefault?: number;
   semanticDefault?: number;
+  requestTimeoutDefault?: number;
   upperBound?: number;
   error?: string;
   disabled?: boolean;
   onDomainTreeChange: (value: string) => void;
   onSemanticChange: (value: string) => void;
+  onRequestTimeoutChange: (value: string) => void;
 };
 
-type TokenFieldProps = {
+type NumericFieldProps = {
   id: string;
   title: string;
-  description: string;
   value: string;
   defaultValue?: number;
+  minimum?: number;
   upperBound?: number;
+  unit: string;
   disabled: boolean;
   onChange: (value: string) => void;
 };
 
-function TokenField({
+function NumericField({
   id,
   title,
-  description,
   value,
   defaultValue,
+  minimum = 1,
   upperBound,
+  unit,
   disabled,
   onChange,
-}: TokenFieldProps) {
+}: NumericFieldProps) {
   const hasOverride = value.trim().length > 0;
   return (
     <label
@@ -47,12 +52,11 @@ function TokenField({
           {hasOverride ? `本次 ${value}` : `默认 ${defaultValue ?? "加载中"}`}
         </small>
       </span>
-      <span className={styles.description}>{description}</span>
       <span className={styles.inputShell}>
         <input
           id={id}
           type="number"
-          min={1}
+          min={minimum}
           max={upperBound}
           step={1}
           inputMode="numeric"
@@ -61,63 +65,74 @@ function TokenField({
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
         />
-        <span aria-hidden="true">tokens</span>
+        <span aria-hidden="true">{unit}</span>
       </span>
     </label>
   );
 }
 
-/** 独立呈现领域树两个模型阶段的输出预算，避免全局表单样式相互覆盖。 */
+/** 独立呈现领域树任务的模型输出与等待预算，避免全局表单样式相互覆盖。 */
 export function TokenLimitControl({
   domainTreeValue,
   semanticValue,
+  requestTimeoutValue,
   domainTreeDefault,
   semanticDefault,
+  requestTimeoutDefault,
   upperBound,
   error = "",
   disabled = false,
   onDomainTreeChange,
   onSemanticChange,
+  onRequestTimeoutChange,
 }: TokenLimitControlProps) {
   return (
     <section className={styles.panel} aria-labelledby="domain-tree-token-limit-title">
       <header className={styles.header}>
-        <div>
-          <span className={styles.kicker}>模型预算</span>
-          <h3 id="domain-tree-token-limit-title">输出 Token 上限</h3>
-        </div>
+        <h3 id="domain-tree-token-limit-title" className={styles.kicker}>模型预算</h3>
         <p>
-          留空时使用后端默认值。提高上限可以降低长 JSON 被截断或推理后正文为空的概率，
-          但单次请求可能更慢、费用更高。
+          输出上限控制模型可生成的内容长度；请求超时控制单次等待模型响应的最长时间。
+          提高预算可减少长 JSON 被截断或慢响应失败，但任务可能更久、费用更高。
         </p>
       </header>
 
       <div className={styles.grid}>
-        <TokenField
+        <NumericField
           id="domain-tree-max-output-tokens"
           title="领域树生成"
-          description="控制分类树 JSON 的单次最大输出，标题数量较多时可适当提高。"
           value={domainTreeValue}
           defaultValue={domainTreeDefault}
           upperBound={upperBound}
+          unit="tokens"
           disabled={disabled}
           onChange={onDomainTreeChange}
         />
-        <TokenField
+        <NumericField
           id="semantic-graph-max-output-tokens"
           title="语义分块抽取"
-          description="控制每个正文分块的实体与关系 JSON；推理模型返回空正文时可适当提高。"
           value={semanticValue}
           defaultValue={semanticDefault}
           upperBound={upperBound}
+          unit="tokens"
           disabled={disabled}
           onChange={onSemanticChange}
+        />
+        <NumericField
+          id="domain-tree-request-timeout-seconds"
+          title="单次请求超时"
+          value={requestTimeoutValue}
+          defaultValue={requestTimeoutDefault}
+          minimum={5}
+          upperBound={600}
+          unit="秒"
+          disabled={disabled}
+          onChange={onRequestTimeoutChange}
         />
       </div>
 
       <footer className={styles.footer}>
         <span>单次任务设置</span>
-        <span>部署安全上限：{upperBound ?? "加载中"} tokens</span>
+        <span>安全上限：{upperBound ?? "加载中"} tokens / 600 秒</span>
       </footer>
       {error ? <div className={styles.error} role="alert">{error}</div> : null}
     </section>

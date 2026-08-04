@@ -2,6 +2,7 @@
   position: relative;
   isolation: isolate;
   display: grid;
+  container: heading-count-control / inline-size;
   gap: 16px;
   margin-top: 18px;
   overflow: hidden;
@@ -194,17 +195,19 @@
   line-height: 1.45;
 }
 
-@media (max-width: 980px) {
+@container heading-count-control (max-width: 960px) {
   .options {
     grid-template-columns: 1fr;
   }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 760px) {
   .panel {
     padding: 16px;
   }
+}
 
+@container heading-count-control (max-width: 760px) {
   .header {
     flex-direction: column;
     gap: 12px;
@@ -215,7 +218,7 @@
   }
 }
 
-@media (max-width: 480px) {
+@container heading-count-control (max-width: 520px) {
   .summary {
     display: grid;
     width: 100%;

@@ -8,6 +8,7 @@
     "frontend:build": "npm --prefix frontend run build",
     "frontend:start": "npm --prefix frontend run start",
     "frontend:lint": "npm --prefix frontend run lint",
+    "frontend:test:responsive": "npm --prefix frontend run test:responsive",
     "backend:dev": "python -m uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 4000",
     "backend:start": "python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 4000"
   }

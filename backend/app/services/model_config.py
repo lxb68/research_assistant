@@ -182,6 +182,7 @@ class ModelConfigStore:
             "hasApiKey": bool(runtime["api_key"]),
             "secretStorage": self._secret_storage(saved=self.load_saved(), runtime=runtime),
             "allowHeuristicFallback": runtime["allow_heuristic_fallback"],
+            "domainTreeRequestTimeoutSeconds": settings.domain_tree_request_timeout_seconds,
             "domainTreeMaxOutputTokens": settings.domain_tree_max_output_tokens,
             "semanticGraphMaxOutputTokens": settings.semantic_graph_max_output_tokens,
             "outputTokensUpperBound": settings.model_output_tokens_upper_bound,

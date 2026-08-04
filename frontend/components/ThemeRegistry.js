@@ -8,12 +8,16 @@ import { createTheme, ThemeProvider } from "@mui/material/styles";
 import { useServerInsertedHTML } from "next/navigation";
 import { useState } from "react";
 import { APP_THEME_STORAGE_KEY } from "@/lib/theme";
+import { RESPONSIVE_BREAKPOINTS } from "@/lib/responsive";
 
 /*
  * 让 MUI 的状态层与应用 data-theme 使用同一套明暗色来源。
  * 禁用默认 ripple，避免其 currentColor 蒙层在深浅主题切换时形成白色覆盖块。
  */
 const appTheme = createTheme({
+  breakpoints: {
+    values: RESPONSIVE_BREAKPOINTS,
+  },
   cssVariables: {
     colorSchemeSelector: '[data-theme="%s"]',
     cssVarPrefix: "ra",

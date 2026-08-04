@@ -78,6 +78,7 @@ class DomainTreeGenerateOptions(BaseModel):
         ge=1,
         le=settings.model_output_tokens_upper_bound,
     )
+    request_timeout_seconds: int | None = Field(None, ge=5, le=600)
     all_toc: str | None = None
     new_toc: str | None = None
     delete_toc: str | None = None
@@ -94,6 +95,7 @@ class DomainTreeResumeOptions(BaseModel):
         ge=1,
         le=settings.model_output_tokens_upper_bound,
     )
+    request_timeout_seconds: int | None = Field(None, ge=5, le=600)
 
 
 class LiteratureMapBuildOptions(BaseModel):

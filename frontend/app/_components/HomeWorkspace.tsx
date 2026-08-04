@@ -2,13 +2,15 @@
 
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import DatasetCenterView, { DatasetCenterTab } from "@/app/_views/DatasetCenterView";
 import DomainTreePage from "@/app/_views/DomainTreeView";
 import SettingsWorkspace from "@/app/_views/SettingsView";
 import HeroSection from "@/home/HeroSection";
+import ProductShowcase from "@/home/ProductShowcase";
 import { useProjects } from "@/app/_components/ProjectProvider";
+import { WorkspaceViewPanel } from "@/app/_components/WorkspaceViewPanel";
 
 type WorkspaceView = "home" | "datasets" | "domain-tree" | "settings";
 
@@ -36,6 +38,24 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
   const [projectMessage, setProjectMessage] = useState("");
   const [datasetTab, setDatasetTab] = useState<DatasetCenterTab>(initialView === "browse" ? "library" : "download");
   const activeView = manualView ?? parseWorkspaceView(initialView);
+  const activeTabRef = useRef<HTMLButtonElement | null>(null);
+  const [visitedViews, setVisitedViews] = useState<Set<WorkspaceView>>(
+    () => new Set<WorkspaceView>(["home", activeView]),
+  );
+
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeView]);
+
+  function showView(view: WorkspaceView) {
+    setVisitedViews((current) => {
+      if (current.has(view)) return current;
+      const next = new Set(current);
+      next.add(view);
+      return next;
+    });
+    setManualView(view);
+  }
 
   async function handleCreateProject() {
     if (!projectName.trim()) return;
@@ -43,7 +63,7 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
       await createProject(projectName.trim());
       setProjectName("");
       setCreateDialogOpen(false);
-      setManualView("domain-tree");
+      showView("domain-tree");
     } catch (error) {
       setProjectMessage(error instanceof Error ? error.message : "创建项目失败");
     }
@@ -62,7 +82,7 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
     <div className="workspace-shell">
       {activeView !== "home" && (
         <header className="workspace-topbar">
-          <button type="button" className="workspace-brand" onClick={() => setManualView("home")}>
+          <button type="button" className="workspace-brand" onClick={() => showView("home")}>
             <span className="workspace-logo">R</span>
             <span>Research Agent</span>
           </button>
@@ -74,9 +94,10 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
             {navItems.map((item) => (
               <button
                 key={item.id}
+                ref={activeView === item.id ? activeTabRef : undefined}
                 type="button"
                 className={`workspace-tab ${activeView === item.id ? "workspace-tab-active" : ""}`}
-                onClick={() => setManualView(item.id)}
+                onClick={() => showView(item.id)}
               >
                 {item.label}
               </button>
@@ -86,21 +107,18 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
       )}
 
       <div className="workspace-view-stack">
-        <div
-          className={`workspace-view-panel ${
-            activeView === "home" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
-          }`}
-        >
+        <WorkspaceViewPanel isActive={activeView === "home"} label="首页">
           <main className="home-page">
             <HeroSection
               onOpenResearchChat={() => router.push("/research-chat")}
               onOpenDatasets={() => {
                 setDatasetTab("download");
-                setManualView("datasets");
+                showView("datasets");
               }}
-              onOpenDomainTree={() => setManualView("domain-tree")}
-              onOpenSettings={() => setManualView("settings")}
+              onOpenDomainTree={() => showView("domain-tree")}
+              onOpenSettings={() => showView("settings")}
             />
+            <ProductShowcase />
 
             {createDialogOpen && (
               <section className="home-notice" role="status">
@@ -120,39 +138,33 @@ export default function HomeWorkspace({ initialView }: HomeWorkspaceProps) {
               </section>
             )}
           </main>
-        </div>
+        </WorkspaceViewPanel>
 
-        <div
-          className={`workspace-view-panel ${
-            activeView === "datasets" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
-          }`}
-        >
-          <DatasetCenterView
-            key={datasetTab}
-            initialTab={datasetTab}
-            isActiveView={activeView === "datasets"}
-          />
-        </div>
+        {visitedViews.has("datasets") || activeView === "datasets" ? (
+          <WorkspaceViewPanel isActive={activeView === "datasets"} label="数据集中心">
+            <DatasetCenterView
+              key={datasetTab}
+              initialTab={datasetTab}
+              isActiveView={activeView === "datasets"}
+            />
+          </WorkspaceViewPanel>
+        ) : null}
 
-        <div
-          className={`workspace-view-panel ${
-            activeView === "domain-tree" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
-          }`}
-        >
-          <DomainTreePage
-            embedded
-            isActiveView={activeView === "domain-tree"}
-            onOpenSettings={() => setManualView("settings")}
-          />
-        </div>
+        {visitedViews.has("domain-tree") || activeView === "domain-tree" ? (
+          <WorkspaceViewPanel isActive={activeView === "domain-tree"} label="项目知识空间">
+            <DomainTreePage
+              embedded
+              isActiveView={activeView === "domain-tree"}
+              onOpenSettings={() => showView("settings")}
+            />
+          </WorkspaceViewPanel>
+        ) : null}
 
-        <div
-          className={`workspace-view-panel ${
-            activeView === "settings" ? "workspace-view-panel-active" : "workspace-view-panel-hidden"
-          }`}
-        >
-          <SettingsWorkspace />
-        </div>
+        {visitedViews.has("settings") || activeView === "settings" ? (
+          <WorkspaceViewPanel isActive={activeView === "settings"} label="设置">
+            <SettingsWorkspace />
+          </WorkspaceViewPanel>
+        ) : null}
       </div>
     </div>
   );

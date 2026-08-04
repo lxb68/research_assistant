@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:responsive": "node --test lib/responsive-contract.test.mjs"
   },
   "dependencies": {
     "@emotion/cache": "^11.14.0",

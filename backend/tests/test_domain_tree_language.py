@@ -169,6 +169,16 @@ class DomainTreeLanguageTest(unittest.TestCase):
         self.assertEqual(len(constrained), 50)
         self.assertEqual(len(constrained[0]["child"]), 50)
 
+    def test_request_timeout_accepts_task_value_within_safe_range(self) -> None:
+        """单次任务超时应允许 60 秒，并在 API 边界拒绝越界值。"""
+        options = DomainTreeGenerateOptions(request_timeout_seconds=60)
+
+        self.assertEqual(options.request_timeout_seconds, 60)
+        with self.assertRaises(ValueError):
+            DomainTreeGenerateOptions(request_timeout_seconds=4)
+        with self.assertRaises(ValueError):
+            DomainTreeGenerateOptions(request_timeout_seconds=601)
+
     def test_domain_tree_snapshot_is_visible_before_graph_is_ready(self) -> None:
         """领域树快照应先可读取，并隐藏上一轮可能残留的知识图谱。"""
         document = SourceDocument("paper", "Paper", "", [], None, None, [])

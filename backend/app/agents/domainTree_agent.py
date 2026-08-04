@@ -276,6 +276,7 @@ class DomainTreeAgent:
         secondary_heading_count: int | None = None,
         max_output_tokens: int | None = None,
         semantic_max_output_tokens: int | None = None,
+        request_timeout_seconds: int | None = None,
         delete_toc: str | None = None,
         project: dict[str, Any] | None = None,
         cancel_event: threading.Event | None = None,
@@ -294,6 +295,7 @@ class DomainTreeAgent:
             secondary_heading_count=secondary_heading_count,
             max_output_tokens=max_output_tokens,
             semantic_max_output_tokens=semantic_max_output_tokens,
+            request_timeout_seconds=request_timeout_seconds,
             delete_toc=delete_toc,
             project=project,
             cancel_event=cancel_event,
@@ -313,6 +315,7 @@ class DomainTreeAgent:
         secondary_heading_count: int | None = None,
         max_output_tokens: int | None = None,
         semantic_max_output_tokens: int | None = None,
+        request_timeout_seconds: int | None = None,
         delete_toc: str | None = None,
         project: dict[str, Any] | None = None,
         cancel_event: threading.Event | None = None,
@@ -331,6 +334,7 @@ class DomainTreeAgent:
             semantic_max_output_tokens,
             settings.semantic_graph_max_output_tokens,
         )
+        request_timeout = self._resolve_request_timeout(request_timeout_seconds)
 
         def report(**update: Any) -> None:
             if progress_callback:
@@ -431,6 +435,7 @@ class DomainTreeAgent:
             language=language,
             model=model,
             max_output_tokens=domain_output_limit,
+            request_timeout_seconds=request_timeout,
             cancel_event=cancel_event,
             progress_callback=progress_callback,
         )
@@ -486,6 +491,7 @@ class DomainTreeAgent:
                 cancel_event=cancel_event,
                 progress_callback=progress_callback,
                 max_output_tokens=semantic_output_limit,
+                request_timeout_seconds=request_timeout,
             )
         except DomainTreeGenerationCancelled:
             self._set_graph_status(normalized_project_id, "cancelled")
@@ -541,6 +547,7 @@ class DomainTreeAgent:
         *,
         model: Any | None = None,
         semantic_max_output_tokens: int | None = None,
+        request_timeout_seconds: int | None = None,
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         metric_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -583,6 +590,7 @@ class DomainTreeAgent:
             semantic_max_output_tokens,
             settings.semantic_graph_max_output_tokens,
         )
+        request_timeout = self._resolve_request_timeout(request_timeout_seconds)
 
         def report(**update: Any) -> None:
             if progress_callback:
@@ -608,6 +616,7 @@ class DomainTreeAgent:
                 cancel_event=cancel_event,
                 progress_callback=progress_callback,
                 max_output_tokens=semantic_output_limit,
+                request_timeout_seconds=request_timeout,
             )
             extraction = graph.get("extraction") if isinstance(graph.get("extraction"), dict) else {}
             self._validate_knowledge_graph_quality(extraction)
@@ -991,6 +1000,7 @@ class DomainTreeAgent:
         language: str,
         model: Any | None,
         max_output_tokens: int | None = None,
+        request_timeout_seconds: int | None = None,
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
@@ -1004,6 +1014,7 @@ class DomainTreeAgent:
                 language=language,
                 model=runtime,
                 max_output_tokens=max_output_tokens,
+                request_timeout_seconds=request_timeout_seconds,
                 cancel_event=cancel_event,
                 progress_callback=progress_callback,
             )
@@ -1055,6 +1066,7 @@ class DomainTreeAgent:
         language: str,
         model: Any | None,
         max_output_tokens: int | None = None,
+        request_timeout_seconds: int | None = None,
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> str:
@@ -1087,13 +1099,14 @@ class DomainTreeAgent:
             {"role": "user", "content": prompt},
         ]
 
+        request_timeout = self._resolve_request_timeout(request_timeout_seconds)
         started_at = time.perf_counter()
         logger.info(
             "领域树模型请求开始：provider=%s model=%s prompt_chars=%s timeout_seconds=%s",
             runtime.get("provider", ""),
             runtime.get("model", ""),
             len(prompt),
-            settings.request_timeout,
+            request_timeout,
         )
         try:
             attempts = 0
@@ -1107,7 +1120,7 @@ class DomainTreeAgent:
                         runtime,
                         messages,
                         temperature=0.2,
-                        timeout=settings.request_timeout,
+                        timeout=request_timeout,
                         response_format=(
                             {"type": "json_object"}
                             if settings.domain_tree_json_output
@@ -1255,6 +1268,12 @@ class DomainTreeAgent:
         """应用任务级 Token 设置，并受部署级安全上限约束。"""
         requested = default if value is None else int(value)
         return max(1, min(settings.model_output_tokens_upper_bound, requested))
+
+    @staticmethod
+    def _resolve_request_timeout(value: int | None) -> int:
+        """应用任务级模型请求超时，并限制在接口允许的安全范围内。"""
+        requested = settings.domain_tree_request_timeout_seconds if value is None else int(value)
+        return max(5, min(600, requested))
 
     def extract_json_from_llm_output(self, output: str | None) -> list[dict[str, Any]] | None:
         """从大模型文本响应中提取 JSON 对象。"""
@@ -1571,6 +1590,7 @@ class DomainTreeAgent:
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         max_output_tokens: int | None = None,
+        request_timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         """构建领域结构图，并合并全文实体、证据和引用关系。"""
         del catalog_text, project
@@ -1659,6 +1679,7 @@ class DomainTreeAgent:
                 max_output_tokens,
                 settings.semantic_graph_max_output_tokens,
             ),
+            request_timeout_seconds=self._resolve_request_timeout(request_timeout_seconds),
         ).extract(
             SemanticSourceDocument(
                 record_id=document.record_id,

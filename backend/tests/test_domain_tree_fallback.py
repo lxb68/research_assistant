@@ -138,11 +138,13 @@ class DomainTreeFallbackTest(unittest.TestCase):
                         language="English",
                         model=None,
                         max_output_tokens=8192,
+                        request_timeout_seconds=60,
                     )
 
         self.assertEqual(raised.exception.reason, "model_output_truncated")
         self.assertIn("Token 上限", str(raised.exception))
         self.assertEqual(chat.call_args.kwargs["max_output_tokens"], 8192)
+        self.assertEqual(chat.call_args.kwargs["timeout"], 60)
 
 
 if __name__ == "__main__":

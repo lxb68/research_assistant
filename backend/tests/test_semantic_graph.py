@@ -26,6 +26,27 @@ from app.agents.domainTree_agent import DomainTreeAgent, SourceDocument
 class SemanticGraphExtractorTest(unittest.TestCase):
     """覆盖语义抽取主链路中不依赖真实模型服务的行为。"""
 
+    def test_task_request_timeout_is_forwarded_to_chunk_model(self) -> None:
+        """页面提交的任务级超时必须传到语义分块模型调用。"""
+        captured: dict[str, object] = {}
+
+        def fake_chat(*args: object, **kwargs: object) -> str:
+            captured.update(kwargs)
+            return '{"entities":[],"relations":[]}'
+
+        extractor = SemanticGraphExtractor(
+            {"model": "test"},
+            chat_fn=fake_chat,
+            request_timeout_seconds=75,
+        )
+        extractor._call_chunk_model(
+            [{"role": "user", "content": "抽取实体"}],
+            SemanticSourceDocument("paper", "Paper", None),
+            TextChunk(0, "Method", "A method description.", 1),
+        )
+
+        self.assertEqual(captured["timeout"], 75)
+
     def test_extracts_entities_relations_evidence_and_citations(self) -> None:
         """实体关系必须携带可回定位证据，引用必须连接正文标记。"""
         markdown = """# Example Paper

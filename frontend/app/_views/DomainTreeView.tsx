@@ -175,6 +175,7 @@ type ModelConfigStatus = {
   model?: string;
   baseUrl?: string;
   maskedApiKey?: string;
+  domainTreeRequestTimeoutSeconds?: number;
   domainTreeMaxOutputTokens?: number;
   semanticGraphMaxOutputTokens?: number;
   outputTokensUpperBound?: number;
@@ -289,6 +290,9 @@ const RELATION_TYPE_LABELS: Record<string, string> = {
 };
 
 const EXCLUDED_CHUNK_CATEGORIES = new Set(["references", "front_matter", "back_matter"]);
+const DEFAULT_DOMAIN_TREE_REQUEST_TIMEOUT_SECONDS = 60;
+const MIN_DOMAIN_TREE_REQUEST_TIMEOUT_SECONDS = 5;
+const MAX_DOMAIN_TREE_REQUEST_TIMEOUT_SECONDS = 600;
 
 const ACTION_LABELS: Record<DomainTreeJobAction, string> = {
   revise: "修改领域树",
@@ -515,6 +519,9 @@ function DomainTreeProjectPage({
   const [secondaryHeadingCountInput, setSecondaryHeadingCountInput] = useState<string | null>(null);
   const [domainTreeTokenInput, setDomainTreeTokenInput] = useState("");
   const [semanticTokenInput, setSemanticTokenInput] = useState("");
+  const [requestTimeoutInput, setRequestTimeoutInput] = useState(
+    String(DEFAULT_DOMAIN_TREE_REQUEST_TIMEOUT_SECONDS),
+  );
   const [viewMode, setViewMode] = useState<DomainTreeViewMode>("project");
   const [selectedSecondaryKey, setSelectedSecondaryKey] = useState("");
   const [selectedSecondaryLabel, setSelectedSecondaryLabel] = useState("");
@@ -553,6 +560,7 @@ function DomainTreeProjectPage({
       : "";
   const domainTreeTokenLimit = Number(domainTreeTokenInput);
   const semanticTokenLimit = Number(semanticTokenInput);
+  const requestTimeoutSeconds = Number(requestTimeoutInput);
   const tokenUpperBound = modelStatus?.outputTokensUpperBound;
   const semanticTokenLimitError = semanticTokenInput
     && (
@@ -562,6 +570,14 @@ function DomainTreeProjectPage({
     )
     ? `语义分块输出 Token 必须是 1–${tokenUpperBound ?? "后端上限"} 的整数`
     : "";
+  const requestTimeoutError = requestTimeoutInput
+    && (
+      !Number.isInteger(requestTimeoutSeconds)
+      || requestTimeoutSeconds < MIN_DOMAIN_TREE_REQUEST_TIMEOUT_SECONDS
+      || requestTimeoutSeconds > MAX_DOMAIN_TREE_REQUEST_TIMEOUT_SECONDS
+    )
+    ? `单次请求超时必须是 ${MIN_DOMAIN_TREE_REQUEST_TIMEOUT_SECONDS}–${MAX_DOMAIN_TREE_REQUEST_TIMEOUT_SECONDS} 秒的整数`
+    : "";
   const tokenLimitError = domainTreeTokenInput
     && (
       !Number.isInteger(domainTreeTokenLimit)
@@ -569,7 +585,7 @@ function DomainTreeProjectPage({
       || (tokenUpperBound !== undefined && domainTreeTokenLimit > tokenUpperBound)
     )
     ? `领域树输出 Token 必须是 1–${tokenUpperBound ?? "后端上限"} 的整数`
-    : semanticTokenLimitError;
+    : semanticTokenLimitError || requestTimeoutError;
   const semanticResumeAvailable = result?.graphStatus === "failed"
     || Boolean(activeJob?.progressDetails?.manualResumeAvailable);
 
@@ -1262,6 +1278,7 @@ function DomainTreeProjectPage({
           secondary_heading_count: secondaryHeadingCount,
           max_output_tokens: domainTreeTokenInput ? domainTreeTokenLimit : undefined,
           semantic_max_output_tokens: semanticTokenInput ? semanticTokenLimit : undefined,
+          request_timeout_seconds: requestTimeoutInput ? requestTimeoutSeconds : undefined,
         }),
         },
       );
@@ -1311,8 +1328,9 @@ function DomainTreeProjectPage({
     if (isGenerating || !modelStatus?.configured) {
       return;
     }
-    if (semanticTokenLimitError) {
-      setError(semanticTokenLimitError);
+    const resumeBudgetError = semanticTokenLimitError || requestTimeoutError;
+    if (resumeBudgetError) {
+      setError(resumeBudgetError);
       return;
     }
     setIsGenerating(true);
@@ -1328,6 +1346,7 @@ function DomainTreeProjectPage({
           },
           body: JSON.stringify({
             semantic_max_output_tokens: semanticTokenInput ? semanticTokenLimit : undefined,
+            request_timeout_seconds: requestTimeoutInput ? requestTimeoutSeconds : undefined,
           }),
         },
       );
@@ -1938,8 +1957,11 @@ function DomainTreeProjectPage({
             <TokenLimitControl
               domainTreeValue={domainTreeTokenInput}
               semanticValue={semanticTokenInput}
+              requestTimeoutValue={requestTimeoutInput}
               domainTreeDefault={modelStatus?.domainTreeMaxOutputTokens}
               semanticDefault={modelStatus?.semanticGraphMaxOutputTokens}
+              requestTimeoutDefault={modelStatus?.domainTreeRequestTimeoutSeconds
+                ?? DEFAULT_DOMAIN_TREE_REQUEST_TIMEOUT_SECONDS}
               upperBound={tokenUpperBound}
               error={tokenLimitError}
               disabled={isGenerating}
@@ -1949,6 +1971,10 @@ function DomainTreeProjectPage({
               }}
               onSemanticChange={(value) => {
                 setSemanticTokenInput(value);
+                setError("");
+              }}
+              onRequestTimeoutChange={(value) => {
+                setRequestTimeoutInput(value);
                 setError("");
               }}
             />
@@ -2017,7 +2043,7 @@ function DomainTreeProjectPage({
             <button
               type="button"
               className="domain-tree-inline-button"
-              disabled={!modelStatus?.configured || Boolean(semanticTokenLimitError)}
+              disabled={!modelStatus?.configured || Boolean(semanticTokenLimitError || requestTimeoutError)}
               onClick={() => void handleResumeSemanticExtraction()}
             >
               继续抽取失败分块
@@ -2103,7 +2129,7 @@ function DomainTreeProjectPage({
             <button
               type="button"
               className="domain-tree-inline-button"
-              disabled={!modelStatus?.configured || Boolean(semanticTokenLimitError)}
+              disabled={!modelStatus?.configured || Boolean(semanticTokenLimitError || requestTimeoutError)}
               onClick={() => void handleResumeSemanticExtraction()}
             >
               继续抽取失败分块

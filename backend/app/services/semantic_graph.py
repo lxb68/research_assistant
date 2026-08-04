@@ -153,6 +153,7 @@ class SemanticGraphExtractor:
         chunk_size: int = settings.semantic_graph_chunk_size,
         chunk_overlap: int = settings.semantic_graph_chunk_overlap,
         max_output_tokens: int = settings.semantic_graph_max_output_tokens,
+        request_timeout_seconds: int = settings.domain_tree_request_timeout_seconds,
         entity_type_language: str = "English",
         cache_dir: str | Path | None = None,
         max_workers: int = settings.semantic_graph_max_workers,
@@ -169,6 +170,7 @@ class SemanticGraphExtractor:
             1,
             min(settings.model_output_tokens_upper_bound, int(max_output_tokens)),
         )
+        self.request_timeout_seconds = max(5, min(600, int(request_timeout_seconds)))
         self.entity_type_language = self._normalize_entity_type_language(entity_type_language)
         self.cache_dir = Path(cache_dir).resolve() if cache_dir else None
         self.max_workers = max(1, min(int(max_workers), 16))
@@ -805,7 +807,7 @@ class SemanticGraphExtractor:
                     self.runtime,
                     messages,
                     temperature=0.0,
-                    timeout=settings.request_timeout,
+                    timeout=self.request_timeout_seconds,
                     response_format=(
                         {"type": "json_object"}
                         if settings.semantic_graph_json_output
@@ -1240,7 +1242,7 @@ class SemanticGraphExtractor:
                         self.runtime,
                         messages,
                         temperature=0.0,
-                        timeout=settings.request_timeout,
+                        timeout=self.request_timeout_seconds,
                         response_format=(
                             {"type": "json_object"}
                             if settings.semantic_graph_json_output

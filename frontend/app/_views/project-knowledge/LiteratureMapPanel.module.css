@@ -1,5 +1,6 @@
 .page {
   display: grid;
+  container: literature-map / inline-size;
   gap: 16px;
   padding: 20px;
 }
@@ -379,7 +380,7 @@
   text-align: center;
 }
 
-@media (max-width: 980px) {
+@container literature-map (max-width: 960px) {
   .header {
     grid-template-columns: 1fr;
   }
@@ -406,11 +407,13 @@
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 520px) {
   .page {
     padding: 12px;
   }
+}
 
+@container literature-map (max-width: 520px) {
   .metrics,
   .actions,
   .claimLine,
